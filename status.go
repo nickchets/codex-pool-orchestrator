@@ -1,0 +1,1527 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"html/template"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
+)
+
+// StatusData contains all the data for the status page.
+type StatusData struct {
+	GeneratedAt          time.Time                     `json:"generated_at"`
+	Uptime               time.Duration                 `json:"uptime"`
+	TotalCount           int                           `json:"total_count"`
+	CodexCount           int                           `json:"codex_count"`
+	GeminiCount          int                           `json:"gemini_count"`
+	ClaudeCount          int                           `json:"claude_count"`
+	KimiCount            int                           `json:"kimi_count"`
+	MinimaxCount         int                           `json:"minimax_count"`
+	PoolUsers            int                           `json:"pool_users,omitempty"`
+	PoolSummary          PoolDashboardSummary          `json:"pool_summary"`
+	CurrentSeat          *CurrentSeatStatus            `json:"current_seat,omitempty"`
+	ActiveSeat           *CurrentSeatStatus            `json:"active_seat,omitempty"`
+	LastUsedSeat         *CurrentSeatStatus            `json:"last_used_seat,omitempty"`
+	BestEligibleSeat     *CurrentSeatStatus            `json:"best_eligible_seat,omitempty"`
+	WorkspaceGroups      []PoolDashboardWorkspaceGroup `json:"workspace_groups"`
+	Accounts             []AccountStatus               `json:"accounts"`
+	TokenAnalytics       *TokenAnalytics               `json:"token_analytics,omitempty"`
+	PoolUtilization      []PoolUtilization             `json:"pool_utilization,omitempty"`
+	LocalOperatorEnabled bool                          `json:"-"`
+}
+
+type PoolDashboardSummary struct {
+	TotalAccounts    int                                 `json:"total_accounts"`
+	EligibleAccounts int                                 `json:"eligible_accounts"`
+	WorkspaceCount   int                                 `json:"workspace_count"`
+	NextRecoveryAt   string                              `json:"next_recovery_at,omitempty"`
+	Providers        map[string]PoolDashboardProviderSum `json:"providers,omitempty"`
+}
+
+type PoolDashboardProviderSum struct {
+	TotalAccounts            int     `json:"total_accounts"`
+	EligibleAccounts         int     `json:"eligible_accounts"`
+	TimeWeightedPrimaryPct   float64 `json:"time_weighted_primary_pct"`
+	TimeWeightedSecondaryPct float64 `json:"time_weighted_secondary_pct"`
+}
+
+type PoolDashboardWorkspaceGroup struct {
+	WorkspaceID       string   `json:"workspace_id"`
+	Provider          string   `json:"provider"`
+	SeatCount         int      `json:"seat_count"`
+	EligibleSeatCount int      `json:"eligible_seat_count"`
+	BlockedSeatCount  int      `json:"blocked_seat_count"`
+	NextRecoveryAt    string   `json:"next_recovery_at,omitempty"`
+	SeatKeys          []string `json:"seat_keys"`
+	AccountIDs        []string `json:"account_ids"`
+	Emails            []string `json:"emails,omitempty"`
+}
+
+type CurrentSeatStatus struct {
+	ID                   string  `json:"id"`
+	Email                string  `json:"email,omitempty"`
+	WorkspaceID          string  `json:"workspace_id,omitempty"`
+	SeatKey              string  `json:"seat_key,omitempty"`
+	RoutingStatus        string  `json:"routing_status,omitempty"`
+	PrimaryHeadroomPct   float64 `json:"primary_headroom_pct"`
+	SecondaryHeadroomPct float64 `json:"secondary_headroom_pct"`
+	Inflight             int64   `json:"inflight"`
+	LocalLastUsed        string  `json:"local_last_used,omitempty"`
+	ActiveSeatCount      int     `json:"active_seat_count,omitempty"`
+	Basis                string  `json:"basis"`
+}
+
+// TokenAnalytics contains capacity estimation data for the status page.
+type TokenAnalytics struct {
+	PlanCapacities []PlanCapacityView
+	TotalSamples   int64
+	ModelInfo      string
+}
+
+// PlanCapacityView is a display-friendly view of plan capacity.
+type PlanCapacityView struct {
+	PlanType                   string
+	SampleCount                int64
+	Confidence                 string
+	TotalInputTokens           int64
+	TotalOutputTokens          int64
+	TotalCachedTokens          int64
+	TotalReasoningTokens       int64
+	TotalBillableTokens        int64
+	OutputMultiplier           float64
+	EffectivePerPrimaryPct     int64
+	EffectivePerSecondaryPct   int64
+	EstimatedPrimaryCapacity   string // e.g., "~2.5M tokens"
+	EstimatedSecondaryCapacity string
+}
+
+// AccountStatus shows the status of a single account.
+type AccountStatus struct {
+	ID                 string               `json:"id"`
+	Type               string               `json:"type"`
+	PlanType           string               `json:"plan_type,omitempty"`
+	AccountID          string               `json:"account_id,omitempty"`
+	Email              string               `json:"email,omitempty"`
+	Subject            string               `json:"subject,omitempty"`
+	ChatGPTUserID      string               `json:"chatgpt_user_id,omitempty"`
+	WorkspaceID        string               `json:"workspace_id,omitempty"`
+	SeatKey            string               `json:"seat_key,omitempty"`
+	Disabled           bool                 `json:"disabled"`
+	Dead               bool                 `json:"dead"`
+	PrimaryUsed        float64              `json:"primary_used_pct"`
+	SecondaryUsed      float64              `json:"secondary_used_pct"`
+	EffectivePrimary   float64              `json:"effective_primary_pct"`
+	EffectiveSecondary float64              `json:"effective_secondary_pct"`
+	Routing            PoolDashboardRouting `json:"routing"`
+	RecoveryAt         string               `json:"recovery_at,omitempty"`
+	PrimaryResetIn     string               `json:"primary_reset_in,omitempty"`
+	SecondaryResetIn   string               `json:"secondary_reset_in,omitempty"`
+	AuthExpiresIn      string               `json:"auth_expires_in,omitempty"`
+	LocalLastUsed      string               `json:"local_last_used,omitempty"`
+	UsageObserved      string               `json:"usage_observed,omitempty"`
+	Score              float64              `json:"score"`
+	Inflight           int64                `json:"inflight"`
+	LocalTokens        int64                `json:"local_tokens"`
+}
+
+type PoolDashboardRouting struct {
+	Eligible               bool    `json:"eligible"`
+	BlockReason            string  `json:"block_reason,omitempty"`
+	PrimaryUsedPct         float64 `json:"primary_used_pct"`
+	SecondaryUsedPct       float64 `json:"secondary_used_pct"`
+	PrimaryHeadroomPct     float64 `json:"primary_headroom_pct"`
+	SecondaryHeadroomPct   float64 `json:"secondary_headroom_pct"`
+	RecoveryAt             string  `json:"recovery_at,omitempty"`
+	CodexRateLimitBypass   bool    `json:"codex_rate_limit_bypass,omitempty"`
+	PreemptiveThresholdPct float64 `json:"preemptive_threshold_pct,omitempty"`
+}
+
+type poolWorkspaceAccumulator struct {
+	WorkspaceID    string
+	Provider       string
+	SeatKeys       map[string]struct{}
+	AccountIDs     map[string]struct{}
+	Emails         map[string]struct{}
+	SeatCount      int
+	EligibleCount  int
+	BlockedCount   int
+	NextRecoveryAt time.Time
+}
+
+type currentSeatCandidate struct {
+	status   AccountStatus
+	lastUsed time.Time
+}
+
+func prefersLiveSeat(next currentSeatCandidate, best *currentSeatCandidate) bool {
+	if best == nil {
+		return true
+	}
+	if next.status.Inflight != best.status.Inflight {
+		return next.status.Inflight > best.status.Inflight
+	}
+	if next.lastUsed.IsZero() != best.lastUsed.IsZero() {
+		return !next.lastUsed.IsZero()
+	}
+	if !next.lastUsed.Equal(best.lastUsed) {
+		return next.lastUsed.After(best.lastUsed)
+	}
+	if next.status.Routing.Eligible != best.status.Routing.Eligible {
+		return next.status.Routing.Eligible
+	}
+	if next.status.Score != best.status.Score {
+		return next.status.Score > best.status.Score
+	}
+	return next.status.ID < best.status.ID
+}
+
+func prefersLastUsedSeat(next currentSeatCandidate, best *currentSeatCandidate) bool {
+	if next.lastUsed.IsZero() {
+		return false
+	}
+	if best == nil {
+		return true
+	}
+	if best.lastUsed.IsZero() {
+		return true
+	}
+	if !next.lastUsed.Equal(best.lastUsed) {
+		return next.lastUsed.After(best.lastUsed)
+	}
+	if next.status.Inflight != best.status.Inflight {
+		return next.status.Inflight > best.status.Inflight
+	}
+	if next.status.Routing.Eligible != best.status.Routing.Eligible {
+		return next.status.Routing.Eligible
+	}
+	if next.status.Score != best.status.Score {
+		return next.status.Score > best.status.Score
+	}
+	return next.status.ID < best.status.ID
+}
+
+func prefersBestEligibleSeat(next currentSeatCandidate, best *currentSeatCandidate) bool {
+	if !next.status.Routing.Eligible {
+		return false
+	}
+	if best == nil {
+		return true
+	}
+	if next.status.Score != best.status.Score {
+		return next.status.Score > best.status.Score
+	}
+	if next.status.Inflight != best.status.Inflight {
+		return next.status.Inflight > best.status.Inflight
+	}
+	if next.lastUsed.IsZero() != best.lastUsed.IsZero() {
+		return !next.lastUsed.IsZero()
+	}
+	if !next.lastUsed.Equal(best.lastUsed) {
+		return next.lastUsed.After(best.lastUsed)
+	}
+	return next.status.ID < best.status.ID
+}
+
+func currentSeatStatusFromCandidate(candidate *currentSeatCandidate, basis string, activeSeatCount int) *CurrentSeatStatus {
+	if candidate == nil {
+		return nil
+	}
+	routingStatus := "eligible"
+	if strings.TrimSpace(candidate.status.Routing.BlockReason) != "" {
+		routingStatus = strings.TrimSpace(candidate.status.Routing.BlockReason)
+	}
+	return &CurrentSeatStatus{
+		ID:                   candidate.status.ID,
+		Email:                candidate.status.Email,
+		WorkspaceID:          candidate.status.WorkspaceID,
+		SeatKey:              candidate.status.SeatKey,
+		RoutingStatus:        routingStatus,
+		PrimaryHeadroomPct:   candidate.status.Routing.PrimaryHeadroomPct,
+		SecondaryHeadroomPct: candidate.status.Routing.SecondaryHeadroomPct,
+		Inflight:             candidate.status.Inflight,
+		LocalLastUsed:        candidate.status.LocalLastUsed,
+		ActiveSeatCount:      activeSeatCount,
+		Basis:                basis,
+	}
+}
+
+func sameSeatStatus(a, b *CurrentSeatStatus) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return a.ID == b.ID && a.WorkspaceID == b.WorkspaceID && a.SeatKey == b.SeatKey
+}
+
+func firstSeatStatus(values ...*CurrentSeatStatus) *CurrentSeatStatus {
+	for _, value := range values {
+		if value != nil {
+			return value
+		}
+	}
+	return nil
+}
+
+func buildPoolDashboardRouting(routing routingState, now time.Time) PoolDashboardRouting {
+	row := PoolDashboardRouting{
+		Eligible:               routing.Eligible,
+		BlockReason:            routing.BlockReason,
+		PrimaryUsedPct:         routing.PrimaryUsed * 100,
+		SecondaryUsedPct:       routing.SecondaryUsed * 100,
+		PrimaryHeadroomPct:     routing.PrimaryHeadroom * 100,
+		SecondaryHeadroomPct:   routing.SecondaryHeadroom * 100,
+		CodexRateLimitBypass:   routing.CodexRateLimitBypass,
+		PreemptiveThresholdPct: codexPreemptiveUsedThreshold * 100,
+	}
+	if !routing.RecoveryAt.IsZero() && routing.RecoveryAt.After(now) {
+		row.RecoveryAt = routing.RecoveryAt.Format(time.RFC3339)
+	}
+	return row
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func uniqueSortedStrings(items []string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(items))
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func workspaceKeyFor(provider, workspaceID string) string {
+	return firstNonEmpty(provider, "unknown") + "|" + firstNonEmpty(workspaceID, "unknown")
+}
+
+func seatKeyFor(claims codexJWTClaims, workspaceID, fallback string) string {
+	seatIdentity := firstNonEmpty(claims.ChatGPTUserID, claims.Email, claims.Subject, fallback)
+	if workspaceID == "" {
+		return seatIdentity
+	}
+	return seatIdentity + "|" + workspaceID
+}
+
+func poolIdentityForAccount(a *Account) (codexJWTClaims, string, string) {
+	claims := parseCodexClaims(a.IDToken)
+	workspaceID := firstNonEmpty(a.AccountID, a.IDTokenChatGPTAccountID, claims.ChatGPTAccountID)
+	seatKey := seatKeyFor(claims, workspaceID, a.ID)
+	return claims, workspaceID, seatKey
+}
+
+func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
+	data := StatusData{
+		GeneratedAt: now,
+		Uptime:      now.Sub(h.startTime),
+	}
+
+	if h.poolUsers != nil {
+		data.PoolUsers = len(h.poolUsers.List())
+	}
+
+	providerSummary := make(map[string]PoolDashboardProviderSum)
+	workspaceGroups := make(map[string]*poolWorkspaceAccumulator)
+	candidateByID := make(map[string]currentSeatCandidate)
+	earliestRecovery := time.Time{}
+	var activeSeat *currentSeatCandidate
+	var lastUsedSeat *currentSeatCandidate
+	activeSeatCount := 0
+
+	h.pool.mu.RLock()
+	data.TotalCount = len(h.pool.accounts)
+	for _, a := range h.pool.accounts {
+		a.mu.Lock()
+
+		switch a.Type {
+		case AccountTypeCodex:
+			data.CodexCount++
+		case AccountTypeGemini:
+			data.GeminiCount++
+		case AccountTypeClaude:
+			data.ClaudeCount++
+		case AccountTypeKimi:
+			data.KimiCount++
+		case AccountTypeMinimax:
+			data.MinimaxCount++
+		}
+
+		routing := routingStateLocked(a, now, "", "")
+		routingRow := buildPoolDashboardRouting(routing, now)
+		primaryUsed := routing.PrimaryUsed
+		secondaryUsed := routing.SecondaryUsed
+		effectivePrimary := primaryUsed
+		effectiveSecondary := secondaryUsed
+		claims, workspaceID, seatKey := poolIdentityForAccount(a)
+
+		status := AccountStatus{
+			ID:                 a.ID,
+			Type:               string(a.Type),
+			PlanType:           a.PlanType,
+			AccountID:          firstNonEmpty(a.AccountID, a.IDTokenChatGPTAccountID),
+			Email:              claims.Email,
+			Subject:            claims.Subject,
+			ChatGPTUserID:      claims.ChatGPTUserID,
+			WorkspaceID:        workspaceID,
+			SeatKey:            seatKey,
+			Disabled:           a.Disabled,
+			Dead:               a.Dead,
+			PrimaryUsed:        primaryUsed * 100,
+			SecondaryUsed:      secondaryUsed * 100,
+			EffectivePrimary:   effectivePrimary * 100,
+			EffectiveSecondary: effectiveSecondary * 100,
+			Routing:            routingRow,
+			Score:              scoreAccountLocked(a, now),
+			Inflight:           a.Inflight,
+			LocalTokens:        a.Totals.TotalBillableTokens,
+		}
+		if routingRow.RecoveryAt != "" {
+			status.RecoveryAt = routingRow.RecoveryAt
+		}
+		if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(now) {
+			status.PrimaryResetIn = formatDuration(a.Usage.PrimaryResetAt.Sub(now))
+		} else if a.Usage.PrimaryWindowMinutes > 0 {
+			status.PrimaryResetIn = fmt.Sprintf("~%dm", a.Usage.PrimaryWindowMinutes)
+		}
+		if !a.Usage.SecondaryResetAt.IsZero() && a.Usage.SecondaryResetAt.After(now) {
+			status.SecondaryResetIn = formatDuration(a.Usage.SecondaryResetAt.Sub(now))
+		} else if a.Usage.SecondaryWindowMinutes > 0 {
+			status.SecondaryResetIn = fmt.Sprintf("~%dd", a.Usage.SecondaryWindowMinutes/60/24)
+		}
+		if !a.ExpiresAt.IsZero() {
+			if a.ExpiresAt.Before(now) {
+				status.AuthExpiresIn = "EXPIRED"
+			} else {
+				status.AuthExpiresIn = formatDuration(a.ExpiresAt.Sub(now))
+			}
+		}
+		if !a.LastUsed.IsZero() {
+			status.LocalLastUsed = formatDuration(now.Sub(a.LastUsed)) + " ago"
+		} else {
+			status.LocalLastUsed = "never"
+		}
+		if !a.Usage.RetrievedAt.IsZero() {
+			status.UsageObserved = firstNonEmpty(a.Usage.Source, "usage") + " · " + formatDuration(now.Sub(a.Usage.RetrievedAt)) + " ago"
+		} else if strings.TrimSpace(a.Usage.Source) != "" {
+			status.UsageObserved = strings.TrimSpace(a.Usage.Source)
+		}
+
+		providerKey := status.Type
+		prov := providerSummary[providerKey]
+		prov.TotalAccounts++
+		if routing.Eligible {
+			prov.EligibleAccounts++
+		}
+		providerSummary[providerKey] = prov
+
+		groupKey := workspaceKeyFor(status.Type, workspaceID)
+		group := workspaceGroups[groupKey]
+		if group == nil {
+			group = &poolWorkspaceAccumulator{
+				WorkspaceID: workspaceID,
+				Provider:    status.Type,
+				SeatKeys:    make(map[string]struct{}),
+				AccountIDs:  make(map[string]struct{}),
+				Emails:      make(map[string]struct{}),
+			}
+			workspaceGroups[groupKey] = group
+		}
+		group.SeatCount++
+		group.SeatKeys[seatKey] = struct{}{}
+		group.AccountIDs[status.ID] = struct{}{}
+		if status.Email != "" {
+			group.Emails[status.Email] = struct{}{}
+		}
+		if routing.Eligible {
+			group.EligibleCount++
+		} else {
+			group.BlockedCount++
+			if routing.RecoveryAt.After(now) && (group.NextRecoveryAt.IsZero() || routing.RecoveryAt.Before(group.NextRecoveryAt)) {
+				group.NextRecoveryAt = routing.RecoveryAt
+			}
+		}
+
+		if routing.RecoveryAt.After(now) && (earliestRecovery.IsZero() || routing.RecoveryAt.Before(earliestRecovery)) {
+			earliestRecovery = routing.RecoveryAt
+		}
+
+		if status.Inflight > 0 {
+			activeSeatCount++
+		}
+		candidate := currentSeatCandidate{status: status, lastUsed: a.LastUsed}
+		candidateByID[status.ID] = candidate
+		if status.Inflight > 0 && prefersLiveSeat(candidate, activeSeat) {
+			candidateCopy := candidate
+			activeSeat = &candidateCopy
+		}
+		if prefersLastUsedSeat(candidate, lastUsedSeat) {
+			candidateCopy := candidate
+			lastUsedSeat = &candidateCopy
+		}
+
+		a.mu.Unlock()
+		data.Accounts = append(data.Accounts, status)
+	}
+	h.pool.mu.RUnlock()
+
+	data.PoolUtilization = h.pool.getPoolUtilization()
+	for _, utilization := range data.PoolUtilization {
+		prov := providerSummary[utilization.Provider]
+		prov.TimeWeightedPrimaryPct = utilization.TimeWeightedPrimaryPct
+		prov.TimeWeightedSecondaryPct = utilization.TimeWeightedSecondaryPct
+		providerSummary[utilization.Provider] = prov
+	}
+
+	data.PoolSummary = PoolDashboardSummary{
+		TotalAccounts:    len(data.Accounts),
+		WorkspaceCount:   len(workspaceGroups),
+		EligibleAccounts: 0,
+		Providers:        providerSummary,
+	}
+	if !earliestRecovery.IsZero() {
+		data.PoolSummary.NextRecoveryAt = earliestRecovery.Format(time.RFC3339)
+	}
+	data.ActiveSeat = currentSeatStatusFromCandidate(activeSeat, "Live requests are currently using this seat.", activeSeatCount)
+	data.LastUsedSeat = currentSeatStatusFromCandidate(lastUsedSeat, "This is the most recently used local seat.", activeSeatCount)
+	if sameSeatStatus(data.ActiveSeat, data.LastUsedSeat) {
+		data.LastUsedSeat = nil
+	}
+	if nextAccount := h.pool.peekCandidateAt(now, "", ""); nextAccount != nil {
+		if nextCandidate, ok := candidateByID[nextAccount.ID]; ok {
+			nextBasis := "If a new unpinned request starts now, the pool will choose this seat."
+			if data.ActiveSeat != nil && sameSeatStatus(data.ActiveSeat, currentSeatStatusFromCandidate(&nextCandidate, nextBasis, activeSeatCount)) {
+				nextBasis = "New unpinned requests would also land on this seat right now."
+			}
+			data.BestEligibleSeat = currentSeatStatusFromCandidate(&nextCandidate, nextBasis, activeSeatCount)
+		}
+	}
+	if sameSeatStatus(data.ActiveSeat, data.BestEligibleSeat) || sameSeatStatus(data.LastUsedSeat, data.BestEligibleSeat) {
+		data.BestEligibleSeat = nil
+	}
+	data.CurrentSeat = firstSeatStatus(data.ActiveSeat, data.BestEligibleSeat, data.LastUsedSeat)
+
+	for _, account := range data.Accounts {
+		if account.Routing.Eligible {
+			data.PoolSummary.EligibleAccounts++
+		}
+	}
+
+	for _, group := range workspaceGroups {
+		entry := PoolDashboardWorkspaceGroup{
+			WorkspaceID:       group.WorkspaceID,
+			Provider:          group.Provider,
+			SeatCount:         group.SeatCount,
+			EligibleSeatCount: group.EligibleCount,
+			BlockedSeatCount:  group.BlockedCount,
+			SeatKeys:          uniqueSortedStrings(mapKeys(group.SeatKeys)),
+			AccountIDs:        uniqueSortedStrings(mapKeys(group.AccountIDs)),
+			Emails:            uniqueSortedStrings(mapKeys(group.Emails)),
+		}
+		if !group.NextRecoveryAt.IsZero() {
+			entry.NextRecoveryAt = group.NextRecoveryAt.Format(time.RFC3339)
+		}
+		data.WorkspaceGroups = append(data.WorkspaceGroups, entry)
+	}
+
+	sort.Slice(data.WorkspaceGroups, func(i, j int) bool {
+		if data.WorkspaceGroups[i].Provider == data.WorkspaceGroups[j].Provider {
+			return data.WorkspaceGroups[i].WorkspaceID < data.WorkspaceGroups[j].WorkspaceID
+		}
+		return data.WorkspaceGroups[i].Provider < data.WorkspaceGroups[j].Provider
+	})
+
+	sort.Slice(data.Accounts, func(i, j int) bool {
+		left := data.Accounts[i]
+		right := data.Accounts[j]
+		if left.Routing.Eligible != right.Routing.Eligible {
+			return !left.Routing.Eligible
+		}
+		if left.RecoveryAt != "" && right.RecoveryAt != "" && left.RecoveryAt != right.RecoveryAt {
+			return left.RecoveryAt < right.RecoveryAt
+		}
+		leftMaxUsed := left.SecondaryUsed
+		if left.PrimaryUsed > leftMaxUsed {
+			leftMaxUsed = left.PrimaryUsed
+		}
+		rightMaxUsed := right.SecondaryUsed
+		if right.PrimaryUsed > rightMaxUsed {
+			rightMaxUsed = right.PrimaryUsed
+		}
+		if leftMaxUsed != rightMaxUsed {
+			return leftMaxUsed > rightMaxUsed
+		}
+		if left.Score != right.Score {
+			return left.Score > right.Score
+		}
+		return left.ID < right.ID
+	})
+
+	if h.store != nil {
+		data.TokenAnalytics = h.loadTokenAnalytics()
+	}
+
+	return data
+}
+
+func mapKeys(values map[string]struct{}) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for value := range values {
+		out = append(out, value)
+	}
+	return out
+}
+
+func (h *proxyHandler) servePoolDashboard(w http.ResponseWriter, r *http.Request) {
+	data := h.buildPoolDashboardData(time.Now())
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(data)
+}
+
+func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
+	data := h.buildPoolDashboardData(time.Now())
+	data.LocalOperatorEnabled = h.cfg.friendCode == "" &&
+		!hasForwardingHeaders(r) &&
+		isLoopbackHost(r.Host) &&
+		isLoopbackRemoteAddr(r.RemoteAddr)
+
+	// Allow both explicit JSON clients and a direct human-openable JSON URL.
+	if strings.Contains(r.Header.Get("Accept"), "application/json") || r.URL.Query().Get("format") == "json" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(data)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	tmpl := template.Must(template.New("status").Funcs(template.FuncMap{
+		"pct": func(v float64) string {
+			return fmt.Sprintf("%.0f%%", v)
+		},
+		"join": func(items []string, sep string) string {
+			return strings.Join(items, sep)
+		},
+		"score": func(v float64) string {
+			return fmt.Sprintf("%.2f", v)
+		},
+		"bar": func(v float64) template.HTML {
+			width := v
+			if width > 100 {
+				width = 100
+			}
+			color := "#4a4"
+			if v > 80 {
+				color = "#a44"
+			} else if v > 50 {
+				color = "#aa4"
+			}
+			return template.HTML(fmt.Sprintf(
+				`<div class="bar"><div class="fill" style="width:%.0f%%;background:%s"></div></div>`,
+				width, color,
+			))
+		},
+		"remainingBar": func(v float64) template.HTML {
+			width := v
+			if width > 100 {
+				width = 100
+			}
+			color := "#3fb950"
+			if v < 10 {
+				color = "#f85149"
+			} else if v < 25 {
+				color = "#d29922"
+			}
+			return template.HTML(fmt.Sprintf(
+				`<div class="bar"><div class="fill" style="width:%.0f%%;background:%s"></div></div>`,
+				width, color,
+			))
+		},
+	}).Parse(statusHTML))
+	tmpl.Execute(w, data)
+}
+
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	if d < 24*time.Hour {
+		return fmt.Sprintf("%.1fh", d.Hours())
+	}
+	return fmt.Sprintf("%.1fd", d.Hours()/24)
+}
+
+func (h *proxyHandler) loadTokenAnalytics() *TokenAnalytics {
+	caps, err := h.store.loadAllPlanCapacity()
+	if err != nil || len(caps) == 0 {
+		return nil
+	}
+
+	analytics := &TokenAnalytics{
+		ModelInfo: "effective = input + (cached × 0.1) + (output × mult) + (reasoning × mult)",
+	}
+
+	for planType, cap := range caps {
+		analytics.TotalSamples += cap.SampleCount
+
+		confidence := "low"
+		if cap.SampleCount >= 20 {
+			confidence = "high"
+		} else if cap.SampleCount >= 5 {
+			confidence = "medium"
+		}
+
+		mult := cap.OutputMultiplier
+		if mult == 0 {
+			mult = 4.0
+		}
+
+		view := PlanCapacityView{
+			PlanType:                 planType,
+			SampleCount:              cap.SampleCount,
+			Confidence:               confidence,
+			TotalInputTokens:         cap.TotalInputTokens,
+			TotalOutputTokens:        cap.TotalOutputTokens,
+			TotalCachedTokens:        cap.TotalCachedTokens,
+			TotalReasoningTokens:     cap.TotalReasoningTokens,
+			TotalBillableTokens:      cap.TotalTokens,
+			OutputMultiplier:         mult,
+			EffectivePerPrimaryPct:   int64(cap.EffectivePerPrimaryPct),
+			EffectivePerSecondaryPct: int64(cap.EffectivePerSecondaryPct),
+		}
+
+		// Format capacity estimates
+		if cap.EffectivePerPrimaryPct > 0 {
+			total := int64(cap.EffectivePerPrimaryPct * 100)
+			view.EstimatedPrimaryCapacity = formatTokenCount(total)
+		}
+		if cap.EffectivePerSecondaryPct > 0 {
+			total := int64(cap.EffectivePerSecondaryPct * 100)
+			view.EstimatedSecondaryCapacity = formatTokenCount(total)
+		}
+
+		analytics.PlanCapacities = append(analytics.PlanCapacities, view)
+	}
+
+	// Sort by plan type
+	sort.Slice(analytics.PlanCapacities, func(i, j int) bool {
+		order := map[string]int{"team": 0, "pro": 1, "plus": 2, "gemini": 3}
+		return order[analytics.PlanCapacities[i].PlanType] < order[analytics.PlanCapacities[j].PlanType]
+	})
+
+	return analytics
+}
+
+func formatTokenCount(n int64) string {
+	if n >= 1_000_000_000 {
+		return fmt.Sprintf("~%.1fB", float64(n)/1_000_000_000)
+	}
+	if n >= 1_000_000 {
+		return fmt.Sprintf("~%.1fM", float64(n)/1_000_000)
+	}
+	if n >= 1_000 {
+		return fmt.Sprintf("~%.0fK", float64(n)/1_000)
+	}
+	return fmt.Sprintf("%d", n)
+}
+
+const statusHTML = `<!DOCTYPE html>
+<html>
+<head>
+    <title>Pool Status</title>
+    <meta http-equiv="refresh" content="30">
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+            margin: 0;
+            padding: 20px;
+            background: #0d1117;
+            color: #c9d1d9;
+        }
+        h1 { color: #58a6ff; margin-bottom: 5px; }
+        .meta { color: #8b949e; margin-bottom: 20px; font-size: 14px; }
+        .toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+        .operator-card {
+            flex: 1 1 420px;
+            background: #161b22;
+            padding: 16px;
+            border-radius: 8px;
+            border: 1px solid #30363d;
+            min-width: min(100%, 420px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.18);
+        }
+        .seat-card {
+            flex-basis: 340px;
+            min-width: min(100%, 340px);
+        }
+        .operator-title { color: #58a6ff; font-weight: 600; margin-bottom: 6px; }
+        .muted { color: #8b949e; font-size: 13px; line-height: 1.5; }
+        .action-btn {
+            margin-top: 14px;
+            border: 1px solid #2f81f7;
+            background: linear-gradient(180deg, rgba(47, 129, 247, 0.22), rgba(31, 111, 235, 0.14));
+            color: #dbeafe;
+            border-radius: 6px;
+            padding: 10px 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+        }
+        .action-btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 10px 22px rgba(31, 111, 235, 0.18);
+            border-color: #58a6ff;
+        }
+        .action-btn:disabled {
+            cursor: wait;
+            opacity: 0.7;
+            transform: none;
+            box-shadow: none;
+        }
+        .result-block {
+            margin-top: 14px;
+            background: #0d1117;
+            border: 1px solid #21262d;
+            border-radius: 6px;
+            padding: 12px;
+        }
+        .stats {
+            display: flex;
+            gap: 20px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        .stat {
+            background: #161b22;
+            padding: 15px 20px;
+            border-radius: 6px;
+            border: 1px solid #30363d;
+        }
+        .table-wrap {
+            overflow-x: auto;
+            margin-bottom: 20px;
+        }
+        .stat-value { font-size: 28px; font-weight: bold; color: #58a6ff; }
+        .stat-label { font-size: 12px; color: #8b949e; text-transform: uppercase; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            background: #161b22;
+            border-radius: 6px;
+            overflow: hidden;
+        }
+        th, td {
+            padding: 10px 12px;
+            text-align: left;
+            border-bottom: 1px solid #21262d;
+        }
+        th {
+            background: #21262d;
+            color: #8b949e;
+            font-weight: 500;
+            font-size: 12px;
+            text-transform: uppercase;
+        }
+        tr:hover { background: #1c2128; }
+        .bar {
+            width: 80px;
+            height: 8px;
+            background: #21262d;
+            border-radius: 4px;
+            overflow: hidden;
+            display: inline-block;
+            vertical-align: middle;
+            margin-right: 8px;
+        }
+        .fill { height: 100%; }
+        .status-ok { color: #3fb950; }
+        .status-warn { color: #d29922; }
+        .status-dead { color: #f85149; }
+        .tag {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 11px;
+            font-weight: 500;
+        }
+        .tag-pro { background: #238636; color: #fff; }
+        .tag-plus { background: #1f6feb; color: #fff; }
+        .tag-team { background: #8957e5; color: #fff; }
+        .tag-gemini { background: #ea4335; color: #fff; }
+        .tag-claude { background: #cc785c; color: #fff; }
+        .tag-codex { background: #10a37f; color: #fff; }
+        .tag-disabled { background: #6e7681; color: #fff; }
+        .tag-dead { background: #f85149; color: #fff; }
+        .usage-cell { white-space: nowrap; }
+        .effective { color: #8b949e; font-size: 11px; }
+        .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+        a { color: #58a6ff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <h1>🏊 Pool Status</h1>
+    <div class="meta">
+        Generated: {{.GeneratedAt.Format "2006-01-02 15:04:05"}} · Uptime: {{.Uptime.Round 1000000000}}
+    </div>
+    {{if or .LocalOperatorEnabled (gt .TotalCount 0)}}
+    <div class="toolbar">
+        {{if .LocalOperatorEnabled}}
+        <div class="operator-card">
+            <div class="operator-title">Operator Action</div>
+            <div class="muted">
+                Starts the same flow as the operator <code>codex-oauth-start</code> command, keeps the popup opener attached, and refreshes this page automatically when the account list changes.
+            </div>
+            <button id="codex-oauth-start-btn" class="action-btn" onclick="startCodexOAuthFromStatus()">Start Codex OAuth</button>
+            <div id="codex-oauth-start-status" class="muted" style="margin-top: 10px;"></div>
+            <div id="codex-oauth-start-result" class="result-block" style="display: none;">
+                <div class="muted" style="margin-bottom: 8px;">OAuth URL</div>
+                <div id="codex-oauth-start-url" class="mono" style="word-break: break-all;"></div>
+                <div id="codex-oauth-start-outcome" class="muted" style="margin-top: 10px;"></div>
+                <a id="codex-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px;">Open OAuth Page</a>
+            </div>
+        </div>
+        {{end}}
+        <div class="operator-card seat-card">
+            <div class="operator-title">Current Active Seat</div>
+            {{with .ActiveSeat}}
+            <div style="font-size: 22px; font-weight: 700; color: #dbeafe;">{{.ID}}</div>
+            {{if .Email}}<div class="muted">{{.Email}}</div>{{end}}
+            <div class="muted" style="margin-top: 8px;">{{.Basis}}</div>
+            <div class="result-block">
+                <div><strong>Routing:</strong> {{.RoutingStatus}}</div>
+                <div><strong>Headroom:</strong> {{printf "%.0f%%" .PrimaryHeadroomPct}} / {{printf "%.0f%%" .SecondaryHeadroomPct}}</div>
+                {{if .WorkspaceID}}<div><strong>Workspace:</strong> <span class="mono">{{.WorkspaceID}}</span></div>{{end}}
+                {{if .SeatKey}}<div><strong>Seat:</strong> <span class="mono">{{.SeatKey}}</span></div>{{end}}
+                {{if gt .Inflight 0}}<div><strong>Inflight:</strong> {{.Inflight}}</div>{{end}}
+                <div><strong>Last used:</strong> {{.LocalLastUsed}}</div>
+                {{if gt .ActiveSeatCount 1}}<div><strong>Active seats now:</strong> {{.ActiveSeatCount}}</div>{{end}}
+            </div>
+            {{else}}
+            <div style="font-size: 22px; font-weight: 700; color: #dbeafe;">None</div>
+            <div class="muted" style="margin-top: 8px;">No live request is active right now.</div>
+            {{end}}
+        </div>
+        {{with .LastUsedSeat}}
+        <div class="operator-card seat-card">
+            <div class="operator-title">Last Used Seat</div>
+            <div style="font-size: 22px; font-weight: 700; color: #dbeafe;">{{.ID}}</div>
+            {{if .Email}}<div class="muted">{{.Email}}</div>{{end}}
+            <div class="muted" style="margin-top: 8px;">{{.Basis}}</div>
+            <div class="result-block">
+                <div><strong>Routing:</strong> {{.RoutingStatus}}</div>
+                <div><strong>Headroom:</strong> {{printf "%.0f%%" .PrimaryHeadroomPct}} / {{printf "%.0f%%" .SecondaryHeadroomPct}}</div>
+                {{if .WorkspaceID}}<div><strong>Workspace:</strong> <span class="mono">{{.WorkspaceID}}</span></div>{{end}}
+                {{if .SeatKey}}<div><strong>Seat:</strong> <span class="mono">{{.SeatKey}}</span></div>{{end}}
+                <div><strong>Last used:</strong> {{.LocalLastUsed}}</div>
+            </div>
+        </div>
+        {{end}}
+        {{with .BestEligibleSeat}}
+        <div class="operator-card seat-card">
+            <div class="operator-title">Next Eligible Seat</div>
+            <div style="font-size: 22px; font-weight: 700; color: #dbeafe;">{{.ID}}</div>
+            {{if .Email}}<div class="muted">{{.Email}}</div>{{end}}
+            <div class="muted" style="margin-top: 8px;">{{.Basis}}</div>
+            <div class="result-block">
+                <div><strong>Routing:</strong> {{.RoutingStatus}}</div>
+                <div><strong>Headroom:</strong> {{printf "%.0f%%" .PrimaryHeadroomPct}} / {{printf "%.0f%%" .SecondaryHeadroomPct}}</div>
+                {{if .WorkspaceID}}<div><strong>Workspace:</strong> <span class="mono">{{.WorkspaceID}}</span></div>{{end}}
+                {{if .SeatKey}}<div><strong>Seat:</strong> <span class="mono">{{.SeatKey}}</span></div>{{end}}
+                <div><strong>Last used:</strong> {{.LocalLastUsed}}</div>
+            </div>
+        </div>
+        {{end}}
+    </div>
+    {{end}}
+
+    <div class="stats">
+        <div class="stat">
+            <div class="stat-value">{{.TotalCount}}</div>
+            <div class="stat-label">Total Accounts</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value">{{.PoolSummary.EligibleAccounts}}</div>
+            <div class="stat-label">Eligible Seats</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value">{{.PoolSummary.WorkspaceCount}}</div>
+            <div class="stat-label">Workspaces</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value">{{if .PoolSummary.NextRecoveryAt}}{{.PoolSummary.NextRecoveryAt}}{{else}}—{{end}}</div>
+            <div class="stat-label">Next Recovery</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value">{{.CodexCount}}</div>
+            <div class="stat-label">Codex</div>
+        </div>
+        <div class="stat">
+            <div class="stat-value">{{.GeminiCount}}</div>
+            <div class="stat-label">Gemini</div>
+        </div>
+        {{if .ClaudeCount}}
+        <div class="stat">
+            <div class="stat-value">{{.ClaudeCount}}</div>
+            <div class="stat-label">Claude</div>
+        </div>
+        {{end}}
+        {{if .PoolUsers}}
+        <div class="stat">
+            <div class="stat-value">{{.PoolUsers}}</div>
+            <div class="stat-label">Pool Users</div>
+        </div>
+        {{end}}
+    </div>
+
+    {{if .WorkspaceGroups}}
+    <h2 style="color: #58a6ff; margin-top: 20px; margin-bottom: 10px;">🧩 Workspace Groups</h2>
+    <div class="table-wrap">
+    <table>
+        <tr>
+            <th>Workspace</th>
+            <th>Provider</th>
+            <th>Seats</th>
+            <th>Eligible</th>
+            <th>Blocked</th>
+            <th>Next Recovery</th>
+            <th>Accounts</th>
+            <th>Emails</th>
+        </tr>
+        {{range .WorkspaceGroups}}
+        <tr>
+            <td class="mono">{{if .WorkspaceID}}{{.WorkspaceID}}{{else}}unknown{{end}}</td>
+            <td>
+                {{if eq .Provider "codex"}}<span class="tag tag-codex">codex</span>{{end}}
+                {{if eq .Provider "gemini"}}<span class="tag tag-gemini">gemini</span>{{end}}
+                {{if eq .Provider "claude"}}<span class="tag tag-claude">claude</span>{{end}}
+            </td>
+            <td>{{.SeatCount}}</td>
+            <td><span class="status-ok">{{.EligibleSeatCount}}</span></td>
+            <td>{{if .BlockedSeatCount}}<span class="status-warn">{{.BlockedSeatCount}}</span>{{else}}0{{end}}</td>
+            <td>{{if .NextRecoveryAt}}{{.NextRecoveryAt}}{{else}}—{{end}}</td>
+            <td class="mono">{{join .AccountIDs ", "}}</td>
+            <td>{{join .Emails ", "}}</td>
+        </tr>
+        {{end}}
+    </table>
+    </div>
+    {{end}}
+
+    {{if .PoolUtilization}}
+    <h2 style="color: #58a6ff; margin-top: 20px; margin-bottom: 10px;">⏱ Time-Weighted Utilization</h2>
+    <p style="color: #8b949e; font-size: 12px; margin-bottom: 15px;">
+        Accounts near reset are discounted — their high usage is about to be wiped.
+        <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">effective = used% × time_to_reset / window</code>
+    </p>
+    <div class="stats" style="flex-wrap: wrap;">
+        {{range .PoolUtilization}}
+        <div class="stat" style="min-width: 200px;">
+            <div style="margin-bottom: 8px;">
+                {{if eq .Provider "codex"}}<span class="tag tag-codex">codex</span>{{end}}
+                {{if eq .Provider "claude"}}<span class="tag tag-claude">claude</span>{{end}}
+                {{if eq .Provider "gemini"}}<span class="tag tag-gemini">gemini</span>{{end}}
+            </div>
+            <div style="display: flex; gap: 20px; margin-bottom: 4px;">
+                <div>
+                    <div class="stat-value" style="font-size: 22px;">{{printf "%.0f%%" .TimeWeightedSecondaryPct}}</div>
+                    <div class="stat-label">Secondary</div>
+                </div>
+                <div>
+                    <div class="stat-value" style="font-size: 22px;">{{printf "%.0f%%" .TimeWeightedPrimaryPct}}</div>
+                    <div class="stat-label">Primary</div>
+                </div>
+            </div>
+            <div style="color: #8b949e; font-size: 12px; margin-top: 6px;">
+                {{.AvailableAccounts}}/{{.TotalAccounts}} available
+                {{if .NextSecondaryResetIn}} · next reset: {{.NextSecondaryResetIn}}{{end}}
+                {{if .ResetsIn24h}} · {{.ResetsIn24h}} reset in 24h{{end}}
+            </div>
+        </div>
+        {{end}}
+    </div>
+    {{end}}
+
+    <h2 style="color: #58a6ff; margin-top: 20px; margin-bottom: 10px;">🪑 Seats</h2>
+    <div class="table-wrap">
+    <table>
+        <tr>
+            <th>Account</th>
+            <th>Provider</th>
+            <th>Plan</th>
+            <th>Workspace</th>
+            <th>Seat</th>
+            <th>Routing</th>
+            <th>Remaining (5h)</th>
+            <th>Remaining (7d)</th>
+            <th>Recovery</th>
+            <th>Routing Score</th>
+            <th>Auth TTL</th>
+            <th>Local Last Used</th>
+            <th>Local Tokens</th>
+        </tr>
+        {{range .Accounts}}
+        <tr>
+            <td>
+                {{.ID}}
+                {{if .Disabled}}<span class="tag tag-disabled">disabled</span>{{end}}
+                {{if .Dead}}<span class="tag tag-dead">dead</span>{{end}}
+                {{if .Email}}<br><small>{{.Email}}</small>{{end}}
+            </td>
+            <td>
+                {{if eq .Type "codex"}}<span class="tag tag-codex">codex</span>{{end}}
+                {{if eq .Type "gemini"}}<span class="tag tag-gemini">gemini</span>{{end}}
+                {{if eq .Type "claude"}}<span class="tag tag-claude">claude</span>{{end}}
+            </td>
+            <td>
+                {{if eq .PlanType "pro"}}<span class="tag tag-pro">pro</span>{{end}}
+                {{if eq .PlanType "plus"}}<span class="tag tag-plus">plus</span>{{end}}
+                {{if eq .PlanType "team"}}<span class="tag tag-team">team</span>{{end}}
+                {{if eq .PlanType "max"}}<span class="tag tag-claude">max</span>{{end}}
+                {{if eq .PlanType "gemini"}}<span class="tag tag-gemini">gemini</span>{{end}}
+                {{if eq .PlanType "claude"}}<span class="tag tag-claude">claude</span>{{end}}
+            </td>
+            <td class="mono">{{if .WorkspaceID}}{{.WorkspaceID}}{{else}}unknown{{end}}</td>
+            <td class="mono">{{if .SeatKey}}{{.SeatKey}}{{else}}{{.ID}}{{end}}</td>
+            <td>
+                {{if .Routing.Eligible}}<span class="status-ok">eligible</span>{{else}}<span class="status-warn">{{.Routing.BlockReason}}</span>{{end}}
+                <br><small>headroom {{printf "%.0f%%" .Routing.PrimaryHeadroomPct}} / {{printf "%.0f%%" .Routing.SecondaryHeadroomPct}}</small>
+                {{if .UsageObserved}}<br><small>usage {{.UsageObserved}}</small>{{end}}
+            </td>
+            <td class="usage-cell">
+                {{remainingBar .Routing.PrimaryHeadroomPct}}{{pct .Routing.PrimaryHeadroomPct}}
+                <br><small>used {{pct .PrimaryUsed}}</small>
+                {{if .PrimaryResetIn}}<br><small>resets in {{.PrimaryResetIn}}</small>{{end}}
+            </td>
+            <td class="usage-cell">
+                {{remainingBar .Routing.SecondaryHeadroomPct}}{{pct .Routing.SecondaryHeadroomPct}}
+                <br><small>used {{pct .SecondaryUsed}}</small>
+                {{if .SecondaryResetIn}}<br><small>resets in {{.SecondaryResetIn}}</small>{{end}}
+            </td>
+            <td>{{if .RecoveryAt}}{{.RecoveryAt}}{{else}}—{{end}}</td>
+            <td>
+                {{if .Dead}}<span class="status-dead">—</span>
+                {{else if .Disabled}}<span class="status-warn">—</span>
+                {{else}}{{score .Score}}{{end}}
+            </td>
+            <td>{{.AuthExpiresIn}}</td>
+            <td>{{.LocalLastUsed}}</td>
+            <td>{{.LocalTokens}}</td>
+        </tr>
+        {{end}}
+    </table>
+    </div>
+
+    {{if .TokenAnalytics}}
+    <h2 style="color: #58a6ff; margin-top: 30px;">📊 Capacity Analysis</h2>
+    <p style="color: #8b949e; font-size: 13px; margin-bottom: 15px;">
+        Estimating capacity from <strong>{{.TokenAnalytics.TotalSamples}}</strong> samples.
+        Formula: <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">{{.TokenAnalytics.ModelInfo}}</code>
+    </p>
+
+    {{if .TokenAnalytics.PlanCapacities}}
+    <table style="margin-bottom: 20px;">
+        <tr>
+            <th>Plan</th>
+            <th>Samples</th>
+            <th>Confidence</th>
+            <th>Input Tokens</th>
+            <th>Output Tokens</th>
+            <th>Cached</th>
+            <th>Reasoning</th>
+            <th>Output Mult</th>
+            <th>5h Capacity</th>
+            <th>7d Capacity</th>
+        </tr>
+        {{range .TokenAnalytics.PlanCapacities}}
+        <tr>
+            <td>
+                {{if eq .PlanType "pro"}}<span class="tag tag-pro">pro</span>{{end}}
+                {{if eq .PlanType "plus"}}<span class="tag tag-plus">plus</span>{{end}}
+                {{if eq .PlanType "team"}}<span class="tag tag-team">team</span>{{end}}
+                {{if eq .PlanType "gemini"}}<span class="tag tag-gemini">gemini</span>{{end}}
+            </td>
+            <td>{{.SampleCount}}</td>
+            <td>
+                {{if eq .Confidence "high"}}<span style="color: #3fb950;">●</span> high{{end}}
+                {{if eq .Confidence "medium"}}<span style="color: #d29922;">●</span> medium{{end}}
+                {{if eq .Confidence "low"}}<span style="color: #8b949e;">●</span> low{{end}}
+            </td>
+            <td>{{.TotalInputTokens}}</td>
+            <td>{{.TotalOutputTokens}}</td>
+            <td>{{.TotalCachedTokens}}</td>
+            <td>{{.TotalReasoningTokens}}</td>
+            <td>{{printf "%.1fx" .OutputMultiplier}}</td>
+            <td>{{if .EstimatedPrimaryCapacity}}{{.EstimatedPrimaryCapacity}}{{else}}—{{end}}</td>
+            <td>{{if .EstimatedSecondaryCapacity}}{{.EstimatedSecondaryCapacity}}{{else}}—{{end}}</td>
+        </tr>
+        {{end}}
+    </table>
+    {{else}}
+    <p style="color: #8b949e;">No capacity data collected yet. Use the pool to gather samples.</p>
+    {{end}}
+    {{end}}
+
+    <p style="margin-top: 20px; color: #8b949e; font-size: 12px;">
+        <strong>Note:</strong> Remaining columns show remaining headroom, not used quota.
+        Primary/Secondary usage and recovery come from the latest observed quota snapshot.
+        Codex seats stay eligible at exactly 10% remaining and switch only once headroom drops below 10%.
+        <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">Auth TTL</code>,
+        <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">Local Last Used</code>, and
+        <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">Local Tokens</code>
+        are local proxy/runtime fields, not external quota consumption.
+        "Effective" usage shows the weighted value used for load balancing.
+        <br>
+        <a href="/admin/accounts">Raw account data</a> ·
+        <a href="/admin/tokens">Token analytics API</a> ·
+        <a href="/healthz">Health check</a> ·
+        <a href="/metrics">Prometheus metrics</a>
+    </p>
+    {{if .LocalOperatorEnabled}}
+    <script>
+        const codexOAuthStatusKey = 'codex-oauth-status-snapshot';
+        let codexOAuthPopup = null;
+        let codexOAuthWatcher = null;
+
+        function codexOAuthSnapshot(accounts) {
+            const rows = Array.isArray(accounts) ? accounts : [];
+            const codexRows = rows
+                .filter((acc) => acc && acc.type === 'codex')
+                .map((acc) => [
+                    String(acc.id || ''),
+                    String(acc.account_id || ''),
+                    String(acc.workspace_id || ''),
+                    String(acc.seat_key || ''),
+                    String(acc.auth_expires_in || ''),
+                    String(acc.local_last_used || ''),
+                    String(acc.local_tokens || ''),
+                ].join('|'))
+                .sort();
+
+            return {
+                count: codexRows.length,
+                signature: codexRows.join('\n'),
+            };
+        }
+
+        function codexOAuthDescribeOutcome(before, after, backendMode) {
+            const mode = String(backendMode || '').trim().toLowerCase();
+            if (mode === 'added') {
+                return 'OAuth completed. Added a new account; refreshing status now.';
+            }
+            if (mode === 'refreshed') {
+                return 'OAuth completed. Refreshed an existing seat; refreshing status now.';
+            }
+            if (after.count > before.count) {
+                return 'OAuth completed. Added a new account; refreshing status now.';
+            }
+            if (after.signature !== before.signature) {
+                return 'OAuth completed. Refreshed an existing seat; refreshing status now.';
+            }
+            return 'OAuth completed. Refreshing status now.';
+        }
+
+        async function codexOAuthFetchStatusSnapshot() {
+            const response = await fetch('/status?format=json', {
+                headers: { 'Accept': 'application/json' }
+            });
+            if (!response.ok) {
+                throw new Error(await response.text());
+            }
+            return response.json();
+        }
+
+        function codexOAuthReadPendingState() {
+            try {
+                const raw = sessionStorage.getItem(codexOAuthStatusKey);
+                return raw ? JSON.parse(raw) : null;
+            } catch (error) {
+                return null;
+            }
+        }
+
+        function codexOAuthClearPendingState() {
+            try {
+                sessionStorage.removeItem(codexOAuthStatusKey);
+            } catch (error) {
+                // Ignore storage errors.
+            }
+        }
+
+        function codexOAuthSetOutcome(message) {
+            const outcome = document.getElementById('codex-oauth-start-outcome');
+            if (outcome) {
+                outcome.textContent = message;
+            }
+        }
+
+        function codexOAuthPreparePopup() {
+            const popup = window.open('', 'codex-oauth-popup');
+            if (!popup) {
+                return null;
+            }
+            try {
+                popup.document.open();
+                popup.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Preparing Codex OAuth</title></head><body style="font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 24px;"><div style="max-width: 640px; margin: 64px auto; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 24px;">Opening OAuth session...</div></body></html>');
+                popup.document.close();
+                popup.focus();
+            } catch (error) {
+                // Ignore document writes that fail on hardened browsers.
+            }
+            return popup;
+        }
+
+        function codexOAuthStopWatcher() {
+            if (codexOAuthWatcher !== null) {
+                window.clearTimeout(codexOAuthWatcher);
+                codexOAuthWatcher = null;
+            }
+            codexOAuthPopup = null;
+        }
+
+        async function codexOAuthFinalize(beforeSnapshot, backendMode) {
+            const button = document.getElementById('codex-oauth-start-btn');
+            const status = document.getElementById('codex-oauth-start-status');
+            const result = document.getElementById('codex-oauth-start-result');
+            codexOAuthStopWatcher();
+
+            try {
+                const afterSnapshot = codexOAuthSnapshot((await codexOAuthFetchStatusSnapshot()).accounts);
+                const message = codexOAuthDescribeOutcome(beforeSnapshot, afterSnapshot, backendMode);
+                if (status) {
+                    status.style.color = '#3fb950';
+                    status.textContent = message;
+                }
+                codexOAuthSetOutcome(message);
+                codexOAuthClearPendingState();
+                window.setTimeout(() => {
+                    if (button) {
+                        button.disabled = false;
+                    }
+                    if (result) {
+                        result.style.display = 'block';
+                    }
+                    window.location.reload();
+                }, 850);
+            } catch (error) {
+                if (button) {
+                    button.disabled = false;
+                }
+                if (status) {
+                    status.style.color = '#f85149';
+                    status.textContent = 'OAuth completed, but status refresh failed: ' + (error && error.message ? error.message : error);
+                }
+                codexOAuthSetOutcome('Refresh failed. Use the Open OAuth Page link or reload manually.');
+                codexOAuthClearPendingState();
+            }
+        }
+
+        function codexOAuthSnapshotsEqual(beforeSnapshot, afterSnapshot) {
+            return beforeSnapshot.count === afterSnapshot.count && beforeSnapshot.signature === afterSnapshot.signature;
+        }
+
+        function codexOAuthWatchStatusChange(beforeSnapshot, backendMode) {
+            const status = document.getElementById('codex-oauth-start-status');
+            let attempts = 0;
+            const maxAttempts = 150;
+            const tick = async () => {
+                if (codexOAuthWatcher === null) {
+                    return;
+                }
+                attempts += 1;
+                try {
+                    const afterSnapshot = codexOAuthSnapshot((await codexOAuthFetchStatusSnapshot()).accounts);
+                    if (!codexOAuthSnapshotsEqual(beforeSnapshot, afterSnapshot)) {
+                        if (status) {
+                            status.style.color = '#3fb950';
+                            status.textContent = 'OAuth callback applied. Refreshing status now.';
+                        }
+                        void codexOAuthFinalize(beforeSnapshot, backendMode);
+                        return;
+                    }
+                    if (status) {
+                        status.style.color = '#8b949e';
+                            status.textContent = 'Waiting for the account list to change...';
+                    }
+                } catch (error) {
+                    if (status) {
+                        status.style.color = '#8b949e';
+                        status.textContent = 'Waiting for the account list to change...';
+                    }
+                }
+                if (attempts >= maxAttempts) {
+                    codexOAuthStopWatcher();
+                    if (status) {
+                        status.style.color = '#f85149';
+                    status.textContent = 'Timed out waiting for the account list to change. Use the Open OAuth Page link to retry.';
+                    }
+                    codexOAuthSetOutcome('No account change was detected.');
+                    const button = document.getElementById('codex-oauth-start-btn');
+                    if (button) {
+                        button.disabled = false;
+                    }
+                    return;
+                }
+                codexOAuthWatcher = window.setTimeout(tick, 2000);
+            };
+            if (status) {
+                status.style.color = '#8b949e';
+                status.textContent = 'Waiting for the account list to change...';
+            }
+            codexOAuthWatcher = window.setTimeout(tick, 2000);
+        }
+
+        async function startCodexOAuthFromStatus() {
+            const button = document.getElementById('codex-oauth-start-btn');
+            const status = document.getElementById('codex-oauth-start-status');
+            const result = document.getElementById('codex-oauth-start-result');
+            const urlNode = document.getElementById('codex-oauth-start-url');
+            const openLink = document.getElementById('codex-oauth-start-open');
+            const outcome = document.getElementById('codex-oauth-start-outcome');
+
+            if (!button || !status || !result || !urlNode || !openLink) {
+                return;
+            }
+
+            button.disabled = true;
+            status.style.color = '#8b949e';
+            status.textContent = 'Starting OAuth session...';
+            result.style.display = 'none';
+            urlNode.textContent = '';
+            openLink.href = '#';
+            if (outcome) {
+                outcome.textContent = '';
+            }
+
+            codexOAuthPopup = codexOAuthPreparePopup();
+            if (!codexOAuthPopup) {
+                button.disabled = false;
+                status.style.color = '#f85149';
+                status.textContent = 'Failed to start OAuth: popup blocked by the browser';
+                codexOAuthSetOutcome('Open the OAuth URL manually from the link below.');
+                return;
+            }
+
+            try {
+                const beforeSnapshot = codexOAuthSnapshot((await codexOAuthFetchStatusSnapshot()).accounts);
+                const response = await fetch('/operator/codex/oauth-start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                if (!response.ok) {
+                    throw new Error(await response.text());
+                }
+
+                const data = await response.json();
+                if (!data.oauth_url) {
+                    throw new Error('Missing oauth_url in response');
+                }
+
+                urlNode.textContent = data.oauth_url;
+                openLink.href = data.oauth_url;
+                result.style.display = 'block';
+                status.style.color = '#3fb950';
+                status.textContent = 'OAuth URL generated. Complete sign-in in the popup; this page will refresh when the account list changes.';
+                codexOAuthSetOutcome('Waiting for the account list to change.');
+                try {
+                    sessionStorage.setItem(codexOAuthStatusKey, JSON.stringify({
+                        before: beforeSnapshot,
+                        backendMode: String(data.result_mode || data.result || data.status || ''),
+                    }));
+                } catch (error) {
+                    // Ignore storage failures on hardened browsers.
+                }
+                codexOAuthPopup.location.href = data.oauth_url;
+                codexOAuthWatchStatusChange(beforeSnapshot, data.result_mode || data.result || data.status);
+            } catch (error) {
+                codexOAuthStopWatcher();
+                if (codexOAuthPopup && !codexOAuthPopup.closed) {
+                    try {
+                        codexOAuthPopup.close();
+                    } catch (closeError) {
+                        // Ignore close failures.
+                    }
+                }
+                status.style.color = '#f85149';
+                status.textContent = 'Failed to start OAuth: ' + (error && error.message ? error.message : error);
+                codexOAuthSetOutcome('Use the Open OAuth Page link or retry after clearing the popup blocker.');
+                if (button) {
+                    button.disabled = false;
+                }
+            } finally {
+                if (!codexOAuthPopup) {
+                    button.disabled = false;
+                }
+            }
+        }
+
+        function codexOAuthHandleMessage(event) {
+            const origin = String((event && event.origin) || '');
+            if (origin !== 'http://localhost:1455' && origin !== 'http://127.0.0.1:1455') {
+                return;
+            }
+            const data = event && event.data;
+            if (!data || data.type !== 'codex-oauth-result') {
+                return;
+            }
+
+            const pendingState = codexOAuthReadPendingState();
+            const beforeSnapshot = pendingState && pendingState.before ? pendingState.before : { count: 0, signature: '' };
+            const backendMode = data && data.refreshed_existing ? 'refreshed' : (pendingState && pendingState.backendMode ? pendingState.backendMode : '');
+
+            if (data.success) {
+                if (data.detail) {
+                    codexOAuthSetOutcome(String(data.detail));
+                }
+                void codexOAuthFinalize(beforeSnapshot, backendMode);
+                return;
+            }
+
+            codexOAuthStopWatcher();
+            codexOAuthClearPendingState();
+            const button = document.getElementById('codex-oauth-start-btn');
+            const status = document.getElementById('codex-oauth-start-status');
+            if (button) {
+                button.disabled = false;
+            }
+            if (status) {
+                status.style.color = '#f85149';
+                status.textContent = 'OAuth callback failed: ' + String((data && data.detail) || 'Unknown error');
+            }
+            codexOAuthSetOutcome(String((data && data.detail) || (data && data.title) || 'OAuth callback failed.'));
+        }
+        window.addEventListener('message', codexOAuthHandleMessage);
+    </script>
+    {{end}}
+</body>
+</html>`

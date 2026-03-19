@@ -1,0 +1,6 @@
+This repository is based on darvell/codex-pool:
+https://github.com/darvell/codex-pool
+
+The upstream README declares the project license as MIT.
+This repository preserves that stated license and adds operator-oriented packaging,
+routing, dashboard, and OAuth workflow improvements on top.

@@ -1,0 +1,17 @@
+[Unit]
+Description=Codex Pool Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/codex-pool/runtime
+EnvironmentFile=%h/.local/share/codex-pool/runtime/codex-pool.env
+ExecStart=%h/.local/bin/codex-pool
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target
