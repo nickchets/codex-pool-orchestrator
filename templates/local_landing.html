@@ -605,7 +605,7 @@ cp pool/ACCOUNT_NAME.json ~/.codex/auth.json</pre>
                 <div class="step-label">Operator Action</div>
                 <div class="code-wrapper" style="padding: 20px;">
                     <p style="color: #666; font-size: 0.75rem; margin: 0 0 16px; line-height: 1.6;">
-                        Starts the same flow as the operator <code>codex-oauth-start</code> command, keeps the popup opener attached, and refreshes this page automatically when the account list changes.
+                        Starts the same flow as the operator <code>codex-oauth-start</code> command, keeps the popup opener attached, and refreshes this page automatically when pool seat state changes.
                     </p>
                     <button id="codex-oauth-start-btn" class="action-btn" onclick="startCodexOAuthFromWeb()">Start Codex OAuth</button>
                     <div id="codex-oauth-start-status" style="margin-top: 14px; color: #666; font-size: 0.8rem;"></div>
@@ -993,12 +993,14 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
                 .filter((acc) => acc && acc.type === 'codex')
                 .map((acc) => [
                     String(acc.id || ''),
+                    String(acc.type || ''),
                     String(acc.account_id || ''),
                     String(acc.workspace_id || ''),
                     String(acc.seat_key || ''),
-                    String(acc.auth_expires_in || ''),
-                    String(acc.local_last_used || ''),
-                    String(acc.local_tokens || ''),
+                    String(acc.last_refresh_at || ''),
+                    String(acc.auth_expires_at || ''),
+                    String(!!acc.disabled),
+                    String(!!acc.dead),
                 ].join('|'))
                 .sort();
 
@@ -1130,21 +1132,21 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
                     }
                     if (status) {
                         status.style.color = '#666';
-                            status.textContent = 'Waiting for the account list to change...';
+                        status.textContent = 'Waiting for pool seat state to change...';
                     }
                 } catch (error) {
                     if (status) {
                         status.style.color = '#666';
-                        status.textContent = 'Waiting for the account list to change...';
+                        status.textContent = 'Waiting for pool seat state to change...';
                     }
                 }
                 if (attempts >= maxAttempts) {
                     codexOAuthStopWatcher();
                     if (status) {
                         status.style.color = 'var(--error-red)';
-                        status.textContent = 'Timed out waiting for the account list to change. Use the Open OAuth Page link to retry.';
+                        status.textContent = 'Timed out waiting for pool seat state to change. Use the Open OAuth Page link to retry.';
                     }
-                    codexOAuthSetOutcome('No account change was detected.');
+                    codexOAuthSetOutcome('No pool seat state change was detected.');
                     button.disabled = false;
                     return;
                 }
@@ -1152,7 +1154,7 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
             };
             if (status) {
                 status.style.color = '#666';
-                status.textContent = 'Waiting for the account list to change...';
+                status.textContent = 'Waiting for pool seat state to change...';
             }
             codexOAuthWatcher = window.setTimeout(tick, 2000);
         }
@@ -1218,9 +1220,9 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
                 openLink.href = data.oauth_url;
                 result.style.display = 'block';
                 status.style.color = 'var(--success-green)';
-                status.textContent = 'OAuth URL generated. Complete sign-in in the popup; this page will refresh when the account list changes.';
+                status.textContent = 'OAuth URL generated. Complete sign-in in the popup; this page will refresh when pool seat state changes.';
                 if (outcome) {
-                    outcome.textContent = 'Waiting for the account list to change.';
+                    outcome.textContent = 'Waiting for pool seat state to change.';
                 }
                 try {
                     sessionStorage.setItem(codexOAuthStatusKey, JSON.stringify({

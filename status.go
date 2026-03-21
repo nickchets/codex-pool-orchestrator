@@ -119,6 +119,8 @@ type AccountStatus struct {
 	RecoveryAt         string               `json:"recovery_at,omitempty"`
 	PrimaryResetIn     string               `json:"primary_reset_in,omitempty"`
 	SecondaryResetIn   string               `json:"secondary_reset_in,omitempty"`
+	LastRefreshAt      string               `json:"last_refresh_at,omitempty"`
+	AuthExpiresAt      string               `json:"auth_expires_at,omitempty"`
 	AuthExpiresIn      string               `json:"auth_expires_in,omitempty"`
 	LocalLastUsed      string               `json:"local_last_used,omitempty"`
 	UsageObserved      string               `json:"usage_observed,omitempty"`
@@ -409,11 +411,19 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		} else if a.Usage.SecondaryWindowMinutes > 0 {
 			status.SecondaryResetIn = fmt.Sprintf("~%dd", a.Usage.SecondaryWindowMinutes/60/24)
 		}
-		if !a.ExpiresAt.IsZero() {
-			if a.ExpiresAt.Before(now) {
+		if !a.LastRefresh.IsZero() {
+			status.LastRefreshAt = a.LastRefresh.UTC().Format(time.RFC3339)
+		}
+		authExpiresAt := a.ExpiresAt
+		if authExpiresAt.IsZero() && !claims.ExpiresAt.IsZero() {
+			authExpiresAt = claims.ExpiresAt
+		}
+		if !authExpiresAt.IsZero() {
+			status.AuthExpiresAt = authExpiresAt.UTC().Format(time.RFC3339)
+			if authExpiresAt.Before(now) {
 				status.AuthExpiresIn = "EXPIRED"
 			} else {
-				status.AuthExpiresIn = formatDuration(a.ExpiresAt.Sub(now))
+				status.AuthExpiresIn = formatDuration(authExpiresAt.Sub(now))
 			}
 		}
 		if !a.LastUsed.IsZero() {
@@ -899,7 +909,7 @@ const statusHTML = `<!DOCTYPE html>
         <div class="operator-card">
             <div class="operator-title">Operator Action</div>
             <div class="muted">
-                Starts the same flow as the operator <code>codex-oauth-start</code> command, keeps the popup opener attached, and refreshes this page automatically when the account list changes.
+                Starts the same flow as the operator <code>codex-oauth-start</code> command, keeps the popup opener attached, and refreshes this page automatically when pool seat state changes.
             </div>
             <button id="codex-oauth-start-btn" class="action-btn" onclick="startCodexOAuthFromStatus()">Start Codex OAuth</button>
             <div id="codex-oauth-start-status" class="muted" style="margin-top: 10px;"></div>
@@ -1062,7 +1072,7 @@ const statusHTML = `<!DOCTYPE html>
                 </div>
             </div>
             <div style="color: #8b949e; font-size: 12px; margin-top: 6px;">
-                {{.AvailableAccounts}}/{{.TotalAccounts}} available
+                {{.AvailableAccounts}}/{{.TotalAccounts}} healthy seats routable
                 {{if .NextSecondaryResetIn}} · next reset: {{.NextSecondaryResetIn}}{{end}}
                 {{if .ResetsIn24h}} · {{.ResetsIn24h}} reset in 24h{{end}}
             </div>
@@ -1118,12 +1128,12 @@ const statusHTML = `<!DOCTYPE html>
                 {{if .UsageObserved}}<br><small>usage {{.UsageObserved}}</small>{{end}}
             </td>
             <td class="usage-cell">
-                {{remainingBar .Routing.PrimaryHeadroomPct}}{{pct .Routing.PrimaryHeadroomPct}}
+                {{remainingBar .Routing.PrimaryHeadroomPct}}<small>remaining {{pct .Routing.PrimaryHeadroomPct}}</small>
                 <br><small>used {{pct .PrimaryUsed}}</small>
                 {{if .PrimaryResetIn}}<br><small>resets in {{.PrimaryResetIn}}</small>{{end}}
             </td>
             <td class="usage-cell">
-                {{remainingBar .Routing.SecondaryHeadroomPct}}{{pct .Routing.SecondaryHeadroomPct}}
+                {{remainingBar .Routing.SecondaryHeadroomPct}}<small>remaining {{pct .Routing.SecondaryHeadroomPct}}</small>
                 <br><small>used {{pct .SecondaryUsed}}</small>
                 {{if .SecondaryResetIn}}<br><small>resets in {{.SecondaryResetIn}}</small>{{end}}
             </td>
@@ -1201,10 +1211,8 @@ const statusHTML = `<!DOCTYPE html>
         are local proxy/runtime fields, not external quota consumption.
         "Effective" usage shows the weighted value used for load balancing.
         <br>
-        <a href="/admin/accounts">Raw account data</a> ·
-        <a href="/admin/tokens">Token analytics API</a> ·
-        <a href="/healthz">Health check</a> ·
-        <a href="/metrics">Prometheus metrics</a>
+        <a href="/status?format=json">Status JSON</a> ·
+        <a href="/healthz">Health check</a>
     </p>
     {{if .LocalOperatorEnabled}}
     <script>
@@ -1218,12 +1226,14 @@ const statusHTML = `<!DOCTYPE html>
                 .filter((acc) => acc && acc.type === 'codex')
                 .map((acc) => [
                     String(acc.id || ''),
+                    String(acc.type || ''),
                     String(acc.account_id || ''),
                     String(acc.workspace_id || ''),
                     String(acc.seat_key || ''),
-                    String(acc.auth_expires_in || ''),
-                    String(acc.local_last_used || ''),
-                    String(acc.local_tokens || ''),
+                    String(acc.last_refresh_at || ''),
+                    String(acc.auth_expires_at || ''),
+                    String(!!acc.disabled),
+                    String(!!acc.dead),
                 ].join('|'))
                 .sort();
 
@@ -1370,21 +1380,21 @@ const statusHTML = `<!DOCTYPE html>
                     }
                     if (status) {
                         status.style.color = '#8b949e';
-                            status.textContent = 'Waiting for the account list to change...';
+                        status.textContent = 'Waiting for pool seat state to change...';
                     }
                 } catch (error) {
                     if (status) {
                         status.style.color = '#8b949e';
-                        status.textContent = 'Waiting for the account list to change...';
+                        status.textContent = 'Waiting for pool seat state to change...';
                     }
                 }
                 if (attempts >= maxAttempts) {
                     codexOAuthStopWatcher();
                     if (status) {
                         status.style.color = '#f85149';
-                    status.textContent = 'Timed out waiting for the account list to change. Use the Open OAuth Page link to retry.';
+                        status.textContent = 'Timed out waiting for pool seat state to change. Use the Open OAuth Page link to retry.';
                     }
-                    codexOAuthSetOutcome('No account change was detected.');
+                    codexOAuthSetOutcome('No pool seat state change was detected.');
                     const button = document.getElementById('codex-oauth-start-btn');
                     if (button) {
                         button.disabled = false;
@@ -1395,7 +1405,7 @@ const statusHTML = `<!DOCTYPE html>
             };
             if (status) {
                 status.style.color = '#8b949e';
-                status.textContent = 'Waiting for the account list to change...';
+                status.textContent = 'Waiting for pool seat state to change...';
             }
             codexOAuthWatcher = window.setTimeout(tick, 2000);
         }
@@ -1451,8 +1461,8 @@ const statusHTML = `<!DOCTYPE html>
                 openLink.href = data.oauth_url;
                 result.style.display = 'block';
                 status.style.color = '#3fb950';
-                status.textContent = 'OAuth URL generated. Complete sign-in in the popup; this page will refresh when the account list changes.';
-                codexOAuthSetOutcome('Waiting for the account list to change.');
+                status.textContent = 'OAuth URL generated. Complete sign-in in the popup; this page will refresh when pool seat state changes.';
+                codexOAuthSetOutcome('Waiting for pool seat state to change.');
                 try {
                     sessionStorage.setItem(codexOAuthStatusKey, JSON.stringify({
                         before: beforeSnapshot,

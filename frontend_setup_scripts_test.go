@@ -183,10 +183,12 @@ func TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction(t *testing.T) 
 		"'Accept': 'application/json'",
 		"/status?format=json",
 		"keeps the popup opener attached",
-		"refreshes this page automatically when the account list changes",
-		"Waiting for the account list to change...",
-		"Waiting for the account list to change.",
+		"refreshes this page automatically when pool seat state changes",
+		"Waiting for pool seat state to change...",
+		"Waiting for pool seat state to change.",
 		"codex-oauth-result",
+		"auth_expires_at",
+		"last_refresh_at",
 	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("missing fragment %q in local landing body", fragment)
@@ -196,6 +198,9 @@ func TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction(t *testing.T) 
 		"/admin/codex/add",
 		"/admin/accounts",
 		"noopener noreferrer",
+		"auth_expires_in || ''",
+		"local_last_used || ''",
+		"local_tokens || ''",
 	} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("unexpected fragment %q in local landing body", forbidden)

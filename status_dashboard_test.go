@@ -322,18 +322,32 @@ func TestServeStatusPageClarifiesQuotaVsLocalFields(t *testing.T) {
 		"No live request is active right now.",
 		"Remaining (5h)",
 		"Remaining (7d)",
+		"healthy seats routable",
 		"Auth TTL",
 		"Local Last Used",
 		"Local Tokens",
 		"usage wham",
+		"remaining 85%",
+		"remaining 9%",
 		"used 91%",
 		"used 15%",
 		"Remaining columns show remaining headroom, not used quota.",
 		"Primary/Secondary usage and recovery come from the latest observed quota snapshot.",
 		"stay eligible at exactly 10% remaining",
+		"Status JSON",
+		"Health check",
 	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("missing fragment %q in body", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		`href="/admin/accounts"`,
+		`href="/admin/tokens"`,
+		`href="/metrics"`,
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("unexpected fragment %q in body", forbidden)
 		}
 	}
 }
@@ -387,6 +401,9 @@ func TestServeStatusPageReturnsJSONForExplicitJSONClients(t *testing.T) {
 	}
 	if payload.CurrentSeat == nil || payload.CurrentSeat.ID != "healthy" {
 		t.Fatalf("current_seat=%+v", payload.CurrentSeat)
+	}
+	if payload.Accounts[0].AuthExpiresAt == "" {
+		t.Fatalf("auth_expires_at missing: %+v", payload.Accounts[0])
 	}
 }
 
@@ -551,17 +568,26 @@ func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 		"/operator/codex/oauth-start",
 		"Open OAuth Page",
 		"keeps the popup opener attached",
-		"refreshes this page automatically when the account list changes",
-		"Waiting for the account list to change...",
-		"Waiting for the account list to change.",
+		"refreshes this page automatically when pool seat state changes",
+		"Waiting for pool seat state to change...",
+		"Waiting for pool seat state to change.",
 		"codex-oauth-result",
+		"auth_expires_at",
+		"last_refresh_at",
 	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("missing fragment %q in body", fragment)
 		}
 	}
-	if strings.Contains(body, "noopener noreferrer") {
-		t.Fatalf("unexpected opener suppression in status body")
+	for _, forbidden := range []string{
+		"noopener noreferrer",
+		"auth_expires_in || ''",
+		"local_last_used || ''",
+		"local_tokens || ''",
+	} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("unexpected fragment %q in status body", forbidden)
+		}
 	}
 }
 
