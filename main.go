@@ -391,6 +391,93 @@ func mapResponsesPath(in string) string {
 	}
 }
 
+const openAIInsecureAPIKeyProtocolPrefix = "openai-insecure-api-key."
+
+func extractWebSocketProtocolBearerToken(headerValue string) (string, bool) {
+	for _, part := range strings.Split(headerValue, ",") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, openAIInsecureAPIKeyProtocolPrefix) {
+			token := strings.TrimPrefix(part, openAIInsecureAPIKeyProtocolPrefix)
+			if token != "" {
+				return token, true
+			}
+		}
+	}
+	return "", false
+}
+
+func requestAuthHeader(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	if authHeader := strings.TrimSpace(r.Header.Get("Authorization")); authHeader != "" {
+		return authHeader
+	}
+	if !isWebSocketUpgradeRequest(r) {
+		return ""
+	}
+	if token, ok := extractWebSocketProtocolBearerToken(r.Header.Get("Sec-WebSocket-Protocol")); ok {
+		return "Bearer " + token
+	}
+	return ""
+}
+
+func rewriteWebSocketProtocolBearerToken(headers http.Header, token string) {
+	if token == "" {
+		return
+	}
+	values := headers.Values("Sec-WebSocket-Protocol")
+	if len(values) == 0 {
+		return
+	}
+	rewritten := make([]string, 0, len(values))
+	changed := false
+	for _, value := range values {
+		parts := strings.Split(value, ",")
+		for i, part := range parts {
+			part = strings.TrimSpace(part)
+			if strings.HasPrefix(part, openAIInsecureAPIKeyProtocolPrefix) {
+				part = openAIInsecureAPIKeyProtocolPrefix + token
+				changed = true
+			}
+			parts[i] = part
+		}
+		rewritten = append(rewritten, strings.Join(parts, ", "))
+	}
+	if !changed {
+		return
+	}
+	headers.Del("Sec-WebSocket-Protocol")
+	for _, value := range rewritten {
+		headers.Add("Sec-WebSocket-Protocol", value)
+	}
+}
+
+func isPermanentCodexAuthFailure(resp *http.Response, body []byte) bool {
+	if resp == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(resp.Header.Get("X-Openai-Ide-Error-Code")), "account_deactivated") {
+		return true
+	}
+	if len(body) == 0 {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	return strings.Contains(text, "account_deactivated") || strings.Contains(text, "deactivated_workspace")
+}
+
+func markAccountDead(reqID string, acc *Account, reason string) {
+	acc.mu.Lock()
+	acc.Dead = true
+	acc.Penalty += 100.0
+	acc.mu.Unlock()
+	log.Printf("[%s] marking account %s as dead: %s", reqID, acc.ID, reason)
+	if err := saveAccount(acc); err != nil {
+		log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
+	}
+}
+
 func extractConversationIDFromHeaders(headers http.Header) string {
 	for _, key := range []string{
 		"session_id",
@@ -587,7 +674,7 @@ func bodyForInspection(r *http.Request, body []byte) []byte {
 
 func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqID string) {
 	start := time.Now()
-	authHeader := r.Header.Get("Authorization")
+	authHeader := requestAuthHeader(r)
 
 	// Determine user ID - either from pool JWT, Claude pool token, or hashed IP
 	var userID string
@@ -889,7 +976,10 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				acc.mu.Lock()
 				// Codex accounts: only mark dead from usage endpoint failures, not proxy failures
 				// Other accounts: mark dead if refresh failed
-				if refreshFailed && acc.Type != AccountTypeCodex {
+				if acc.Type == AccountTypeCodex && isPermanentCodexAuthFailure(resp, errBody) {
+					acc.mu.Unlock()
+					markAccountDead(reqID, acc, "codex upstream account_deactivated")
+				} else if refreshFailed && acc.Type != AccountTypeCodex {
 					acc.Dead = true
 					acc.Penalty += 1.0
 					acc.mu.Unlock()
@@ -1151,6 +1241,7 @@ func (h *proxyHandler) proxyRequestWebSocket(
 		http.Error(w, fmt.Sprintf("account %s has empty access token", acc.ID), http.StatusServiceUnavailable)
 		return
 	}
+	_, protocolAuthUsed := extractWebSocketProtocolBearerToken(r.Header.Get("Sec-WebSocket-Protocol"))
 
 	outURL := new(url.URL)
 	*outURL = *r.URL
@@ -1187,6 +1278,9 @@ func (h *proxyHandler) proxyRequestWebSocket(
 			pr.Out.Header.Del("x-goog-api-key")
 			removeConflictingProxyHeaders(pr.Out.Header)
 			provider.SetAuthHeaders(pr.Out, acc)
+			if protocolAuthUsed {
+				rewriteWebSocketProtocolBearerToken(pr.Out.Header, access)
+			}
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			statusCode = resp.StatusCode
@@ -1201,15 +1295,19 @@ func (h *proxyHandler) proxyRequestWebSocket(
 
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 				acc.mu.Lock()
+				permanentCodexFailure := acc.Type == AccountTypeCodex && isPermanentCodexAuthFailure(resp, nil)
 				markDead := refreshFailed && acc.Type != AccountTypeCodex
-				if markDead {
+				if permanentCodexFailure {
+					acc.Dead = true
+					acc.Penalty += 100.0
+				} else if markDead {
 					acc.Dead = true
 					acc.Penalty += 1.0
 				} else {
 					acc.Penalty += 10.0
 				}
 				acc.mu.Unlock()
-				if markDead {
+				if permanentCodexFailure || markDead {
 					if err := saveAccount(acc); err != nil {
 						log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
 					}
@@ -1491,7 +1589,14 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		resp.Body = io.NopCloser(bytes.NewReader(errBody))
 
 		acc.mu.Lock()
-		if refreshFailed && acc.Type != AccountTypeCodex {
+		if acc.Type == AccountTypeCodex && isPermanentCodexAuthFailure(resp, errBody) {
+			acc.Dead = true
+			acc.Penalty += 100.0
+			acc.mu.Unlock()
+			if err := saveAccount(acc); err != nil {
+				log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
+			}
+		} else if refreshFailed && acc.Type != AccountTypeCodex {
 			acc.Dead = true
 			acc.Penalty += 1.0
 			acc.mu.Unlock()
