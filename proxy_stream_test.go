@@ -11,6 +11,8 @@ import (
 )
 
 func TestProxyStreamedRequestClaude(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
 	receivedCh := make(chan int64, 1)
 	keyCh := make(chan string, 1)
 
@@ -54,6 +56,7 @@ func TestProxyStreamedRequestClaude(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
+	req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken(getPoolJWTSecret(), "streamed-claude-user"))
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)

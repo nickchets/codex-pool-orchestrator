@@ -676,112 +676,16 @@ func bodyForInspection(r *http.Request, body []byte) []byte {
 
 func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqID string) {
 	start := time.Now()
-	authHeader := requestAuthHeader(r)
-
-	// Determine user ID - either from pool JWT, Claude pool token, or hashed IP
-	var userID string
-	var userType string // "pool_user" or "passthrough"
-	secret := getPoolJWTSecret()
-
-	// Check for Claude pool tokens first (sk-ant-oat01-pool-* or legacy sk-ant-api-pool-*)
-	if secret != "" {
-		if isClaudePool, uid := isClaudePoolToken(secret, authHeader); isClaudePool {
-			userID = uid
-			userType = "pool_user"
-			// Check if user is disabled
-			if h.poolUsers != nil {
-				if user := h.poolUsers.Get(userID); user != nil && user.Disabled {
-					http.Error(w, "pool user disabled", http.StatusForbidden)
-					return
-				}
-			}
-			if h.cfg.debug {
-				log.Printf("[%s] claude pool user request: user_id=%s", reqID, userID)
-			}
-		}
-	}
-
-	// Check for Gemini API key pool tokens (AIzaSy-pool-*)
-	if userID == "" && secret != "" {
-		// Check x-goog-api-key header (Gemini API key mode)
-		geminiAPIKey := r.Header.Get("x-goog-api-key")
-		if geminiAPIKey == "" {
-			// Also check query parameter
-			geminiAPIKey = r.URL.Query().Get("key")
-		}
-		if geminiAPIKey != "" {
-			if isPoolKey, uid, _ := isPoolGeminiAPIKey(secret, geminiAPIKey); isPoolKey {
-				userID = uid
-				userType = "pool_user"
-				// Check if user is disabled
-				if h.poolUsers != nil {
-					if user := h.poolUsers.Get(userID); user != nil && user.Disabled {
-						http.Error(w, "pool user disabled", http.StatusForbidden)
-						return
-					}
-				}
-				if h.cfg.debug {
-					log.Printf("[%s] gemini api key pool user request: user_id=%s", reqID, userID)
-				}
-			}
-		}
-	}
-
-	// Check for JWT-based pool tokens (Codex, Gemini OAuth)
-	if userID == "" && secret != "" {
-		if isPoolUser, uid, _ := isPoolUserToken(secret, authHeader); isPoolUser {
-			userID = uid
-			userType = "pool_user"
-			// Check if user is disabled
-			if h.poolUsers != nil {
-				if user := h.poolUsers.Get(userID); user != nil && user.Disabled {
-					http.Error(w, "pool user disabled", http.StatusForbidden)
-					return
-				}
-			}
-			if h.cfg.debug {
-				log.Printf("[%s] pool user request: user_id=%s", reqID, userID)
-			}
-		}
-	}
-
-	// Check for Gemini OAuth pool tokens (ya29.pool-*)
-	if userID == "" && secret != "" && strings.HasPrefix(authHeader, "Bearer ") {
-		token := strings.TrimPrefix(authHeader, "Bearer ")
-		if isPoolToken, uid := isGeminiOAuthPoolToken(secret, token); isPoolToken {
-			userID = uid
-			userType = "pool_user"
-			// Check if user is disabled
-			if h.poolUsers != nil {
-				if user := h.poolUsers.Get(userID); user != nil && user.Disabled {
-					http.Error(w, "pool user disabled", http.StatusForbidden)
-					return
-				}
-			}
-			if h.cfg.debug {
-				log.Printf("[%s] gemini oauth pool user request: user_id=%s", reqID, userID)
-			}
-		}
-	}
-
-	// Check if this looks like a real provider credential that should be passed through
-	// This allows users to use their own API keys while benefiting from the proxy infrastructure
-	if userID == "" {
-		if isProviderCred, providerType := looksLikeProviderCredential(authHeader); isProviderCred {
-			if h.cfg.debug {
-				log.Printf("[%s] pass-through request with %s credential", reqID, providerType)
-			}
-			h.proxyPassthrough(w, r, reqID, providerType, start)
-			return
-		}
-	}
-
-	// Reject unauthenticated requests - require a valid pool token
-	if userID == "" {
-		http.Error(w, "unauthorized: valid pool token required", http.StatusUnauthorized)
+	admission := h.resolveProxyAdmission(r, reqID)
+	if admission.Kind == proxyAdmissionPassthrough {
+		h.proxyPassthrough(w, r, reqID, admission.ProviderType, start)
 		return
 	}
-	_ = userType
+	if admission.Kind == proxyAdmissionRejected {
+		http.Error(w, admission.Message, admission.StatusCode)
+		return
+	}
+	userID := admission.UserID
 
 	provider, targetBase := h.pickUpstream(r.URL.Path, r.Header)
 	if provider == nil || targetBase == nil {
