@@ -10,18 +10,25 @@ _(empty — truthful idle handoff; successor cards are hydrated in `NEXT`)_
 
 ### NEXT
 
-#### REPO-CPO-REFAC-P1-T9: Reuse shared pre-copy status disposition in websocket flow
-1. Switch `proxyRequestWebSocket` `ModifyResponse` status handling to the new shared pre-copy disposition helpers instead of carrying a third local copy of managed API failure classification, auth-failure penalties, and 5xx penalties.
-2. Preserve websocket-specific `101` handling, protocol auth rewrite, and session pinning semantics exactly.
-3. Lock parity with focused websocket/proxy tests before touching broader routing or selector behavior.
+#### REPO-CPO-BUG-P1-T12: Harden gzip retryable inspection against short first reads
+1. Remove the remaining chunking sensitivity in gzip retryable-status inspection so managed API quota/auth markers are not lost when the transport surfaces only a short first read.
+2. Preserve early error response delivery and full client-visible body replay for streamed and websocket non-`101` paths.
+3. Lock the slice with late-marker and short-read gzip fixtures before returning to lower-priority websocket success-state refactors.
 
-**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse|TestApplyPreCopyUpstreamStatusDisposition" ./...`
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429DoesNotWaitForFullLargeBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestApplyPreCopyUpstreamStatusDisposition" ./...`
 
 ### BLOCKED
 
 _(none)_
 
 ### DONE
+
+#### REPO-CPO-REFAC-P1-T9: Reuse shared pre-copy status disposition in websocket flow
+1. Switch `proxyRequestWebSocket` `ModifyResponse` status handling to the shared pre-copy disposition helpers instead of carrying a third local copy of managed API failure classification, auth-failure penalties, and `5xx` penalties.
+2. Preserve websocket-specific `101` handling, protocol auth rewrite, session pinning, and client-visible error bodies exactly.
+3. Lock parity with focused websocket/proxy tests and live websocket smoke before touching broader routing or selector behavior.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestProxyStreamedRequestClaude|TestProxyStreamedManagedAPI5xxPreservesFullErrorBody|TestProxyStreamedManagedAPI5xxDoesNotWaitForFullLargeBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429DoesNotWaitForFullLargeBody|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat|TestBuild.*RequestShape|TestParse|TestApplyPreCopyUpstreamStatusDisposition" ./... && go test ./... && go build ./... && go build -o /home/lap/.local/bin/codex-pool . && systemctl --user restart codex-pool.service && systemctl --user is-active codex-pool.service && curl -fsS http://127.0.0.1:8989/healthz && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_websocket_t9.json && AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && timeout 60s curl -sS -N -o /tmp/cpo_live_proxy_websocket_t9.sse -w '%{http_code}' http://127.0.0.1:8989/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}' && AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && exec 3<>/dev/tcp/127.0.0.1/8989 && printf 'GET /responses HTTP/1.1\r\nHost: 127.0.0.1:8989\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nAuthorization: Bearer %s\r\nsession_id: live-ws-t9-smoke\r\n\r\n' \"$AUTH\" >&3 && IFS= read -r status <&3 && printf '%s\n' \"$status\" >/tmp/cpo_live_proxy_websocket_t9_handshake.txt && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_websocket_t9_after_smoke.json`
 
 #### REPO-CPO-BUG-P1-T10: Preserve full streamed error bodies during status inspection
 1. Ensure streamed pre-copy status inspection does not truncate forwarded client error bodies when it needs to inspect managed API failures or auth failures.

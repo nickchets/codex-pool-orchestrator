@@ -2,13 +2,17 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha1"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -325,6 +329,12 @@ func TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat(t
 	if !deadAcc.Dead {
 		t.Fatalf("expected dead seat to be marked dead after account_deactivated response")
 	}
+	pool.mu.RLock()
+	_, pinnedDeadSession := pool.convPin["thread-ws-dead-1"]
+	pool.mu.RUnlock()
+	if pinnedDeadSession {
+		t.Fatalf("expected failed handshake session to stay unpinned")
+	}
 
 	secondStatus := performRawWebSocketHandshake(t, proxy.URL, "/responses", map[string]string{
 		"Sec-WebSocket-Protocol": "openai-insecure-api-key." + auth.Tokens.AccessToken,
@@ -332,6 +342,102 @@ func TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat(t
 	})
 	if !strings.Contains(secondStatus, "101") {
 		t.Fatalf("expected second response to use next live seat, got %q", secondStatus)
+	}
+}
+
+func TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	largeMessage := strings.Repeat("x", 3000)
+	expectedBody := []byte(fmt.Sprintf(`{"error":{"message":"%s"}}`, largeMessage))
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"probe","status":"completed"}`))
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write(expectedBody)
+	}))
+	defer upstream.Close()
+
+	baseURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	codex := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	claude := NewClaudeProvider(baseURL)
+	gemini := NewGeminiProvider(baseURL, baseURL)
+	registry := NewProviderRegistry(codex, claude, gemini)
+
+	tmp := t.TempDir()
+	accFile := filepath.Join(tmp, "openai_api_deadbeef.json")
+	if err := os.WriteFile(accFile, []byte(`{"OPENAI_API_KEY":"sk-proj-test","auth_mode":"api_key","plan_type":"api"}`), 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+
+	acc := &Account{
+		ID:          "openai_api_deadbeef",
+		Type:        AccountTypeCodex,
+		File:        accFile,
+		AccessToken: "sk-proj-test",
+		PlanType:    "api",
+		AuthMode:    accountAuthModeAPIKey,
+	}
+	pool := newPoolState([]*Account{acc}, false)
+
+	h := &proxyHandler{
+		cfg: config{
+			requestTimeout:       5 * time.Second,
+			maxInMemoryBodyBytes: 1024,
+		},
+		transport: http.DefaultTransport,
+		pool:      pool,
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+	}
+
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	status, gotBody := performRawWebSocketHTTPResponse(t, proxy.URL, "/responses", map[string]string{
+		"Authorization": "Bearer " + generateClaudePoolToken(getPoolJWTSecret(), "thread-ws-managed-502"),
+		"session_id":    "thread-ws-managed-502",
+	})
+	if !strings.Contains(status, "502") {
+		t.Fatalf("expected 502 response, got %q", status)
+	}
+	if !bytes.Equal(gotBody, expectedBody) {
+		t.Fatalf("body len = %d want %d", len(gotBody), len(expectedBody))
+	}
+	if calls != 2 {
+		t.Fatalf("upstream calls = %d, want 2", calls)
+	}
+	if acc.Dead {
+		t.Fatalf("expected managed api key to remain non-dead on transient 5xx")
+	}
+	if acc.HealthStatus != "error" {
+		t.Fatalf("health status = %q", acc.HealthStatus)
+	}
+	if !strings.Contains(acc.HealthError, "Bad Gateway") {
+		t.Fatalf("health error = %q", acc.HealthError)
+	}
+	if !acc.LastUsed.IsZero() {
+		t.Fatalf("expected failed websocket handshake to keep LastUsed zero, got %v", acc.LastUsed)
+	}
+	recent := h.recent.snapshot()
+	if len(recent) != 1 || !strings.Contains(recent[0], "managed api fallback 502 Bad Gateway") {
+		t.Fatalf("recent = %+v", recent)
+	}
+	pool.mu.RLock()
+	_, pinned := pool.convPin["thread-ws-managed-502"]
+	pool.mu.RUnlock()
+	if pinned {
+		t.Fatalf("expected failed managed-api handshake session to stay unpinned")
 	}
 }
 
@@ -433,6 +539,58 @@ func performRawWebSocketHandshake(
 		}
 	}
 	return strings.TrimSpace(statusLine)
+}
+
+func performRawWebSocketHTTPResponse(
+	t *testing.T,
+	serverURL string,
+	path string,
+	headers map[string]string,
+) (string, []byte) {
+	t.Helper()
+
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		t.Fatalf("parse server URL: %v", err)
+	}
+	conn, err := net.Dial("tcp", u.Host)
+	if err != nil {
+		t.Fatalf("dial websocket endpoint: %v", err)
+	}
+	defer conn.Close()
+
+	key := "dGhlIHNhbXBsZSBub25jZQ=="
+	request := fmt.Sprintf(
+		"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n",
+		path,
+		u.Host,
+		key,
+	)
+	for k, v := range headers {
+		request += fmt.Sprintf("%s: %s\r\n", k, v)
+	}
+	request += "\r\n"
+
+	if _, err := conn.Write([]byte(request)); err != nil {
+		t.Fatalf("write websocket request: %v", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	req, err := http.NewRequest(http.MethodGet, "http://"+u.Host+path, nil)
+	if err != nil {
+		t.Fatalf("new request for response parsing: %v", err)
+	}
+	resp, err := http.ReadResponse(reader, req)
+	if err != nil {
+		t.Fatalf("read websocket HTTP response: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read websocket HTTP response body: %v", err)
+	}
+	return resp.Status, body
 }
 
 func writeWebSocketSwitchingProtocolsResponse(w http.ResponseWriter, r *http.Request) {

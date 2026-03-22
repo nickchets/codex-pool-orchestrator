@@ -736,6 +736,89 @@ func bodyForInspection(r *http.Request, body []byte) []byte {
 	return body
 }
 
+const preCopyStatusInspectionLimit int64 = 2048
+const gzipPreCopyStatusInspectionLimit int64 = 2048
+const gzipPreCopyStatusRawReadLimit int64 = 16384
+
+func responseBodyLooksGzip(resp *http.Response, prefix []byte) bool {
+	if resp != nil && strings.Contains(strings.ToLower(resp.Header.Get("Content-Encoding")), "gzip") {
+		return true
+	}
+	return len(prefix) >= 2 && prefix[0] == 0x1f && prefix[1] == 0x8b
+}
+
+func replayResponseBody(prefix []byte, body io.ReadCloser) io.ReadCloser {
+	return struct {
+		io.Reader
+		io.Closer
+	}{
+		Reader: io.MultiReader(bytes.NewReader(prefix), body),
+		Closer: body,
+	}
+}
+
+func inspectGzipResponseBodyPrefix(body io.ReadCloser, limit int64) ([]byte, []byte) {
+	if body == nil || limit <= 0 {
+		return nil, nil
+	}
+	if limit > gzipPreCopyStatusInspectionLimit {
+		limit = gzipPreCopyStatusInspectionLimit
+	}
+
+	rawLimit := gzipPreCopyStatusRawReadLimit
+	if rawLimit < limit {
+		rawLimit = limit
+	}
+	rawPrefix := make([]byte, rawLimit)
+	n, err := body.Read(rawPrefix)
+	rawPrefix = rawPrefix[:n]
+	if n == 0 {
+		return nil, nil
+	}
+
+	gz, err := gzip.NewReader(bytes.NewReader(rawPrefix))
+	if err != nil {
+		return rawPrefix, rawPrefix
+	}
+	defer gz.Close()
+
+	inspected, _ := io.ReadAll(io.LimitReader(gz, limit))
+	return inspected, rawPrefix
+}
+
+func inspectResponseBodyPrefix(resp *http.Response, limit int64) []byte {
+	if resp == nil || resp.Body == nil || limit <= 0 {
+		return nil
+	}
+
+	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Encoding")), "gzip") {
+		inspected, rawPrefix := inspectGzipResponseBodyPrefix(resp.Body, limit)
+		if len(inspected) > int(limit) {
+			inspected = inspected[:limit]
+		}
+		resp.Body = replayResponseBody(rawPrefix, resp.Body)
+		return inspected
+	}
+
+	prefix, _ := io.ReadAll(io.LimitReader(resp.Body, limit))
+	if responseBodyLooksGzip(resp, prefix) {
+		resp.Body = replayResponseBody(prefix, resp.Body)
+		inspected, rawPrefix := inspectGzipResponseBodyPrefix(resp.Body, limit)
+		if len(inspected) > int(limit) {
+			inspected = inspected[:limit]
+		}
+		resp.Body = replayResponseBody(rawPrefix, resp.Body)
+		return inspected
+	}
+
+	inspected := bodyForInspection(nil, prefix)
+	if len(inspected) > int(limit) {
+		inspected = inspected[:limit]
+	}
+	resp.Body = replayResponseBody(prefix, resp.Body)
+	return inspected
+}
+
 func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqID string) {
 	start := time.Now()
 	admission := h.resolveProxyAdmission(r, reqID)
@@ -1159,46 +1242,16 @@ func (h *proxyHandler) proxyRequestWebSocket(w http.ResponseWriter, r *http.Requ
 		ModifyResponse: func(resp *http.Response) error {
 			statusCode = resp.StatusCode
 			provider.ParseUsageHeaders(acc, resp.Header)
-
-			if resp.StatusCode == http.StatusTooManyRequests && !isManagedCodexAPIKeyAccount(acc) {
-				h.applyRateLimit(acc, resp.Header, defaultRateLimitBackoff)
-				acc.mu.Lock()
-				acc.Penalty += 1.0
-				acc.mu.Unlock()
+			needStatusBody := resp.StatusCode != http.StatusSwitchingProtocols &&
+				((isManagedCodexAPIKeyAccount(acc) && isManagedCodexAPIKeyRetryableStatus(resp.StatusCode)) ||
+					resp.StatusCode == http.StatusUnauthorized ||
+					resp.StatusCode == http.StatusForbidden)
+			var inspectedStatusBody []byte
+			if needStatusBody {
+				inspectedStatusBody = inspectResponseBodyPrefix(resp, preCopyStatusInspectionLimit)
 			}
-
-			if isManagedCodexAPIKeyAccount(acc) && resp.StatusCode != http.StatusSwitchingProtocols {
-				if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || (resp.StatusCode >= 500 && resp.StatusCode <= 599) {
-					errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-					decompressed := bodyForInspection(nil, errBody)
-					if err := h.handleManagedCodexAPIKeyFailure(reqID, acc, resp, decompressed); err != nil {
-						h.recent.add(err.Error())
-					}
-					resp.Body = io.NopCloser(bytes.NewReader(errBody))
-				}
-			} else if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-				acc.mu.Lock()
-				permanentCodexFailure := acc.Type == AccountTypeCodex && isPermanentCodexAuthFailure(resp, nil)
-				markDead := refreshFailed && acc.Type != AccountTypeCodex
-				if permanentCodexFailure {
-					acc.Dead = true
-					acc.Penalty += 100.0
-				} else if markDead {
-					acc.Dead = true
-					acc.Penalty += 1.0
-				} else {
-					acc.Penalty += 10.0
-				}
-				acc.mu.Unlock()
-				if permanentCodexFailure || markDead {
-					if err := saveAccount(acc); err != nil {
-						log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
-					}
-				}
-			} else if resp.StatusCode >= 500 && resp.StatusCode <= 599 {
-				acc.mu.Lock()
-				acc.Penalty += 0.3
-				acc.mu.Unlock()
+			if resp.StatusCode != http.StatusSwitchingProtocols {
+				_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, inspectedStatusBody)
 			}
 
 			if resp.StatusCode == http.StatusSwitchingProtocols || (resp.StatusCode >= 200 && resp.StatusCode < 300) {
@@ -1485,15 +1538,10 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		resp.StatusCode == http.StatusForbidden
 	var inspectedStatusBody []byte
 	if needStatusBody {
-		errBody, _ := io.ReadAll(resp.Body)
-		inspectedStatusBody = bodyForInspection(nil, errBody)
-		if len(inspectedStatusBody) > 2048 {
-			inspectedStatusBody = inspectedStatusBody[:2048]
-		}
+		inspectedStatusBody = inspectResponseBodyPrefix(resp, preCopyStatusInspectionLimit)
 		if !isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 			log.Printf("[%s] account %s got %d from %s, body=%s", reqID, acc.ID, resp.StatusCode, outReq.URL.Host, safeText(inspectedStatusBody))
 		}
-		resp.Body = io.NopCloser(bytes.NewReader(errBody))
 	}
 	_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, inspectedStatusBody)
 
@@ -1509,11 +1557,13 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	copyHeader(w.Header(), resp.Header)
 	removeHopByHopHeaders(w.Header())
 	h.replaceUsageHeaders(w.Header())
-	w.WriteHeader(resp.StatusCode)
-
 	flusher, _ := w.(http.Flusher)
 	respContentType := resp.Header.Get("Content-Type")
 	isSSE := provider.DetectsSSE(r.URL.Path, respContentType)
+	w.WriteHeader(resp.StatusCode)
+	if needStatusBody && !isSSE && flusher != nil {
+		flusher.Flush()
+	}
 
 	var writer io.Writer = w
 	var fw *flushWriter

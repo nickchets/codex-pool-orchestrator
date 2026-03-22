@@ -235,6 +235,35 @@
 - Notes
   - This slice intentionally stopped before websocket response handling; `proxyRequestWebSocket` still carries a third local copy of the same pre-copy status disposition logic and is the next smallest safe extraction target.
 
+### 2026-03-22T18:37:42Z | REPO-CPO-REFAC-P1-T9
+- Commands
+  - `go test -count=1 -timeout 120s -run "TestProxyStreamedRequestClaude|TestProxyStreamedManagedAPI5xxPreservesFullErrorBody|TestProxyStreamedManagedAPI5xxDoesNotWaitForFullLargeBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429DoesNotWaitForFullLargeBody|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat|TestBuild.*RequestShape|TestParse|TestApplyPreCopyUpstreamStatusDisposition" ./...`
+  - `go test ./...`
+  - `go build ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `systemctl --user is-active codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_websocket_t9.json`
+  - `AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && timeout 60s curl -sS -N -o /tmp/cpo_live_proxy_websocket_t9.sse -w '%{http_code}' http://127.0.0.1:8989/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}'`
+  - `AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && exec 3<>/dev/tcp/127.0.0.1/8989 && printf 'GET /responses HTTP/1.1\r\nHost: 127.0.0.1:8989\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nAuthorization: Bearer %s\r\nsession_id: live-ws-t9-smoke\r\n\r\n' "$AUTH" >&3 && IFS= read -r status <&3 && printf '%s\n' "$status" >/tmp/cpo_live_proxy_websocket_t9_handshake.txt`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_websocket_t9_after_smoke.json`
+- Result
+  - PASS
+  - `proxyRequestWebSocket` `ModifyResponse` now reuses the shared pre-copy status disposition helper path instead of carrying a third local copy of managed API fallback classification, auth-failure penalties, and `5xx` penalties.
+  - New focused websocket regression coverage now proves managed API `502` handshake failures preserve the full upstream error body, record fallback health/error state, and do not pin failed sessions; the existing deactivated-seat websocket test also now asserts failed `401` handshakes stay unpinned.
+  - The shared pre-copy contour now uses one bounded prefix-inspection + rewind helper for plain bodies plus a gzip path that reads one raw compressed prefix, partially decodes only the early JSON needed for classification, and then replays the raw prefix back to the client stream. This keeps quota/auth markers intact without waiting for slow compressed bodies to finish.
+  - Focused proxy/websocket tests, full `go test ./...`, and `go build ./...` all passed after the extraction.
+  - After deploy, `systemctl --user is-active codex-pool.service` returned `active`, `curl -fsS http://127.0.0.1:8989/healthz` returned `{"status":"ok","uptime":"22s"}`, live `/responses` smoke returned HTTP `200`, and a raw websocket handshake against `/responses` returned `HTTP/1.1 101 Switching Protocols`.
+  - `/status?format=json` succeeded before and after live smoke; artifacts were captured for the pre-smoke snapshot, post-smoke snapshot, SSE smoke body, and websocket handshake status.
+- Artifacts
+  - `/tmp/cpo_status_websocket_t9.json`
+  - `/tmp/cpo_status_websocket_t9_after_smoke.json`
+  - `/tmp/cpo_live_proxy_websocket_t9.sse`
+  - `/tmp/cpo_live_proxy_websocket_t9_handshake.txt`
+- Notes
+  - This slice intentionally stopped at pre-copy websocket status handling; a follow-up blind audit still flags one residual risk: gzip retryable inspection remains sensitive to pathological short first reads at the transport layer, so the next truthful successor is hardening that chunking edge before returning to lower-priority websocket success-state refactors.
+
 ### 2026-03-22T18:17:07Z | REPO-CPO-BUG-P1-T10
 - Commands
   - `go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyStreamedManagedAPI5xxPreservesFullErrorBody|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse|TestFinalizeProxyResponse|TestFinalizeCopiedProxyResponse|TestApplyPreCopyUpstreamStatusDisposition" ./...`
