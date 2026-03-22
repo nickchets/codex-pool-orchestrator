@@ -126,3 +126,29 @@
 - Notes
   - This slice intentionally unified ingestion contracts without touching scoring, capacity math, or retry policy.
   - The next smallest remaining debt after this slice is the duplicated SSE/response-recording callback flow between buffered and streamed proxy paths in `main.go`.
+
+### 2026-03-22T14:35:26Z | REPO-CPO-REFAC-P1-T5
+- Commands
+  - `go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse" ./...`
+  - `go test ./...`
+  - `go build ./...`
+  - `cp /home/lap/.local/bin/codex-pool /home/lap/.local/bin/codex-pool.backup_20260322T143156Z`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `systemctl --user is-active codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_stream_capture.json`
+  - `AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && timeout 60s curl -sS -N -o /tmp/cpo_live_proxy_stream_capture.sse -w '%{http_code}' http://127.0.0.1:8989/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}'`
+- Result
+  - PASS
+  - Buffered and streamed proxy paths now share one SSE usage recorder helper instead of carrying two near-identical intercept closures in `main.go`.
+  - Managed API-key SSE failure classification, Claude two-event accumulation, and enriched usage recording stayed behaviorally identical under the targeted proxy tests.
+  - Full `go test ./...` stayed green after the extraction.
+  - After deploy, `systemctl --user is-active codex-pool.service` returned `active`, `/healthz` returned `{"status":"ok","uptime":"33s"}`, and live `/responses` smoke returned HTTP `200` with completed SSE output `OK`.
+  - `/status?format=json` after restart remained coherent, with `pool.total_accounts=9`, `eligible_accounts=7`, and a stable next seat preview pointing at `john4454`.
+- Artifacts
+  - `/tmp/cpo_status_stream_capture.json`
+  - `/tmp/cpo_live_proxy_stream_capture.sse`
+  - `/home/lap/.local/bin/codex-pool.backup_20260322T143156Z`
+- Notes
+  - This slice intentionally touched only response-stream usage capture; post-copy success bookkeeping and retry/error branches remain the next obvious duplication seam.

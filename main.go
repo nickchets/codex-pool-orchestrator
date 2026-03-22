@@ -982,63 +982,18 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		managedStreamFailed := false
 		var managedStreamFailureOnce sync.Once
 
-		// For SSE streams, intercept usage events inline as they flow through
 		if isSSE {
-			// Claude sends usage across two SSE events (message_start: input, message_delta: output).
-			// Accumulate them into a single RequestUsage before recording.
-			var claudeAccum *RequestUsage
-			writer = &sseInterceptWriter{
-				w: writer,
-				eventCallback: func(data []byte) {
-					if !isManagedCodexAPIKeyAccount(acc) {
-						return
-					}
-					disposition, ok := classifyManagedOpenAIAPISSEError(data)
-					if !ok {
-						return
-					}
-					managedStreamFailureOnce.Do(func() {
-						managedStreamFailed = true
-						applyManagedOpenAIAPIDisposition(acc, disposition, nil, time.Now())
-						if err := saveAccount(acc); err != nil {
-							log.Printf("[%s] warning: failed to save managed api key %s stream failure: %v", reqID, acc.ID, err)
-						}
-						log.Printf("[%s] managed api key %s stream failure: dead=%v rate_limited=%v reason=%s", reqID, acc.ID, disposition.MarkDead, disposition.RateLimit, disposition.Reason)
-					})
-				},
-				callback: func(data []byte) {
-					obj, ok := parseUsageEventObject(data)
-					if !ok {
-						if h.cfg.debug {
-							log.Printf("[%s] SSE callback: failed to parse usage event", reqID)
-						}
-						return
-					}
-					ru := provider.ParseUsage(obj)
-					if ru == nil {
-						return
-					}
-
-					// For Claude, accumulate input (message_start) and output (message_delta)
-					// into a single record before emitting.
-					if acc.Type == AccountTypeClaude {
-						if claudeAccum == nil {
-							// First event (message_start): has input tokens
-							claudeAccum = ru
-						} else {
-							// Second event (message_delta): has output tokens — merge and emit
-							claudeAccum.OutputTokens = ru.OutputTokens
-							claudeAccum.BillableTokens = clampNonNegative(
-								claudeAccum.InputTokens - claudeAccum.CachedInputTokens + ru.OutputTokens)
-							ru = claudeAccum
-							claudeAccum = nil
-							h.recordUsage(acc, *enrichUsageRecord(acc, userID, ru, headerPrimaryPct, headerSecondaryPct))
-						}
-						return
-					}
-					h.recordUsage(acc, *enrichUsageRecord(acc, userID, ru, headerPrimaryPct, headerSecondaryPct))
-				},
-			}
+			writer = h.wrapUsageInterceptWriter(
+				reqID,
+				writer,
+				provider,
+				acc,
+				userID,
+				headerPrimaryPct,
+				headerSecondaryPct,
+				&managedStreamFailed,
+				&managedStreamFailureOnce,
+			)
 		}
 
 		// Wrap response body with idle timeout to kill zombie SSE connections.
@@ -1627,56 +1582,17 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	}
 
 	if isSSE {
-		// Claude sends usage across two SSE events (message_start: input, message_delta: output).
-		// Accumulate them into a single RequestUsage before recording.
-		var claudeAccum *RequestUsage
-		writer = &sseInterceptWriter{
-			w: writer,
-			eventCallback: func(data []byte) {
-				if !isManagedCodexAPIKeyAccount(acc) {
-					return
-				}
-				disposition, ok := classifyManagedOpenAIAPISSEError(data)
-				if !ok {
-					return
-				}
-				managedStreamFailureOnce.Do(func() {
-					managedStreamFailed = true
-					applyManagedOpenAIAPIDisposition(acc, disposition, nil, time.Now())
-					if err := saveAccount(acc); err != nil {
-						log.Printf("[%s] warning: failed to save managed api key %s stream failure: %v", reqID, acc.ID, err)
-					}
-					log.Printf("[%s] managed api key %s stream failure: dead=%v rate_limited=%v reason=%s", reqID, acc.ID, disposition.MarkDead, disposition.RateLimit, disposition.Reason)
-				})
-			},
-			callback: func(data []byte) {
-				obj, ok := parseUsageEventObject(data)
-				if !ok {
-					return
-				}
-				ru := provider.ParseUsage(obj)
-				if ru == nil {
-					return
-				}
-
-				// For Claude, accumulate input (message_start) and output (message_delta)
-				// into a single record before emitting.
-				if acc.Type == AccountTypeClaude {
-					if claudeAccum == nil {
-						claudeAccum = ru
-					} else {
-						claudeAccum.OutputTokens = ru.OutputTokens
-						claudeAccum.BillableTokens = clampNonNegative(
-							claudeAccum.InputTokens - claudeAccum.CachedInputTokens + ru.OutputTokens)
-						ru = claudeAccum
-						claudeAccum = nil
-						h.recordUsage(acc, *enrichUsageRecord(acc, userID, ru, headerPrimaryPct, headerSecondaryPct))
-					}
-					return
-				}
-				h.recordUsage(acc, *enrichUsageRecord(acc, userID, ru, headerPrimaryPct, headerSecondaryPct))
-			},
-		}
+		writer = h.wrapUsageInterceptWriter(
+			reqID,
+			writer,
+			provider,
+			acc,
+			userID,
+			headerPrimaryPct,
+			headerSecondaryPct,
+			&managedStreamFailed,
+			&managedStreamFailureOnce,
+		)
 	}
 
 	// Wrap response body with idle timeout to kill zombie SSE connections.

@@ -10,10 +10,10 @@ _(empty — truthful idle handoff; successor cards are hydrated in `NEXT`)_
 
 ### NEXT
 
-#### REPO-CPO-REFAC-P1-T5: Collapse duplicated response streaming usage capture
-1. Extract one shared response-stream usage recorder for buffered and streamed proxy paths in `main.go`.
-2. Preserve managed API-key SSE failure handling, Claude two-event accumulation, and conversation pinning semantics exactly.
-3. Lock parity with targeted proxy/usage tests before touching retry or routing behavior.
+#### REPO-CPO-REFAC-P1-T6: Extract post-response finalizer
+1. Collapse duplicated post-copy success handling for buffered and streamed proxy paths: sample logging, non-SSE usage fallback, conversation pinning, managed API recovery, and penalty decay.
+2. Preserve retry, refresh, header replacement, and websocket behavior exactly.
+3. Lock parity with targeted proxy tests and live smoke before touching any routing heuristics.
 
 **Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse" ./...`
 
@@ -22,6 +22,13 @@ _(empty — truthful idle handoff; successor cards are hydrated in `NEXT`)_
 _(none)_
 
 ### DONE
+
+#### REPO-CPO-REFAC-P1-T5: Collapse duplicated response streaming usage capture
+1. Extract one shared response-stream usage recorder for buffered and streamed proxy paths in `main.go`.
+2. Preserve managed API-key SSE failure handling, Claude two-event accumulation, and conversation pinning semantics exactly.
+3. Lock parity with targeted proxy/usage tests before touching retry or routing behavior.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go build ./... && go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse" ./... && go test ./... && systemctl --user is-active codex-pool.service && curl -fsS http://127.0.0.1:8989/healthz && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_stream_capture.json`
 
 #### REPO-CPO-REFAC-P1-T3: Unify usage ingestion
 1. Replace duplicated header/body/SSE usage parsing with one canonical `UsageDelta` pipeline.
