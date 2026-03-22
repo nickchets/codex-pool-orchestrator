@@ -480,6 +480,68 @@ func markAccountDead(reqID string, acc *Account, reason string) {
 	}
 }
 
+func isManagedCodexAPIKeyRetryableStatus(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests ||
+		statusCode == http.StatusPaymentRequired ||
+		isRetryableStatus(statusCode)
+}
+
+func (h *proxyHandler) applyUpstreamAuthFailureDisposition(reqID string, acc *Account, resp *http.Response, refreshFailed bool, inspectedBody []byte) {
+	if acc == nil || resp == nil {
+		return
+	}
+	if acc.Type == AccountTypeCodex && isPermanentCodexAuthFailure(resp, inspectedBody) {
+		markAccountDead(reqID, acc, "codex upstream account_deactivated")
+		return
+	}
+	if refreshFailed && acc.Type != AccountTypeCodex {
+		acc.mu.Lock()
+		acc.Dead = true
+		acc.Penalty += 1.0
+		acc.mu.Unlock()
+		if err := saveAccount(acc); err != nil {
+			log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
+		}
+		return
+	}
+	acc.mu.Lock()
+	acc.Penalty += 10.0
+	acc.mu.Unlock()
+}
+
+func (h *proxyHandler) applyPreCopyUpstreamStatusDisposition(reqID string, acc *Account, resp *http.Response, refreshFailed bool, inspectedBody []byte) error {
+	if acc == nil || resp == nil {
+		return nil
+	}
+	if resp.StatusCode == http.StatusTooManyRequests && !isManagedCodexAPIKeyAccount(acc) {
+		h.applyRateLimit(acc, resp.Header, defaultRateLimitBackoff)
+		acc.mu.Lock()
+		acc.Penalty += 1.0
+		acc.mu.Unlock()
+		return nil
+	}
+	if isManagedCodexAPIKeyAccount(acc) && isManagedCodexAPIKeyRetryableStatus(resp.StatusCode) {
+		err := h.handleManagedCodexAPIKeyFailure(reqID, acc, resp, inspectedBody)
+		if err == nil {
+			err = fmt.Errorf("managed api fallback %s", resp.Status)
+		}
+		if h.recent != nil {
+			h.recent.add(err.Error())
+		}
+		return err
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		h.applyUpstreamAuthFailureDisposition(reqID, acc, resp, refreshFailed, inspectedBody)
+		return nil
+	}
+	if resp.StatusCode >= 500 && resp.StatusCode <= 599 {
+		acc.mu.Lock()
+		acc.Penalty += 0.3
+		acc.mu.Unlock()
+	}
+	return nil
+}
+
 func extractConversationIDFromHeaders(headers http.Header) string {
 	for _, key := range []string{
 		"session_id",
@@ -843,21 +905,14 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		lastStatus = resp.StatusCode
 
 		if resp.StatusCode == http.StatusTooManyRequests && !isManagedCodexAPIKeyAccount(acc) {
-			h.applyRateLimit(acc, resp.Header, defaultRateLimitBackoff)
-			acc.mu.Lock()
-			acc.Penalty += 1.0
-			acc.mu.Unlock()
+			_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, nil)
 		}
 
 		if isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired) {
 			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 			resp.Body.Close()
 			errBody = bodyForInspection(nil, errBody)
-			lastErr = h.handleManagedCodexAPIKeyFailure(reqID, acc, resp, errBody)
-			if lastErr == nil {
-				lastErr = fmt.Errorf("managed api fallback %s", resp.Status)
-			}
-			h.recent.add(lastErr.Error())
+			lastErr = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, errBody)
 			continue
 		}
 
@@ -891,50 +946,28 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			errBodyStr := string(errBody)
 
 			if isManagedCodexAPIKeyAccount(acc) {
-				lastErr = h.handleManagedCodexAPIKeyFailure(reqID, acc, resp, errBody)
-				if lastErr == nil {
-					lastErr = fmt.Errorf("managed api fallback %s", resp.Status)
-				}
-				h.recent.add(lastErr.Error())
+				lastErr = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, errBody)
 				if h.cfg.debug {
 					log.Printf("[%s] attempt %d/%d account=%s retryable status=%d refreshFailed=%v", reqID, attempt, attempts, acc.ID, resp.StatusCode, refreshFailed)
 				}
 				continue
 			}
 
-			// Mark account health and try another one.
+			_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, errBody)
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-				acc.mu.Lock()
-				// Codex accounts: only mark dead from usage endpoint failures, not proxy failures
-				// Other accounts: mark dead if refresh failed
-				if acc.Type == AccountTypeCodex && isPermanentCodexAuthFailure(resp, errBody) {
-					acc.mu.Unlock()
-					markAccountDead(reqID, acc, "codex upstream account_deactivated")
-				} else if refreshFailed && acc.Type != AccountTypeCodex {
-					acc.Dead = true
-					acc.Penalty += 1.0
-					acc.mu.Unlock()
+				if refreshFailed && acc.Type != AccountTypeCodex {
 					log.Printf("[%s] account %s DEAD: 401/403 refresh failed, body=%s", reqID, acc.ID, errBodyStr)
-					if err := saveAccount(acc); err != nil {
-						log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
-					}
-				} else {
-					// Codex: never mark dead from proxy, only from usage tracking
-					// Others: refresh was rate-limited or not needed
-					// Add heavy penalty so this account drops below working ones
-					acc.Penalty += 10.0
-					acc.mu.Unlock()
+				} else if !isPermanentCodexAuthFailure(resp, errBody) {
 					// Always log 401/403 with error body and response headers for debugging
 					var respHdrs []string
 					for k, v := range resp.Header {
 						respHdrs = append(respHdrs, fmt.Sprintf("%s=%s", k, v[0]))
 					}
-					log.Printf("[%s] account %s got %d, penalty now %.0f, body=%s, resp_headers=%v", reqID, acc.ID, resp.StatusCode, acc.Penalty, errBodyStr, respHdrs)
+					acc.mu.Lock()
+					penalty := acc.Penalty
+					acc.mu.Unlock()
+					log.Printf("[%s] account %s got %d, penalty now %.0f, body=%s, resp_headers=%v", reqID, acc.ID, resp.StatusCode, penalty, errBodyStr, respHdrs)
 				}
-			} else {
-				acc.mu.Lock()
-				acc.Penalty += 0.3
-				acc.mu.Unlock()
 			}
 			if len(errBody) > 0 {
 				lastErr = fmt.Errorf("upstream %s: %s", resp.Status, errBodyStr)
@@ -1447,51 +1480,19 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		log.Printf("[%s] request body sample (%d bytes): %s", reqID, reqSample.Len(), safeText(reqSample.Bytes()))
 	}
 
-	if resp.StatusCode == http.StatusTooManyRequests && !isManagedCodexAPIKeyAccount(acc) {
-		h.applyRateLimit(acc, resp.Header, defaultRateLimitBackoff)
-		acc.mu.Lock()
-		acc.Penalty += 1.0
-		acc.mu.Unlock()
-	}
-	if isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+	needStatusBody := (isManagedCodexAPIKeyAccount(acc) && isManagedCodexAPIKeyRetryableStatus(resp.StatusCode)) ||
+		resp.StatusCode == http.StatusUnauthorized ||
+		resp.StatusCode == http.StatusForbidden
+	var inspectedStatusBody []byte
+	if needStatusBody {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		decompressed := bodyForInspection(nil, errBody)
-		if err := h.handleManagedCodexAPIKeyFailure(reqID, acc, resp, decompressed); err != nil {
-			h.recent.add(err.Error())
+		inspectedStatusBody = bodyForInspection(nil, errBody)
+		if !isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+			log.Printf("[%s] account %s got %d from %s, body=%s", reqID, acc.ID, resp.StatusCode, outReq.URL.Host, safeText(inspectedStatusBody))
 		}
 		resp.Body = io.NopCloser(bytes.NewReader(errBody))
-	} else if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		// Log the error body for debugging
-		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		decompressed := bodyForInspection(nil, errBody) // nil request - will auto-detect gzip
-		log.Printf("[%s] account %s got %d from %s, body=%s", reqID, acc.ID, resp.StatusCode, outReq.URL.Host, safeText(decompressed))
-		// Replace body so client still gets the error
-		resp.Body = io.NopCloser(bytes.NewReader(errBody))
-
-		acc.mu.Lock()
-		if acc.Type == AccountTypeCodex && isPermanentCodexAuthFailure(resp, errBody) {
-			acc.Dead = true
-			acc.Penalty += 100.0
-			acc.mu.Unlock()
-			if err := saveAccount(acc); err != nil {
-				log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
-			}
-		} else if refreshFailed && acc.Type != AccountTypeCodex {
-			acc.Dead = true
-			acc.Penalty += 1.0
-			acc.mu.Unlock()
-			if err := saveAccount(acc); err != nil {
-				log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
-			}
-		} else {
-			acc.Penalty += 10.0
-			acc.mu.Unlock()
-		}
-	} else if resp.StatusCode >= 500 && resp.StatusCode <= 599 {
-		acc.mu.Lock()
-		acc.Penalty += 0.3
-		acc.mu.Unlock()
 	}
+	_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, inspectedStatusBody)
 
 	provider.ParseUsageHeaders(acc, resp.Header)
 

@@ -544,3 +544,178 @@ func TestFinalizeCopiedProxyResponseRecordsStatusMetricAndFinalizesSuccess(t *te
 		t.Fatalf("penalty = %v", acc.Penalty)
 	}
 }
+
+func TestApplyPreCopyUpstreamStatusDispositionManaged5xxRecordsFallbackAndHealth(t *testing.T) {
+	tmp := t.TempDir()
+	accFile := filepath.Join(tmp, "openai_api_deadbeef.json")
+	if err := os.WriteFile(accFile, []byte(`{"OPENAI_API_KEY":"sk-proj-test","auth_mode":"api_key","plan_type":"api"}`), 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+	acc := &Account{
+		ID:          "openai_api_deadbeef",
+		Type:        AccountTypeCodex,
+		File:        accFile,
+		AccessToken: "sk-proj-test",
+		PlanType:    "api",
+		AuthMode:    accountAuthModeAPIKey,
+	}
+	h := &proxyHandler{recent: newRecentErrors(5)}
+	resp := &http.Response{
+		StatusCode: http.StatusBadGateway,
+		Status:     "502 Bad Gateway",
+		Header:     http.Header{},
+	}
+
+	err := h.applyPreCopyUpstreamStatusDisposition(
+		"req-test",
+		acc,
+		resp,
+		false,
+		[]byte(`{"error":{"message":"server boom"}}`),
+	)
+
+	if err == nil || err.Error() != "managed api fallback 502 Bad Gateway: server boom" {
+		t.Fatalf("err = %v", err)
+	}
+	recent := h.recent.snapshot()
+	if len(recent) != 1 || recent[0] != err.Error() {
+		t.Fatalf("recent = %+v", recent)
+	}
+	if acc.Dead {
+		t.Fatal("expected managed api key to stay non-dead on transient 5xx")
+	}
+	if acc.HealthStatus != "error" {
+		t.Fatalf("health status = %q", acc.HealthStatus)
+	}
+	if acc.HealthError != "server boom" {
+		t.Fatalf("health error = %q", acc.HealthError)
+	}
+	if acc.HealthCheckedAt.IsZero() {
+		t.Fatal("expected HealthCheckedAt to be updated")
+	}
+	if acc.Penalty != 0.5 {
+		t.Fatalf("penalty = %v", acc.Penalty)
+	}
+}
+
+func TestApplyPreCopyUpstreamStatusDispositionMarksPermanentCodexAuthFailureDead(t *testing.T) {
+	tmp := t.TempDir()
+	accFile := filepath.Join(tmp, "codex-1.json")
+	if err := os.WriteFile(accFile, []byte(`{"tokens":{"access_token":"tok"}}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	acc := &Account{ID: "codex-1", Type: AccountTypeCodex, File: accFile}
+	h := &proxyHandler{}
+	resp := &http.Response{
+		StatusCode: http.StatusUnauthorized,
+		Status:     "401 Unauthorized",
+		Header:     http.Header{"X-Openai-Ide-Error-Code": []string{"account_deactivated"}},
+	}
+
+	err := h.applyPreCopyUpstreamStatusDisposition(
+		"req-test",
+		acc,
+		resp,
+		false,
+		[]byte(`{"error":"account_deactivated"}`),
+	)
+
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !acc.Dead {
+		t.Fatal("expected account to be marked dead")
+	}
+	if acc.Penalty != 100.0 {
+		t.Fatalf("penalty = %v", acc.Penalty)
+	}
+}
+
+func TestApplyPreCopyUpstreamStatusDispositionRefreshFailedMarksNonCodexDead(t *testing.T) {
+	tmp := t.TempDir()
+	accFile := filepath.Join(tmp, "claude-1.json")
+	acc := &Account{ID: "claude-1", Type: AccountTypeClaude, File: accFile}
+	h := &proxyHandler{}
+	resp := &http.Response{
+		StatusCode: http.StatusUnauthorized,
+		Status:     "401 Unauthorized",
+		Header:     http.Header{},
+	}
+
+	err := h.applyPreCopyUpstreamStatusDisposition(
+		"req-test",
+		acc,
+		resp,
+		true,
+		[]byte(`{"error":"refresh failed"}`),
+	)
+
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !acc.Dead {
+		t.Fatal("expected account to be marked dead")
+	}
+	if acc.Penalty != 1.0 {
+		t.Fatalf("penalty = %v", acc.Penalty)
+	}
+	if _, err := os.Stat(accFile); err != nil {
+		t.Fatalf("expected account state file to be written: %v", err)
+	}
+}
+
+func TestApplyPreCopyUpstreamStatusDispositionNonManaged429AppliesRateLimitPenalty(t *testing.T) {
+	acc := &Account{ID: "claude-1", Type: AccountTypeClaude}
+	h := &proxyHandler{}
+	resp := &http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Status:     "429 Too Many Requests",
+		Header:     http.Header{"Retry-After": []string{"2"}},
+	}
+
+	err := h.applyPreCopyUpstreamStatusDisposition(
+		"req-test",
+		acc,
+		resp,
+		false,
+		nil,
+	)
+
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if acc.Penalty != 1.0 {
+		t.Fatalf("penalty = %v", acc.Penalty)
+	}
+	if acc.RateLimitUntil.IsZero() {
+		t.Fatal("expected RateLimitUntil to be set")
+	}
+}
+
+func TestApplyPreCopyUpstreamStatusDispositionTransientCodexAuthAddsPenalty(t *testing.T) {
+	acc := &Account{ID: "codex-1", Type: AccountTypeCodex}
+	h := &proxyHandler{}
+	resp := &http.Response{
+		StatusCode: http.StatusForbidden,
+		Status:     "403 Forbidden",
+		Header:     http.Header{},
+	}
+
+	err := h.applyPreCopyUpstreamStatusDisposition(
+		"req-test",
+		acc,
+		resp,
+		false,
+		[]byte(`{"error":"temporary denied"}`),
+	)
+
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if acc.Dead {
+		t.Fatal("expected account to remain live")
+	}
+	if acc.Penalty != 10.0 {
+		t.Fatalf("penalty = %v", acc.Penalty)
+	}
+}

@@ -208,3 +208,29 @@
   - `/home/lap/.local/bin/codex-pool.backup_20260322T172822Z`
 - Notes
   - This slice intentionally stopped at the post-copy exit contour; the next smallest remaining duplication seam is the retryable upstream status disposition block before copying the response body.
+
+### 2026-03-22T18:07:23Z | REPO-CPO-REFAC-P1-T8
+- Commands
+  - `go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse|TestFinalizeProxyResponse|TestFinalizeCopiedProxyResponse|TestApplyPreCopyUpstreamStatusDisposition" ./...`
+  - `go test ./...`
+  - `go build ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `systemctl --user is-active codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_retryable_status_disposition.json`
+  - `AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && timeout 60s curl -sS -N -o /tmp/cpo_live_proxy_retryable_status_disposition.sse -w '%{http_code}' http://127.0.0.1:8989/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}'`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_retryable_status_disposition_after_smoke.json`
+- Result
+  - PASS
+  - Buffered and streamed proxy paths now share one `applyPreCopyUpstreamStatusDisposition` seam plus a focused auth-failure helper, so rate-limit penalties, managed API fallback classification, permanent auth dead-marking, and generic `5xx` penalties no longer live in two diverging copies.
+  - New direct tests now lock the most fragile status-side effects explicitly: managed API `5xx` responses record fallback state and `recent` errors, permanent Codex `401/403` failures mark the seat dead, and non-managed `429` responses still set backoff + penalty.
+  - Focused proxy/status tests, full `go test ./...`, and `go build ./...` all passed after the extraction.
+  - After deploy, `systemctl --user is-active codex-pool.service` returned `active`, `curl -fsS http://127.0.0.1:8989/healthz` returned `{"status":"ok","uptime":"8s"}`, and live `/responses` smoke returned HTTP `200` with completed SSE output `OK`.
+  - `/status?format=json` before and after smoke stayed coherent with `total_count=9`, `codex_seat_count=8`, and one configured API fallback key (`total_keys=1`, `eligible_keys=1`, `dead_keys=0`); after the smoke request, the active/current seat advanced coherently to `andy_3` while the fallback key health state remained unchanged (`healthy_keys=0`, `health_error="context canceled"`).
+- Artifacts
+  - `/tmp/cpo_status_retryable_status_disposition.json`
+  - `/tmp/cpo_status_retryable_status_disposition_after_smoke.json`
+  - `/tmp/cpo_live_proxy_retryable_status_disposition.sse`
+- Notes
+  - This slice intentionally stopped before websocket response handling; `proxyRequestWebSocket` still carries a third local copy of the same pre-copy status disposition logic and is the next smallest safe extraction target.
