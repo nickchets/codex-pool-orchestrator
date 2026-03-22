@@ -1009,25 +1009,12 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			fw.stop()
 		}
 
-		if copyErr != nil {
-			h.recent.add(copyErr.Error())
-			h.metrics.inc("error", acc.ID)
-			if idleReader != nil {
-				log.Printf("[%s] SSE stream error (account=%s): %v", reqID, acc.ID, copyErr)
-			}
-			return
-		}
-
 		respSample := []byte(nil)
 		if sampleBuf != nil {
 			respSample = sampleBuf.Bytes()
 		}
-		h.finalizeProxyResponse(reqID, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, conversationID, headerPrimaryPct, headerSecondaryPct, respSample)
-
-		h.metrics.inc(strconv.Itoa(resp.StatusCode), acc.ID)
-
-		if h.cfg.debug {
-			log.Printf("[%s] done status=%d account=%s duration_ms=%d", reqID, resp.StatusCode, acc.ID, time.Since(start).Milliseconds())
+		if !h.finalizeCopiedProxyResponse(reqID, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, conversationID, headerPrimaryPct, headerSecondaryPct, respSample, copyErr, idleReader != nil, start, "done") {
+			return
 		}
 		return
 	}
@@ -1572,22 +1559,9 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	if fw != nil {
 		fw.stop()
 	}
-	if copyErr != nil {
-		h.recent.add(copyErr.Error())
-		h.metrics.inc("error", acc.ID)
-		if idleReader != nil {
-			log.Printf("[%s] SSE stream error (account=%s): %v", reqID, acc.ID, copyErr)
-		}
-		return
-	}
-
 	respSample := sampleBuf.Bytes()
-	h.finalizeProxyResponse(reqID, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, "", headerPrimaryPct, headerSecondaryPct, respSample)
-
-	h.metrics.inc(strconv.Itoa(resp.StatusCode), acc.ID)
-
-	if h.cfg.debug {
-		log.Printf("[%s] streamed done status=%d account=%s duration_ms=%d", reqID, resp.StatusCode, acc.ID, time.Since(start).Milliseconds())
+	if !h.finalizeCopiedProxyResponse(reqID, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, "", headerPrimaryPct, headerSecondaryPct, respSample, copyErr, idleReader != nil, start, "streamed done") {
+		return
 	}
 }
 
@@ -1653,6 +1627,33 @@ func parseRetryAfter(h http.Header) (time.Duration, bool) {
 		return wait, true
 	}
 	return 0, false
+}
+
+func (h *proxyHandler) finalizeCopiedProxyResponse(reqID string, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte, copyErr error, logStreamError bool, start time.Time, debugLabel string) bool {
+	if acc == nil {
+		return false
+	}
+	if copyErr != nil {
+		if h.recent != nil {
+			h.recent.add(copyErr.Error())
+		}
+		if h.metrics != nil {
+			h.metrics.inc("error", acc.ID)
+		}
+		if logStreamError {
+			log.Printf("[%s] SSE stream error (account=%s): %v", reqID, acc.ID, copyErr)
+		}
+		return false
+	}
+
+	h.finalizeProxyResponse(reqID, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample)
+	if h.metrics != nil {
+		h.metrics.inc(strconv.Itoa(statusCode), acc.ID)
+	}
+	if h.cfg.debug {
+		log.Printf("[%s] %s status=%d account=%s duration_ms=%d", reqID, debugLabel, statusCode, acc.ID, time.Since(start).Milliseconds())
+	}
+	return true
 }
 
 func (h *proxyHandler) finalizeProxyResponse(reqID string, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte) {

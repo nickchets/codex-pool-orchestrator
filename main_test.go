@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -448,5 +449,98 @@ func TestFinalizeProxyResponseSkipsSuccessRecoveryAfterManagedStreamFailure(t *t
 	}
 	if acc.RateLimitUntil.IsZero() {
 		t.Fatal("expected rate limit state to remain unchanged")
+	}
+}
+
+func TestFinalizeCopiedProxyResponseRecordsCopyError(t *testing.T) {
+	acc := &Account{ID: "acc-1", Type: AccountTypeCodex}
+	h := &proxyHandler{
+		metrics: newMetrics(),
+		recent:  newRecentErrors(5),
+	}
+
+	ok := h.finalizeCopiedProxyResponse(
+		"req-test",
+		nil,
+		acc,
+		"user-1",
+		http.StatusOK,
+		true,
+		false,
+		"",
+		0,
+		0,
+		nil,
+		errors.New("copy failed"),
+		false,
+		time.Now(),
+		"done",
+	)
+
+	if ok {
+		t.Fatal("expected copy error path to return false")
+	}
+	recent := h.recent.snapshot()
+	if len(recent) != 1 || recent[0] != "copy failed" {
+		t.Fatalf("recent = %+v", recent)
+	}
+	if got := h.metrics.requests["error"]; got != 1 {
+		t.Fatalf("error metric = %d", got)
+	}
+	if got := h.metrics.accStatus[acc.ID]["error"]; got != 1 {
+		t.Fatalf("account error metric = %d", got)
+	}
+	if acc.LastUsed != (time.Time{}) {
+		t.Fatalf("last used = %v", acc.LastUsed)
+	}
+}
+
+func TestFinalizeCopiedProxyResponseRecordsStatusMetricAndFinalizesSuccess(t *testing.T) {
+	acc := &Account{ID: "acc-1", Type: AccountTypeCodex, Penalty: 0.4}
+	pool := newPoolState([]*Account{acc}, false)
+	h := &proxyHandler{
+		pool:    pool,
+		metrics: newMetrics(),
+		recent:  newRecentErrors(5),
+	}
+
+	ok := h.finalizeCopiedProxyResponse(
+		"req-test",
+		nil,
+		acc,
+		"user-1",
+		http.StatusOK,
+		true,
+		false,
+		"conv-initial",
+		0,
+		0,
+		[]byte("data: {\"conversation_id\":\"conv-sse\"}\n"),
+		nil,
+		false,
+		time.Now(),
+		"done",
+	)
+
+	if !ok {
+		t.Fatal("expected success path to return true")
+	}
+	if got := pool.convPin["conv-initial"]; got != acc.ID {
+		t.Fatalf("conversation pin = %q", got)
+	}
+	if got := h.metrics.requests["200"]; got != 1 {
+		t.Fatalf("status metric = %d", got)
+	}
+	if got := h.metrics.accStatus[acc.ID]["200"]; got != 1 {
+		t.Fatalf("account status metric = %d", got)
+	}
+	if recent := h.recent.snapshot(); len(recent) != 0 {
+		t.Fatalf("recent = %+v", recent)
+	}
+	if acc.LastUsed.IsZero() {
+		t.Fatal("expected LastUsed to be updated")
+	}
+	if acc.Penalty != 0.2 {
+		t.Fatalf("penalty = %v", acc.Penalty)
 	}
 }

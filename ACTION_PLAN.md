@@ -10,18 +10,25 @@ _(empty — truthful idle handoff; successor cards are hydrated in `NEXT`)_
 
 ### NEXT
 
-#### REPO-CPO-REFAC-P1-T7: Extract retry/error finalizer
-1. Collapse duplicated post-copy retry/error bookkeeping for buffered and streamed proxy paths: `recent` error capture, error metrics, and the shared success/error exit contour around copied upstream responses.
-2. Preserve status-specific penalty changes, refresh behavior, managed API failure handling, and body ownership exactly.
-3. Lock parity with focused proxy tests before touching routing, auth, or provider-specific logic.
+#### REPO-CPO-REFAC-P1-T8: Extract retryable upstream status disposition
+1. Collapse duplicated pre-copy retryable status handling for buffered and streamed proxy paths: rate-limit penalties, managed API failure classification, auth-failure penalties/dead-state handling, and 5xx penalties.
+2. Preserve the buffered retry loop, streamed one-shot response semantics, and response-body preservation exactly.
+3. Lock parity with focused proxy tests before touching provider routing, refresh policy, or websocket flows.
 
-**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse|TestFinalizeProxyResponse" ./...`
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse|TestFinalizeProxyResponse|TestFinalizeCopiedProxyResponse" ./...`
 
 ### BLOCKED
 
 _(none)_
 
 ### DONE
+
+#### REPO-CPO-REFAC-P1-T7: Extract retry/error finalizer
+1. Collapse duplicated post-copy retry/error bookkeeping for buffered and streamed proxy paths: `recent` error capture, error metrics, and the shared success/error exit contour around copied upstream responses.
+2. Preserve status-specific penalty changes, refresh behavior, managed API failure handling, and body ownership exactly.
+3. Lock parity with focused proxy tests before touching routing, auth, or provider-specific logic.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse|TestFinalizeProxyResponse|TestFinalizeCopiedProxyResponse" ./... && go test ./... && go build ./... && systemctl --user is-active codex-pool.service && curl -fsS http://127.0.0.1:8989/healthz && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_retry_finalizer.json`
 
 #### REPO-CPO-REFAC-P1-T6: Extract post-response finalizer
 1. Collapse duplicated post-copy success handling for buffered and streamed proxy paths: sample logging, non-SSE usage fallback, conversation pinning, managed API recovery, and penalty decay.

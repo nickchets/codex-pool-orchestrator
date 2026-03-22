@@ -180,3 +180,31 @@
   - `/home/lap/.local/bin/codex-pool.backup_20260322T164805Z`
 - Notes
   - This slice intentionally collapsed only the post-response success/finalization contour; retry/error bookkeeping is now the next smallest remaining duplication seam.
+
+### 2026-03-22T17:29:49Z | REPO-CPO-REFAC-P1-T7
+- Commands
+  - `go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse|TestFinalizeProxyResponse|TestFinalizeCopiedProxyResponse" ./...`
+  - `go test ./...`
+  - `go build ./...`
+  - `cp /home/lap/.local/bin/codex-pool /home/lap/.local/bin/codex-pool.backup_20260322T172822Z`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `systemctl --user is-active codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_retry_finalizer.json`
+  - `AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && timeout 60s curl -sS -N -o /tmp/cpo_live_proxy_retry_finalizer.sse -w '%{http_code}' http://127.0.0.1:8989/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}'`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_retry_finalizer_after_smoke.json`
+- Result
+  - PASS
+  - Buffered and streamed proxy paths now share one `finalizeCopiedProxyResponse` helper for post-`io.Copy` error bookkeeping and success/metrics/debug exit handling instead of carrying two near-identical exit contours in `main.go`.
+  - New direct tests now lock both sides of that seam explicitly: copy errors record `recent` + `"error"` metrics without mutating success state, and successful copied responses still increment status metrics while running the shared post-response finalizer.
+  - Focused proxy/finalizer tests, full `go test ./...`, and `go build ./...` all passed after the extraction.
+  - After deploy, `systemctl --user is-active codex-pool.service` returned `active`, `curl -fsS http://127.0.0.1:8989/healthz` returned `{"status":"ok","uptime":"0s"}`, and live `/responses` smoke returned HTTP `200` with completed SSE output `OK`.
+  - `/status?format=json` after smoke remained coherent with `total_count=9`, `codex_seat_count=8`, and `current_seat.id == active_seat.id == "andy_2"`, so the refactor did not perturb live seat selection.
+- Artifacts
+  - `/tmp/cpo_status_retry_finalizer.json`
+  - `/tmp/cpo_status_retry_finalizer_after_smoke.json`
+  - `/tmp/cpo_live_proxy_retry_finalizer.sse`
+  - `/home/lap/.local/bin/codex-pool.backup_20260322T172822Z`
+- Notes
+  - This slice intentionally stopped at the post-copy exit contour; the next smallest remaining duplication seam is the retryable upstream status disposition block before copying the response body.
