@@ -23,6 +23,13 @@ _(none)_
 
 ### DONE
 
+#### REPO-CPO-BUG-P1-T10: Preserve full streamed error bodies during status inspection
+1. Ensure streamed pre-copy status inspection does not truncate forwarded client error bodies when it needs to inspect managed API failures or auth failures.
+2. Preserve bounded classification/logging input while rewinding the full upstream error payload back to the client.
+3. Lock the regression with a streamed managed-API `5xx` test whose response body exceeds the inspection limit.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyStreamedManagedAPI5xxPreservesFullErrorBody|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse|TestFinalizeProxyResponse|TestFinalizeCopiedProxyResponse|TestApplyPreCopyUpstreamStatusDisposition" ./... && go test ./... && go build ./... && go build -o /home/lap/.local/bin/codex-pool . && systemctl --user restart codex-pool.service && systemctl --user is-active codex-pool.service && curl -fsS http://127.0.0.1:8989/healthz && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_streamed_error_body_fix.json && AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && timeout 60s curl -sS -N -o /tmp/cpo_live_proxy_streamed_error_body_fix.sse -w '%{http_code}' http://127.0.0.1:8989/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}' && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_streamed_error_body_fix_after_smoke.json`
+
 #### REPO-CPO-REFAC-P1-T8: Extract retryable upstream status disposition
 1. Collapse duplicated pre-copy retryable status handling for buffered and streamed proxy paths: rate-limit penalties, managed API failure classification, auth-failure penalties/dead-state handling, and 5xx penalties.
 2. Preserve the buffered retry loop, streamed one-shot response semantics, and response-body preservation exactly.

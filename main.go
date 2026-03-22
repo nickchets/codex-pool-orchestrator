@@ -1485,8 +1485,11 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		resp.StatusCode == http.StatusForbidden
 	var inspectedStatusBody []byte
 	if needStatusBody {
-		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		errBody, _ := io.ReadAll(resp.Body)
 		inspectedStatusBody = bodyForInspection(nil, errBody)
+		if len(inspectedStatusBody) > 2048 {
+			inspectedStatusBody = inspectedStatusBody[:2048]
+		}
 		if !isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 			log.Printf("[%s] account %s got %d from %s, body=%s", reqID, acc.ID, resp.StatusCode, outReq.URL.Host, safeText(inspectedStatusBody))
 		}

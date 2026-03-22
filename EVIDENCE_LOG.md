@@ -234,3 +234,30 @@
   - `/tmp/cpo_live_proxy_retryable_status_disposition.sse`
 - Notes
   - This slice intentionally stopped before websocket response handling; `proxyRequestWebSocket` still carries a third local copy of the same pre-copy status disposition logic and is the next smallest safe extraction target.
+
+### 2026-03-22T18:17:07Z | REPO-CPO-BUG-P1-T10
+- Commands
+  - `go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyStreamedManagedAPI5xxPreservesFullErrorBody|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse|TestFinalizeProxyResponse|TestFinalizeCopiedProxyResponse|TestApplyPreCopyUpstreamStatusDisposition" ./...`
+  - `go test ./...`
+  - `go build ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `systemctl --user is-active codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_streamed_error_body_fix.json`
+  - `AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && timeout 60s curl -sS -N -o /tmp/cpo_live_proxy_streamed_error_body_fix.sse -w '%{http_code}' http://127.0.0.1:8989/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}'`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_streamed_error_body_fix_after_smoke.json`
+- Result
+  - PASS
+  - A blind close-audit on the previous T8 commit surfaced a real streamed-mode regression: managed `5xx` inspection reused a `LimitReader(2048)` path and rewound only the truncated error body back to the client.
+  - Streamed status inspection now reads the full upstream error payload for rewinding while handing only a bounded inspected copy into classification/logging, so managed API fallback handling keeps the new shared seam without corrupting client-visible bodies.
+  - New regression coverage now proves the streamed proxy returns the full managed-API `502` body even when it exceeds the inspection limit.
+  - Focused proxy/status tests, full `go test ./...`, and `go build ./...` all passed after the fix.
+  - After deploy, `systemctl --user is-active codex-pool.service` returned `active`, `curl -fsS http://127.0.0.1:8989/healthz` returned `{"status":"ok","uptime":"27s"}`, and live `/responses` smoke returned HTTP `200` with completed SSE output `OK`.
+  - `/status?format=json` remained coherent before and after smoke with `total_count=9`, `codex_seat_count=8`, and one configured API fallback key (`total_keys=1`, `eligible_keys=1`, `dead_keys=0`); after smoke the active/current seat advanced coherently to `luka`.
+- Artifacts
+  - `/tmp/cpo_status_streamed_error_body_fix.json`
+  - `/tmp/cpo_status_streamed_error_body_fix_after_smoke.json`
+  - `/tmp/cpo_live_proxy_streamed_error_body_fix.sse`
+- Notes
+  - This hotfix closes the audit-found streamed body truncation regression without reopening the broader T8 extraction; websocket response handling remains the next duplicate pre-copy status seam.
