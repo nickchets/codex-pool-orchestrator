@@ -158,6 +158,11 @@ This repository also includes a reusable operator layer for standalone deploymen
 - `systemd/codex-pool.service`
 - `docs/install.md`
 - `docs/upstream-delta.md`
+- `CHANGELOG.md`
+- `VERSIONING.md`
+- `VERSION`
+- `docs/CHANGELOG.ru.md`
+- `docs/VERSIONING.ru.md`
 
 Typical operator commands:
 
@@ -169,6 +174,9 @@ systemctl --user status codex-pool.service --no-pager
 
 The preferred add-account path is the `/status` web button or `codex-oauth-add`.
 Keep `codex-oauth-start` and `codex-oauth-exchange` as low-level fallback only.
+
+Current development version is tracked in `VERSION`. Fork-specific release history lives in
+`CHANGELOG.md`, and version bump rules live in `VERSIONING.md`.
 
 ---
 
