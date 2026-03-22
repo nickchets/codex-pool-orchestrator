@@ -10,18 +10,25 @@ _(empty — truthful idle handoff; successor cards are hydrated in `NEXT`)_
 
 ### NEXT
 
-#### REPO-CPO-REFAC-P1-T6: Extract post-response finalizer
-1. Collapse duplicated post-copy success handling for buffered and streamed proxy paths: sample logging, non-SSE usage fallback, conversation pinning, managed API recovery, and penalty decay.
-2. Preserve retry, refresh, header replacement, and websocket behavior exactly.
-3. Lock parity with targeted proxy tests and live smoke before touching any routing heuristics.
+#### REPO-CPO-REFAC-P1-T7: Extract retry/error finalizer
+1. Collapse duplicated post-copy retry/error bookkeeping for buffered and streamed proxy paths: `recent` error capture, error metrics, and the shared success/error exit contour around copied upstream responses.
+2. Preserve status-specific penalty changes, refresh behavior, managed API failure handling, and body ownership exactly.
+3. Lock parity with focused proxy tests before touching routing, auth, or provider-specific logic.
 
-**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse" ./...`
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse|TestFinalizeProxyResponse" ./...`
 
 ### BLOCKED
 
 _(none)_
 
 ### DONE
+
+#### REPO-CPO-REFAC-P1-T6: Extract post-response finalizer
+1. Collapse duplicated post-copy success handling for buffered and streamed proxy paths: sample logging, non-SSE usage fallback, conversation pinning, managed API recovery, and penalty decay.
+2. Preserve retry, refresh, header replacement, and websocket behavior exactly.
+3. Lock parity with targeted proxy tests and live smoke before touching any routing heuristics.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse|TestFinalizeProxyResponse" ./... && go test ./... && go build ./... && systemctl --user is-active codex-pool.service && curl -fsS http://127.0.0.1:8989/healthz && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_post_response_finalizer.json`
 
 #### REPO-CPO-REFAC-P1-T5: Collapse duplicated response streaming usage capture
 1. Extract one shared response-stream usage recorder for buffered and streamed proxy paths in `main.go`.

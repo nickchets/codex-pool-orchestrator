@@ -1022,41 +1022,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		if sampleBuf != nil {
 			respSample = sampleBuf.Bytes()
 		}
-		if h.cfg.logBodies && len(respSample) > 0 {
-			log.Printf("[%s] response body sample (%d bytes): %s", reqID, len(respSample), safeText(respSample))
-		}
-		// Still try to parse sample for non-SSE responses or fallback
-		if !isSSE && len(respSample) > 0 {
-			h.updateUsageFromBody(provider, acc, userID, headerPrimaryPct, headerSecondaryPct, respSample)
-		}
-
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 && !managedStreamFailed {
-			// Success: pin conversation if possible (if request didn't include it, try to learn from response).
-			if conversationID == "" && len(respSample) > 0 {
-				conversationID = extractConversationIDFromSSE(respSample)
-			}
-			if conversationID != "" {
-				h.pool.pin(conversationID, acc.ID)
-			}
-			acc.mu.Lock()
-			if isManagedCodexAPIKeyAccount(acc) {
-				acc.Dead = false
-				acc.HealthStatus = "healthy"
-				acc.HealthError = ""
-				acc.HealthCheckedAt = time.Now()
-				acc.LastHealthyAt = acc.HealthCheckedAt
-				acc.RateLimitUntil = time.Time{}
-			}
-			acc.LastUsed = time.Now()
-			// Successful request - decay penalty faster (proves account works)
-			if acc.Penalty > 0 {
-				acc.Penalty *= 0.5
-				if acc.Penalty < 0.01 {
-					acc.Penalty = 0
-				}
-			}
-			acc.mu.Unlock()
-		}
+		h.finalizeProxyResponse(reqID, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, conversationID, headerPrimaryPct, headerSecondaryPct, respSample)
 
 		h.metrics.inc(strconv.Itoa(resp.StatusCode), acc.ID)
 
@@ -1616,39 +1582,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	}
 
 	respSample := sampleBuf.Bytes()
-	if h.cfg.logBodies && len(respSample) > 0 {
-		log.Printf("[%s] response body sample (%d bytes): %s", reqID, len(respSample), safeText(respSample))
-	}
-	if !isSSE && len(respSample) > 0 {
-		h.updateUsageFromBody(provider, acc, userID, headerPrimaryPct, headerSecondaryPct, respSample)
-	}
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 && !managedStreamFailed {
-		conversationID := ""
-		if len(respSample) > 0 {
-			conversationID = extractConversationIDFromSSE(respSample)
-		}
-		if conversationID != "" {
-			h.pool.pin(conversationID, acc.ID)
-		}
-		acc.mu.Lock()
-		if isManagedCodexAPIKeyAccount(acc) {
-			acc.Dead = false
-			acc.HealthStatus = "healthy"
-			acc.HealthError = ""
-			acc.HealthCheckedAt = time.Now()
-			acc.LastHealthyAt = acc.HealthCheckedAt
-			acc.RateLimitUntil = time.Time{}
-		}
-		acc.LastUsed = time.Now()
-		if acc.Penalty > 0 {
-			acc.Penalty *= 0.5
-			if acc.Penalty < 0.01 {
-				acc.Penalty = 0
-			}
-		}
-		acc.mu.Unlock()
-	}
+	h.finalizeProxyResponse(reqID, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, "", headerPrimaryPct, headerSecondaryPct, respSample)
 
 	h.metrics.inc(strconv.Itoa(resp.StatusCode), acc.ID)
 
@@ -1719,6 +1653,48 @@ func parseRetryAfter(h http.Header) (time.Duration, bool) {
 		return wait, true
 	}
 	return 0, false
+}
+
+func (h *proxyHandler) finalizeProxyResponse(reqID string, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte) {
+	if acc == nil {
+		return
+	}
+	if h.cfg.logBodies && len(respSample) > 0 {
+		log.Printf("[%s] response body sample (%d bytes): %s", reqID, len(respSample), safeText(respSample))
+	}
+	if !isSSE && len(respSample) > 0 {
+		h.updateUsageFromBody(provider, acc, userID, headerPrimaryPct, headerSecondaryPct, respSample)
+	}
+	if statusCode < 200 || statusCode >= 300 || managedStreamFailed {
+		return
+	}
+
+	conversationID := initialConversationID
+	if conversationID == "" && len(respSample) > 0 {
+		conversationID = extractConversationIDFromSSE(respSample)
+	}
+	if conversationID != "" && h.pool != nil {
+		h.pool.pin(conversationID, acc.ID)
+	}
+
+	now := time.Now()
+	acc.mu.Lock()
+	if isManagedCodexAPIKeyAccount(acc) {
+		acc.Dead = false
+		acc.HealthStatus = "healthy"
+		acc.HealthError = ""
+		acc.HealthCheckedAt = now
+		acc.LastHealthyAt = now
+		acc.RateLimitUntil = time.Time{}
+	}
+	acc.LastUsed = now
+	if acc.Penalty > 0 {
+		acc.Penalty *= 0.5
+		if acc.Penalty < 0.01 {
+			acc.Penalty = 0
+		}
+	}
+	acc.mu.Unlock()
 }
 
 func (h *proxyHandler) applyRateLimit(a *Account, hdr http.Header, fallback time.Duration) time.Duration {

@@ -152,3 +152,31 @@
   - `/home/lap/.local/bin/codex-pool.backup_20260322T143156Z`
 - Notes
   - This slice intentionally touched only response-stream usage capture; post-copy success bookkeeping and retry/error branches remain the next obvious duplication seam.
+
+### 2026-03-22T16:52:23Z | REPO-CPO-REFAC-P1-T6
+- Commands
+  - `go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse|TestFinalizeProxyResponse" ./...`
+  - `go test ./...`
+  - `go build ./...`
+  - `cp /home/lap/.local/bin/codex-pool /home/lap/.local/bin/codex-pool.backup_20260322T164805Z`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `systemctl --user is-active codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_post_response_finalizer.json`
+  - `AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && timeout 60s curl -sS -N -o /tmp/cpo_live_proxy_post_response_finalizer.sse -w '%{http_code}' http://127.0.0.1:8989/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}'`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_post_response_finalizer_after_smoke.json`
+- Result
+  - PASS
+  - Buffered and streamed proxy paths now share one `finalizeProxyResponse` helper for sample logging, non-SSE usage fallback, conversation pinning, managed API recovery, `LastUsed` updates, and penalty decay instead of carrying duplicated post-copy success blocks in `main.go`.
+  - New direct tests now lock the most fragile semantics explicitly: request-known conversation IDs stay authoritative over response-derived IDs, managed OpenAI API accounts recover on successful completions, and managed stream failures do not incorrectly clear dead/health state.
+  - Focused proxy/finalizer tests, full `go test ./...`, and `go build ./...` all passed after the extraction.
+  - After deploy, `systemctl --user is-active codex-pool.service` returned `active`; the first immediate `healthz` probe hit a brief readiness gap after restart, then `curl -fsS http://127.0.0.1:8989/healthz` returned `{"status":"ok","uptime":"1m"}` on retry once the listener settled.
+  - Live `/responses` smoke returned HTTP `200` with completed SSE output `OK`, and `/status?format=json` after smoke still reported `total_count=9`, `codex_seat_count=8`, `current_seat.id == active_seat.id == "john4454_2"`, and `last_used_seat.id == "andy_3"`, so the refactor did not perturb the current routing surface.
+- Artifacts
+  - `/tmp/cpo_status_post_response_finalizer.json`
+  - `/tmp/cpo_status_post_response_finalizer_after_smoke.json`
+  - `/tmp/cpo_live_proxy_post_response_finalizer.sse`
+  - `/home/lap/.local/bin/codex-pool.backup_20260322T164805Z`
+- Notes
+  - This slice intentionally collapsed only the post-response success/finalization contour; retry/error bookkeeping is now the next smallest remaining duplication seam.

@@ -312,3 +312,141 @@ func mapToHeader(m map[string]string) http.Header {
 	}
 	return h
 }
+
+func TestFinalizeProxyResponsePinsInitialConversationAndDecaysPenalty(t *testing.T) {
+	acc := &Account{ID: "acc-1", Type: AccountTypeCodex, Penalty: 0.4}
+	pool := newPoolState([]*Account{acc}, false)
+	h := &proxyHandler{pool: pool}
+
+	h.finalizeProxyResponse(
+		"req-test",
+		nil,
+		acc,
+		"user-1",
+		http.StatusOK,
+		true,
+		false,
+		"conv-initial",
+		0,
+		0,
+		[]byte("data: {\"conversation_id\":\"conv-from-response\"}\n"),
+	)
+
+	if got := pool.convPin["conv-initial"]; got != "acc-1" {
+		t.Fatalf("initial conversation pin = %q", got)
+	}
+	if _, ok := pool.convPin["conv-from-response"]; ok {
+		t.Fatalf("expected response conversation to stay ignored when initial conversation is already known")
+	}
+	if acc.LastUsed.IsZero() {
+		t.Fatal("expected LastUsed to be updated")
+	}
+	if acc.Penalty != 0.2 {
+		t.Fatalf("penalty = %v", acc.Penalty)
+	}
+}
+
+func TestFinalizeProxyResponseRecoversManagedAPIAccountFromResponseConversation(t *testing.T) {
+	acc := &Account{
+		ID:             "openai_api_deadbeef",
+		Type:           AccountTypeCodex,
+		AuthMode:       accountAuthModeAPIKey,
+		Dead:           true,
+		HealthStatus:   "dead",
+		HealthError:    "quota_exhausted",
+		Penalty:        0.8,
+		RateLimitUntil: time.Now().Add(5 * time.Minute),
+	}
+	pool := newPoolState([]*Account{acc}, false)
+	h := &proxyHandler{pool: pool}
+
+	h.finalizeProxyResponse(
+		"req-test",
+		nil,
+		acc,
+		"user-1",
+		http.StatusOK,
+		true,
+		false,
+		"",
+		0,
+		0,
+		[]byte("data: {\"conversation_id\":\"conv-sse\"}\n"),
+	)
+
+	if got := pool.convPin["conv-sse"]; got != acc.ID {
+		t.Fatalf("response conversation pin = %q", got)
+	}
+	if acc.Dead {
+		t.Fatal("expected managed api account to recover on success")
+	}
+	if acc.HealthStatus != "healthy" {
+		t.Fatalf("health status = %q", acc.HealthStatus)
+	}
+	if acc.HealthError != "" {
+		t.Fatalf("health error = %q", acc.HealthError)
+	}
+	if acc.HealthCheckedAt.IsZero() || acc.LastHealthyAt.IsZero() {
+		t.Fatal("expected health timestamps to be updated")
+	}
+	if !acc.RateLimitUntil.IsZero() {
+		t.Fatalf("rate limit until = %v", acc.RateLimitUntil)
+	}
+	if acc.LastUsed.IsZero() {
+		t.Fatal("expected LastUsed to be updated")
+	}
+	if acc.Penalty != 0.4 {
+		t.Fatalf("penalty = %v", acc.Penalty)
+	}
+}
+
+func TestFinalizeProxyResponseSkipsSuccessRecoveryAfterManagedStreamFailure(t *testing.T) {
+	acc := &Account{
+		ID:             "openai_api_deadbeef",
+		Type:           AccountTypeCodex,
+		AuthMode:       accountAuthModeAPIKey,
+		Dead:           true,
+		HealthStatus:   "dead",
+		HealthError:    "stream_failure",
+		Penalty:        0.8,
+		RateLimitUntil: time.Now().Add(5 * time.Minute),
+	}
+	pool := newPoolState([]*Account{acc}, false)
+	h := &proxyHandler{pool: pool}
+
+	h.finalizeProxyResponse(
+		"req-test",
+		nil,
+		acc,
+		"user-1",
+		http.StatusOK,
+		true,
+		true,
+		"",
+		0,
+		0,
+		[]byte("data: {\"conversation_id\":\"conv-sse\"}\n"),
+	)
+
+	if len(pool.convPin) != 0 {
+		t.Fatalf("unexpected pin map: %+v", pool.convPin)
+	}
+	if !acc.Dead {
+		t.Fatal("expected managed api account to stay dead after managed stream failure")
+	}
+	if acc.HealthStatus != "dead" {
+		t.Fatalf("health status = %q", acc.HealthStatus)
+	}
+	if acc.HealthCheckedAt != (time.Time{}) || acc.LastHealthyAt != (time.Time{}) {
+		t.Fatalf("unexpected health timestamps: checked=%v healthy=%v", acc.HealthCheckedAt, acc.LastHealthyAt)
+	}
+	if acc.LastUsed != (time.Time{}) {
+		t.Fatalf("last used = %v", acc.LastUsed)
+	}
+	if acc.Penalty != 0.8 {
+		t.Fatalf("penalty = %v", acc.Penalty)
+	}
+	if acc.RateLimitUntil.IsZero() {
+		t.Fatal("expected rate limit state to remain unchanged")
+	}
+}
