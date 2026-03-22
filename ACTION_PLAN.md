@@ -10,13 +10,6 @@ _(empty — truthful idle handoff; successor cards are hydrated in `NEXT`)_
 
 ### NEXT
 
-#### REPO-CPO-REFAC-P1-T2: Freeze request planning contracts
-1. Introduce canonical types for `AdmissionResult`, `RequestShape`, and `RoutePlan`.
-2. Move provider/path/model/required-plan planning into a pure layer that can be reused by buffered, streamed, and websocket flows.
-3. Add guardrail tests for provider routing, model override, and streamed-body opaque planning.
-
-**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 90s -run "TestPickUpstream|TestLooksLikeProviderCredential|TestProxyStreamedRequestClaude" ./...`
-
 #### REPO-CPO-REFAC-P1-T3: Unify usage ingestion
 1. Replace duplicated header/body/SSE usage parsing with one canonical `UsageDelta` pipeline.
 2. Keep provider-specific parsing only as strategy implementations over the shared contract.
@@ -29,6 +22,13 @@ _(empty — truthful idle handoff; successor cards are hydrated in `NEXT`)_
 _(none)_
 
 ### DONE
+
+#### REPO-CPO-REFAC-P1-T2: Freeze request planning contracts
+1. Introduce canonical types for `AdmissionResult`, `RequestShape`, and `RoutePlan`.
+2. Move provider/path/model/required-plan planning into a pure layer that can be reused by buffered, streamed, and websocket flows.
+3. Add guardrail tests for provider routing, model override, and streamed-body opaque planning.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go build ./... && go test -count=1 -timeout 90s -run "TestBuild.*RequestShape|TestPlanRoute|TestProxyStreamedRequestClaude|TestResolveProxyAdmission|TestProxyWebSocketPoolRewritesAuthAndPinsSession" ./... && go test ./... && systemctl --user is-active codex-pool.service && curl -fsS http://127.0.0.1:8989/healthz && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_smoke.json`
 
 #### REPO-CPO-REFAC-P0-T1: Establish green baseline and extract proxy admission contract
 1. Fix the stale streamed Claude test so the repo returns to a truthful green baseline.

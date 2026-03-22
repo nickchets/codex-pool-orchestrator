@@ -15,8 +15,8 @@ func TestResolveProxyAdmissionClaudePoolUser(t *testing.T) {
 	h := &proxyHandler{}
 	admission := h.resolveProxyAdmission(req, "req-1")
 
-	if admission.Kind != proxyAdmissionPoolUser {
-		t.Fatalf("kind = %q, want %q", admission.Kind, proxyAdmissionPoolUser)
+	if admission.Kind != AdmissionKindPoolUser {
+		t.Fatalf("kind = %q, want %q", admission.Kind, AdmissionKindPoolUser)
 	}
 	if admission.UserID != "claude-user" {
 		t.Fatalf("user_id = %q, want %q", admission.UserID, "claude-user")
@@ -33,8 +33,8 @@ func TestResolveProxyAdmissionGeminiAPIKeyPoolUser(t *testing.T) {
 	h := &proxyHandler{}
 	admission := h.resolveProxyAdmission(req, "req-2")
 
-	if admission.Kind != proxyAdmissionPoolUser {
-		t.Fatalf("kind = %q, want %q", admission.Kind, proxyAdmissionPoolUser)
+	if admission.Kind != AdmissionKindPoolUser {
+		t.Fatalf("kind = %q, want %q", admission.Kind, AdmissionKindPoolUser)
 	}
 	if admission.UserID != user.ID {
 		t.Fatalf("user_id = %q, want %q", admission.UserID, user.ID)
@@ -48,8 +48,8 @@ func TestResolveProxyAdmissionPassthrough(t *testing.T) {
 	h := &proxyHandler{}
 	admission := h.resolveProxyAdmission(req, "req-3")
 
-	if admission.Kind != proxyAdmissionPassthrough {
-		t.Fatalf("kind = %q, want %q", admission.Kind, proxyAdmissionPassthrough)
+	if admission.Kind != AdmissionKindPassthrough {
+		t.Fatalf("kind = %q, want %q", admission.Kind, AdmissionKindPassthrough)
 	}
 	if admission.ProviderType != AccountTypeCodex {
 		t.Fatalf("provider_type = %q, want %q", admission.ProviderType, AccountTypeCodex)
@@ -73,8 +73,8 @@ func TestResolveProxyAdmissionDisabledPoolUser(t *testing.T) {
 	}
 	admission := h.resolveProxyAdmission(req, "req-4")
 
-	if admission.Kind != proxyAdmissionRejected {
-		t.Fatalf("kind = %q, want %q", admission.Kind, proxyAdmissionRejected)
+	if admission.Kind != AdmissionKindRejected {
+		t.Fatalf("kind = %q, want %q", admission.Kind, AdmissionKindRejected)
 	}
 	if admission.StatusCode != http.StatusForbidden {
 		t.Fatalf("status_code = %d, want %d", admission.StatusCode, http.StatusForbidden)
@@ -90,8 +90,8 @@ func TestResolveProxyAdmissionUnauthorized(t *testing.T) {
 	h := &proxyHandler{}
 	admission := h.resolveProxyAdmission(req, "req-5")
 
-	if admission.Kind != proxyAdmissionRejected {
-		t.Fatalf("kind = %q, want %q", admission.Kind, proxyAdmissionRejected)
+	if admission.Kind != AdmissionKindRejected {
+		t.Fatalf("kind = %q, want %q", admission.Kind, AdmissionKindRejected)
 	}
 	if admission.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status_code = %d, want %d", admission.StatusCode, http.StatusUnauthorized)

@@ -1,0 +1,137 @@
+package main
+
+import (
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+)
+
+func newPlanningTestHandler(t *testing.T) *proxyHandler {
+	t.Helper()
+
+	baseURL, err := url.Parse("https://example.com")
+	if err != nil {
+		t.Fatalf("parse base url: %v", err)
+	}
+	codex := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	claude := NewClaudeProvider(baseURL)
+	gemini := NewGeminiProvider(baseURL, baseURL)
+	kimi := NewKimiProvider(baseURL)
+	minimax := NewMinimaxProvider(baseURL)
+	return &proxyHandler{
+		registry: NewProviderRegistry(codex, claude, gemini, kimi, minimax),
+	}
+}
+
+func TestBuildBufferedRequestShapeExtractsConversationAndModel(t *testing.T) {
+	req := httptest.NewRequest("POST", "http://example.com/responses", nil)
+	body := []byte(`{"model":"gpt-5.3-codex-spark","prompt_cache_key":"thread-123","input":"hi"}`)
+
+	shape := buildBufferedRequestShape(req, body, nil)
+
+	if shape.Path != "/responses" {
+		t.Fatalf("path = %q", shape.Path)
+	}
+	if shape.ConversationID != "thread-123" {
+		t.Fatalf("conversation_id = %q", shape.ConversationID)
+	}
+	if shape.RequestedModel != "gpt-5.3-codex-spark" {
+		t.Fatalf("requested_model = %q", shape.RequestedModel)
+	}
+}
+
+func TestBuildStreamedRequestShapeIsOpaque(t *testing.T) {
+	req := httptest.NewRequest("POST", "http://example.com/v1/messages", nil)
+
+	shape := buildStreamedRequestShape(req)
+
+	if shape.Path != "/v1/messages" {
+		t.Fatalf("path = %q", shape.Path)
+	}
+	if shape.RequestedModel != "" {
+		t.Fatalf("requested_model = %q", shape.RequestedModel)
+	}
+	if shape.ConversationID != "" {
+		t.Fatalf("conversation_id = %q", shape.ConversationID)
+	}
+}
+
+func TestBuildWebSocketRequestShapeExtractsConversationID(t *testing.T) {
+	req := httptest.NewRequest("GET", "http://example.com/responses?session_id=thread-ws-1", nil)
+
+	shape := buildWebSocketRequestShape(req)
+	if shape.Path != "/responses" {
+		t.Fatalf("path = %q", shape.Path)
+	}
+	if shape.ConversationID != "thread-ws-1" {
+		t.Fatalf("conversation_id = %q", shape.ConversationID)
+	}
+}
+
+func TestPlanRoutePrefersClaudeHeadersOverPath(t *testing.T) {
+	h := newPlanningTestHandler(t)
+	req := httptest.NewRequest("POST", "http://example.com/responses", nil)
+	req.Header.Set("X-Api-Key", "sk-ant-api03-real-key")
+
+	plan, _, err := h.planRoute(AdmissionResult{Kind: AdmissionKindPoolUser, UserID: "u1"}, req, buildStreamedRequestShape(req), nil)
+	if err != nil {
+		t.Fatalf("plan route: %v", err)
+	}
+	if plan.AccountType != AccountTypeClaude {
+		t.Fatalf("account_type = %q", plan.AccountType)
+	}
+}
+
+func TestPlanRouteOverridesProviderAndRewritesMiniMaxModel(t *testing.T) {
+	h := newPlanningTestHandler(t)
+	req := httptest.NewRequest("POST", "http://example.com/responses", nil)
+	body := []byte(`{"model":"minimax","input":"hi"}`)
+	shape := buildBufferedRequestShape(req, body, nil)
+
+	plan, rewrittenBody, err := h.planRoute(AdmissionResult{Kind: AdmissionKindPoolUser, UserID: "u1"}, req, shape, body)
+	if err != nil {
+		t.Fatalf("plan route: %v", err)
+	}
+	if plan.AccountType != AccountTypeMinimax {
+		t.Fatalf("account_type = %q", plan.AccountType)
+	}
+	if !strings.Contains(string(rewrittenBody), "MiniMax-M2.5") {
+		t.Fatalf("rewritten body = %s", string(rewrittenBody))
+	}
+}
+
+func TestPlanRouteRequiresCodexPro(t *testing.T) {
+	h := newPlanningTestHandler(t)
+	req := httptest.NewRequest("POST", "http://example.com/responses", nil)
+	body := []byte(`{"model":"gpt-5.3-codex-spark","input":"hi"}`)
+	shape := buildBufferedRequestShape(req, body, nil)
+
+	plan, _, err := h.planRoute(AdmissionResult{Kind: AdmissionKindPoolUser, UserID: "u1"}, req, shape, body)
+	if err != nil {
+		t.Fatalf("plan route: %v", err)
+	}
+	if plan.AccountType != AccountTypeCodex {
+		t.Fatalf("account_type = %q", plan.AccountType)
+	}
+	if plan.RequiredPlan != "pro" {
+		t.Fatalf("required_plan = %q", plan.RequiredPlan)
+	}
+}
+
+func TestPlanRouteStreamedBodyDoesNotInferRequiredPlan(t *testing.T) {
+	h := newPlanningTestHandler(t)
+	req := httptest.NewRequest("POST", "http://example.com/responses", nil)
+	shape := buildStreamedRequestShape(req)
+
+	plan, rewrittenBody, err := h.planRoute(AdmissionResult{Kind: AdmissionKindPoolUser, UserID: "u1"}, req, shape, nil)
+	if err != nil {
+		t.Fatalf("plan route: %v", err)
+	}
+	if plan.RequiredPlan != "" {
+		t.Fatalf("required_plan = %q", plan.RequiredPlan)
+	}
+	if rewrittenBody != nil {
+		t.Fatalf("rewritten body should be nil")
+	}
+}

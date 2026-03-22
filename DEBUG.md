@@ -3,7 +3,7 @@
 ## Fast Checks
 - Build: `go build ./...`
 - Full Go suite: `go test ./...`
-- Admission slice guardrails: `go test -count=1 -timeout 90s -run "TestResolveProxyAdmission|TestProxyStreamedRequestClaude|TestLooksLikeProviderCredential|TestClaudePoolToken_FormatAndBackwardCompatibility|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketPassthroughPreservesAuthorization" ./...`
+- Admission + planning guardrails: `go test -count=1 -timeout 90s -run "TestBuild.*RequestShape|TestPlanRoute|TestResolveProxyAdmission|TestProxyStreamedRequestClaude|TestLooksLikeProviderCredential|TestClaudePoolToken_FormatAndBackwardCompatibility|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketPassthroughPreservesAuthorization" ./...`
 
 ## Service Checks
 - User service status: `systemctl --user status codex-pool.service --no-pager`

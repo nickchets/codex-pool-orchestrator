@@ -38,3 +38,4 @@ Run `codex-pool-orchestrator` as a repo-local product capsule that provides a mu
 - This repo was selected by root card `ROOT-E22-S1-T2` as the first external proof capsule.
 - The first live proof was executed under root card `ROOT-E22-S1-T3`.
 - The first governed refactor wave on 2026-03-22 restored a full green Go test baseline and added live `/responses` smoke verification on the deployed user service.
+- The second governed refactor wave on 2026-03-22 froze request-planning contracts into a dedicated layer so buffered, streamed, and websocket request entrypaths reuse one routing plan.

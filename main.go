@@ -677,35 +677,39 @@ func bodyForInspection(r *http.Request, body []byte) []byte {
 func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqID string) {
 	start := time.Now()
 	admission := h.resolveProxyAdmission(r, reqID)
-	if admission.Kind == proxyAdmissionPassthrough {
+	if admission.Kind == AdmissionKindPassthrough {
 		h.proxyPassthrough(w, r, reqID, admission.ProviderType, start)
 		return
 	}
-	if admission.Kind == proxyAdmissionRejected {
+	if admission.Kind == AdmissionKindRejected {
 		http.Error(w, admission.Message, admission.StatusCode)
 		return
 	}
-	userID := admission.UserID
-
-	provider, targetBase := h.pickUpstream(r.URL.Path, r.Header)
-	if provider == nil || targetBase == nil {
-		http.Error(w, "no upstream for path", http.StatusNotFound)
-		return
-	}
-	accountType := provider.Type()
 
 	if isWebSocketUpgradeRequest(r) {
-		h.proxyRequestWebSocket(w, r, reqID, userID, provider, targetBase)
+		shape := buildWebSocketRequestShape(r)
+		routePlan, _, err := h.planRoute(admission, r, shape, nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		h.proxyRequestWebSocket(w, r, reqID, routePlan)
 		return
 	}
 
 	streamBody := shouldStreamBody(r, h.cfg.maxInMemoryBodyBytes)
 	if streamBody {
+		shape := buildStreamedRequestShape(r)
+		routePlan, _, err := h.planRoute(admission, r, shape, nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
 		if h.cfg.debug {
 			log.Printf("[%s] streaming request body: method=%s path=%s provider=%s content-length=%d",
-				reqID, r.Method, r.URL.Path, accountType, r.ContentLength)
+				reqID, r.Method, r.URL.Path, routePlan.AccountType, r.ContentLength)
 		}
-		h.proxyRequestStreamed(w, r, reqID, userID, provider, targetBase)
+		h.proxyRequestStreamed(w, r, reqID, routePlan)
 		return
 	}
 
@@ -715,26 +719,26 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		return
 	}
 
-	// conversation_id usually comes from request JSON (Codex often includes it).
+	shape := buildBufferedRequestShape(r, bodyBytes, bodySample)
+	routePlan, rewrittenBody, err := h.planRoute(admission, r, shape, bodyBytes)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if rewrittenBody != nil {
+		bodyBytes = rewrittenBody
+	}
 	inspect := bodyBytes
 	if len(inspect) == 0 {
 		inspect = bodySample
 	}
 	inspect = bodyForInspection(r, inspect)
-	conversationID := extractConversationIDFromJSON(inspect)
-	requestedModel := extractRequestedModelFromJSON(inspect)
-
-	// Model-based provider override: route to external providers by model name.
-	if requestedModel != "" {
-		if overrideProvider, overrideBase, rewrittenBody := h.modelRouteOverride(requestedModel, bodyBytes); overrideProvider != nil {
-			provider = overrideProvider
-			targetBase = overrideBase
-			accountType = overrideProvider.Type()
-			if rewrittenBody != nil {
-				bodyBytes = rewrittenBody
-			}
-		}
-	}
+	conversationID := routePlan.Shape.ConversationID
+	requestedModel := routePlan.Shape.RequestedModel
+	accountType := routePlan.AccountType
+	provider := routePlan.Provider
+	targetBase := routePlan.TargetBase
+	userID := routePlan.Admission.UserID
 
 	if h.cfg.debug && conversationID == "" && len(inspect) > 0 {
 		// Help debug why conversation id isn't being extracted without dumping the full body.
@@ -802,10 +806,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	exclude := map[string]bool{}
 	var lastErr error
 	var lastStatus int
-	requiredPlan := ""
-	if accountType == AccountTypeCodex && modelRequiresCodexPro(requestedModel) {
-		requiredPlan = "pro"
-	}
+	requiredPlan := routePlan.RequiredPlan
 
 	for attempt := 1; attempt <= attempts; attempt++ {
 		acc := h.pool.candidate(conversationID, exclude, accountType, requiredPlan)
@@ -1148,23 +1149,15 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	http.Error(w, lastErr.Error(), status)
 }
 
-func (h *proxyHandler) proxyRequestWebSocket(
-	w http.ResponseWriter,
-	r *http.Request,
-	reqID string,
-	userID string,
-	provider Provider,
-	targetBase *url.URL,
-) {
+func (h *proxyHandler) proxyRequestWebSocket(w http.ResponseWriter, r *http.Request, reqID string, routePlan RoutePlan) {
 	start := time.Now()
-	accountType := provider.Type()
+	accountType := routePlan.AccountType
+	conversationID := routePlan.Shape.ConversationID
+	userID := routePlan.Admission.UserID
+	provider := routePlan.Provider
+	targetBase := routePlan.TargetBase
 
-	conversationID := strings.TrimSpace(r.URL.Query().Get("session_id"))
-	if conversationID == "" {
-		conversationID = extractConversationIDFromHeaders(r.Header)
-	}
-
-	acc := h.pool.candidate(conversationID, map[string]bool{}, accountType, "")
+	acc := h.pool.candidate(conversationID, map[string]bool{}, accountType, routePlan.RequiredPlan)
 	if acc == nil {
 		http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
 		return
@@ -1427,11 +1420,14 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 	}
 }
 
-func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Request, reqID, userID string, provider Provider, targetBase *url.URL) {
+func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Request, reqID string, routePlan RoutePlan) {
 	start := time.Now()
-	accountType := provider.Type()
+	accountType := routePlan.AccountType
+	userID := routePlan.Admission.UserID
+	provider := routePlan.Provider
+	targetBase := routePlan.TargetBase
 
-	acc := h.pool.candidate("", map[string]bool{}, accountType, "")
+	acc := h.pool.candidate(routePlan.Shape.ConversationID, map[string]bool{}, accountType, routePlan.RequiredPlan)
 	if acc == nil {
 		http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
 		return
