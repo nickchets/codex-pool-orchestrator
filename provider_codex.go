@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -206,148 +205,11 @@ func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transpor
 }
 
 func (p *CodexProvider) ParseUsage(obj map[string]any) *RequestUsage {
-	// Try token_count event format first
-	if ru := p.parseTokenCountEvent(obj); ru != nil {
-		return ru
-	}
-	// Then try response usage format
-	return p.parseResponseUsage(obj)
-}
-
-// parseTokenCountEvent extracts usage from Codex token_count SSE events.
-func (p *CodexProvider) parseTokenCountEvent(obj map[string]any) *RequestUsage {
-	info, ok := obj["info"].(map[string]any)
-	if !ok || info == nil {
-		return nil
-	}
-
-	var usageMap map[string]any
-	if ltu, ok := info["last_token_usage"].(map[string]any); ok {
-		usageMap = ltu
-	} else if ttu, ok := info["total_token_usage"].(map[string]any); ok {
-		usageMap = ttu
-	}
-	if usageMap == nil {
-		return nil
-	}
-
-	ru := &RequestUsage{Timestamp: time.Now()}
-	ru.InputTokens = readInt64(usageMap, "input_tokens")
-	ru.CachedInputTokens = readInt64(usageMap, "cached_input_tokens")
-	ru.OutputTokens = readInt64(usageMap, "output_tokens")
-	ru.ReasoningTokens = readInt64(usageMap, "reasoning_output_tokens")
-	ru.BillableTokens = ru.InputTokens - ru.CachedInputTokens + ru.OutputTokens
-
-	if ru.InputTokens == 0 && ru.OutputTokens == 0 {
-		return nil
-	}
-
-	if rl, ok := obj["rate_limits"].(map[string]any); ok {
-		if primary, ok := rl["primary"].(map[string]any); ok {
-			ru.PrimaryUsedPct = readFloat64(primary, "used_percent") / 100.0
-		}
-		if secondary, ok := rl["secondary"].(map[string]any); ok {
-			ru.SecondaryUsedPct = readFloat64(secondary, "used_percent") / 100.0
-		}
-	}
-
-	return ru
-}
-
-// parseResponseUsage extracts usage from Codex SSE response events.
-func (p *CodexProvider) parseResponseUsage(obj map[string]any) *RequestUsage {
-	usageMap, ok := obj["usage"].(map[string]any)
-	if !ok || usageMap == nil {
-		if resp, ok := obj["response"].(map[string]any); ok {
-			usageMap, ok = resp["usage"].(map[string]any)
-			if !ok || usageMap == nil {
-				return nil
-			}
-		} else {
-			return nil
-		}
-	}
-
-	ru := &RequestUsage{Timestamp: time.Now()}
-	ru.InputTokens = readInt64(usageMap, "input_tokens")
-	ru.OutputTokens = readInt64(usageMap, "output_tokens")
-
-	if details, ok := usageMap["input_tokens_details"].(map[string]any); ok {
-		ru.CachedInputTokens = readInt64(details, "cached_tokens")
-	}
-	if ru.CachedInputTokens == 0 {
-		ru.CachedInputTokens = readInt64(usageMap, "cache_read_input_tokens")
-	}
-
-	if details, ok := usageMap["output_tokens_details"].(map[string]any); ok {
-		ru.ReasoningTokens = readInt64(details, "reasoning_tokens")
-	}
-
-	ru.BillableTokens = ru.InputTokens - ru.CachedInputTokens + ru.OutputTokens
-
-	if ru.InputTokens == 0 && ru.OutputTokens == 0 {
-		return nil
-	}
-
-	if v, ok := obj["prompt_cache_key"].(string); ok {
-		ru.PromptCacheKey = v
-	}
-
-	return ru
+	return parseCodexUsageDelta(obj).Usage
 }
 
 func (p *CodexProvider) ParseUsageHeaders(acc *Account, headers http.Header) {
-	primaryStr := headers.Get("X-Codex-Primary-Used-Percent")
-	secondaryStr := headers.Get("X-Codex-Secondary-Used-Percent")
-	if primaryStr == "" && secondaryStr == "" {
-		return
-	}
-
-	acc.mu.Lock()
-	defer acc.mu.Unlock()
-
-	snap := acc.Usage
-	snap.RetrievedAt = time.Now()
-	snap.Source = "headers"
-
-	if primaryStr != "" {
-		if f, err := strconv.ParseFloat(primaryStr, 64); err == nil {
-			snap.PrimaryUsedPercent = f / 100.0
-			snap.PrimaryUsed = snap.PrimaryUsedPercent
-		}
-	}
-	if secondaryStr != "" {
-		if f, err := strconv.ParseFloat(secondaryStr, 64); err == nil {
-			snap.SecondaryUsedPercent = f / 100.0
-			snap.SecondaryUsed = snap.SecondaryUsedPercent
-		}
-	}
-
-	if v := headers.Get("X-Codex-Primary-Window-Minutes"); v != "" {
-		snap.PrimaryWindowMinutes, _ = strconv.Atoi(v)
-	}
-	if v := headers.Get("X-Codex-Secondary-Window-Minutes"); v != "" {
-		snap.SecondaryWindowMinutes, _ = strconv.Atoi(v)
-	}
-	if v := headers.Get("X-Codex-Primary-Reset-At"); v != "" {
-		if ts, err := strconv.ParseInt(v, 10, 64); err == nil {
-			snap.PrimaryResetAt = time.Unix(ts, 0)
-		}
-	}
-	if v := headers.Get("X-Codex-Secondary-Reset-At"); v != "" {
-		if ts, err := strconv.ParseInt(v, 10, 64); err == nil {
-			snap.SecondaryResetAt = time.Unix(ts, 0)
-		}
-	}
-	if v := headers.Get("X-Codex-Credits-Balance"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			snap.CreditsBalance = f
-		}
-	}
-	snap.HasCredits = strings.EqualFold(headers.Get("X-Codex-Credits-Has-Credits"), "true")
-	snap.CreditsUnlimited = strings.EqualFold(headers.Get("X-Codex-Credits-Unlimited"), "true")
-
-	acc.Usage = mergeUsage(acc.Usage, snap)
+	applyUsageSnapshot(acc, parseCodexUsageHeadersSnapshot(headers, time.Now()))
 }
 
 func (p *CodexProvider) UpstreamURL(path string) *url.URL {

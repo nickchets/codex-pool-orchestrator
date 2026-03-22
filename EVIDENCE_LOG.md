@@ -99,3 +99,30 @@
 - Notes
   - The selector change intentionally preserves the existing hard weekly cutoff for fresh routing; once observed 7d usage reaches `90%`, the seat leaves the candidate pool until the next observed reset.
   - A governed sidecar review also pointed out that streamed requests were bypassing affinity whenever the body was opaque; the final patch fixed that by extracting session identifiers from headers/query in the streamed request shape.
+
+### 2026-03-22T14:19:51Z | REPO-CPO-REFAC-P1-T3
+- Commands
+  - `go test -count=1 -timeout 90s -run "TestMergeUsage|TestParse|TestExtract|TestUsageStore|TestCodexProviderParseUsageHeaders|TestParseRequestUsageFromSSE" ./...`
+  - `go test ./...`
+  - `go build ./...`
+  - `cp /home/lap/.local/bin/codex-pool /home/lap/.local/bin/codex-pool.backup_20260322T141511Z`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `systemctl --user is-active codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_usage_ingestion.json`
+  - `AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && timeout 60s curl -sS -N -o /tmp/cpo_live_proxy_usage_ingestion.sse -w '%{http_code}' http://127.0.0.1:8989/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}'`
+- Result
+  - PASS
+  - `UsageDelta` is now the canonical usage-ingestion contract for Codex/OpenAI-style body, SSE, and header-derived quota snapshots, and the old hand-rolled body parser branches are gone.
+  - Provider implementations now sit over shared parsing helpers for OpenAI-style, Anthropic-style, Gemini, and Codex `token_count` usage formats instead of each keeping its own ad hoc token-field extraction logic.
+  - Targeted parse/usage tests and full `go test ./...` both passed after the extraction.
+  - After deploy, `systemctl --user is-active codex-pool.service` returned `active`, `/healthz` returned `{"status":"ok","uptime":"25s"}`, and live `/responses` smoke returned HTTP `200` with completed SSE output `OK`.
+  - `/status?format=json` after restart still reported `pool.total_accounts=9`, `eligible_accounts=8`, and the live seat remained `andy_2`, so the refactor did not perturb the current routing surface.
+- Artifacts
+  - `/tmp/cpo_status_usage_ingestion.json`
+  - `/tmp/cpo_live_proxy_usage_ingestion.sse`
+  - `/home/lap/.local/bin/codex-pool.backup_20260322T141511Z`
+- Notes
+  - This slice intentionally unified ingestion contracts without touching scoring, capacity math, or retry policy.
+  - The next smallest remaining debt after this slice is the duplicated SSE/response-recording callback flow between buffered and streamed proxy paths in `main.go`.

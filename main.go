@@ -1007,20 +1007,13 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 					})
 				},
 				callback: func(data []byte) {
-					// Parse the JSON event data - try object first, then array
-					var obj map[string]any
-					if err := json.Unmarshal(data, &obj); err != nil {
-						// Try parsing as array (Gemini sends [{"candidates":..., "usageMetadata":...}])
-						var arr []map[string]any
-						if err2 := json.Unmarshal(data, &arr); err2 != nil || len(arr) == 0 {
-							if h.cfg.debug {
-								log.Printf("[%s] SSE callback: failed to parse JSON: %v", reqID, err)
-							}
-							return
+					obj, ok := parseUsageEventObject(data)
+					if !ok {
+						if h.cfg.debug {
+							log.Printf("[%s] SSE callback: failed to parse usage event", reqID)
 						}
-						obj = arr[0] // Use first element
+						return
 					}
-					// Use provider's ParseUsage method
 					ru := provider.ParseUsage(obj)
 					if ru == nil {
 						return
@@ -1039,31 +1032,11 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 								claudeAccum.InputTokens - claudeAccum.CachedInputTokens + ru.OutputTokens)
 							ru = claudeAccum
 							claudeAccum = nil
-							ru.AccountID = acc.ID
-							ru.UserID = userID
-							ru.AccountType = acc.Type
-							acc.mu.Lock()
-							ru.PlanType = acc.PlanType
-							acc.mu.Unlock()
-							// Bridge rate limits from response headers into the usage record
-							if ru.PrimaryUsedPct == 0 && headerPrimaryPct > 0 {
-								ru.PrimaryUsedPct = headerPrimaryPct
-							}
-							if ru.SecondaryUsedPct == 0 && headerSecondaryPct > 0 {
-								ru.SecondaryUsedPct = headerSecondaryPct
-							}
-							h.recordUsage(acc, *ru)
+							h.recordUsage(acc, *enrichUsageRecord(acc, userID, ru, headerPrimaryPct, headerSecondaryPct))
 						}
 						return
 					}
-					// Non-Claude: record immediately (existing behavior)
-					ru.AccountID = acc.ID
-					ru.UserID = userID
-					ru.AccountType = acc.Type
-					acc.mu.Lock()
-					ru.PlanType = acc.PlanType
-					acc.mu.Unlock()
-					h.recordUsage(acc, *ru)
+					h.recordUsage(acc, *enrichUsageRecord(acc, userID, ru, headerPrimaryPct, headerSecondaryPct))
 				},
 			}
 		}
@@ -1099,7 +1072,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		}
 		// Still try to parse sample for non-SSE responses or fallback
 		if !isSSE && len(respSample) > 0 {
-			h.updateUsageFromBody(acc, respSample)
+			h.updateUsageFromBody(provider, acc, userID, headerPrimaryPct, headerSecondaryPct, respSample)
 		}
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 && !managedStreamFailed {
@@ -1677,13 +1650,9 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 				})
 			},
 			callback: func(data []byte) {
-				var obj map[string]any
-				if err := json.Unmarshal(data, &obj); err != nil {
-					var arr []map[string]any
-					if err2 := json.Unmarshal(data, &arr); err2 != nil || len(arr) == 0 {
-						return
-					}
-					obj = arr[0]
+				obj, ok := parseUsageEventObject(data)
+				if !ok {
+					return
 				}
 				ru := provider.ParseUsage(obj)
 				if ru == nil {
@@ -1701,31 +1670,11 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 							claudeAccum.InputTokens - claudeAccum.CachedInputTokens + ru.OutputTokens)
 						ru = claudeAccum
 						claudeAccum = nil
-						ru.AccountID = acc.ID
-						ru.UserID = userID
-						ru.AccountType = acc.Type
-						acc.mu.Lock()
-						ru.PlanType = acc.PlanType
-						acc.mu.Unlock()
-						// Bridge rate limits from response headers
-						if ru.PrimaryUsedPct == 0 && headerPrimaryPct > 0 {
-							ru.PrimaryUsedPct = headerPrimaryPct
-						}
-						if ru.SecondaryUsedPct == 0 && headerSecondaryPct > 0 {
-							ru.SecondaryUsedPct = headerSecondaryPct
-						}
-						h.recordUsage(acc, *ru)
+						h.recordUsage(acc, *enrichUsageRecord(acc, userID, ru, headerPrimaryPct, headerSecondaryPct))
 					}
 					return
 				}
-				// Non-Claude: record immediately
-				ru.AccountID = acc.ID
-				ru.UserID = userID
-				ru.AccountType = acc.Type
-				acc.mu.Lock()
-				ru.PlanType = acc.PlanType
-				acc.mu.Unlock()
-				h.recordUsage(acc, *ru)
+				h.recordUsage(acc, *enrichUsageRecord(acc, userID, ru, headerPrimaryPct, headerSecondaryPct))
 			},
 		}
 	}
@@ -1755,7 +1704,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		log.Printf("[%s] response body sample (%d bytes): %s", reqID, len(respSample), safeText(respSample))
 	}
 	if !isSSE && len(respSample) > 0 {
-		h.updateUsageFromBody(acc, respSample)
+		h.updateUsageFromBody(provider, acc, userID, headerPrimaryPct, headerSecondaryPct, respSample)
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 && !managedStreamFailed {
@@ -2523,8 +2472,8 @@ func (h *proxyHandler) refreshAccountOnce(ctx context.Context, a *Account) error
 // - startUsagePoller, refreshUsageIfStale, fetchUsage, buildWhamUsageURL
 // - DailyBreakdownDay, fetchDailyBreakdownData, replaceUsageHeaders
 
-func (h *proxyHandler) updateUsageFromBody(a *Account, sample []byte) {
-	if a == nil || len(sample) == 0 {
+func (h *proxyHandler) updateUsageFromBody(provider Provider, a *Account, userID string, headerPrimaryPct, headerSecondaryPct float64, sample []byte) {
+	if provider == nil || a == nil || len(sample) == 0 {
 		return
 	}
 	lines := bytes.Split(sample, []byte("\n"))
@@ -2539,62 +2488,20 @@ func (h *proxyHandler) updateUsageFromBody(a *Account, sample []byte) {
 		if bytes.Equal(line, []byte("[DONE]")) {
 			continue
 		}
-		var obj map[string]any
-		if err := json.Unmarshal(line, &obj); err != nil {
+		obj, ok := parseUsageEventObject(line)
+		if !ok {
 			continue
 		}
 
-		// Handle Codex token_count events: {type: "token_count", info: {...}, rate_limits: {...}}
-		if objType, _ := obj["type"].(string); objType == "token_count" {
-			ru := parseTokenCountEvent(obj)
-			if ru != nil {
-				ru.AccountID = a.ID
-				a.mu.Lock()
-				ru.PlanType = a.PlanType
-				a.mu.Unlock()
-				h.recordUsage(a, *ru)
-			}
-			// Also apply rate limits from token_count
-			if rl, ok := obj["rate_limits"].(map[string]any); ok {
-				a.applyRateLimitsFromTokenCount(rl)
-			}
-			continue
+		delta := UsageDelta{Usage: provider.ParseUsage(obj)}
+		if provider.Type() == AccountTypeCodex {
+			delta = parseCodexUsageDelta(obj)
 		}
-
-		// Legacy: rate_limit at top level
-		if rl, ok := obj["rate_limit"].(map[string]any); ok {
-			converted := map[string]interface{}{}
-			for k, v := range rl {
-				converted[k] = v
-			}
-			a.applyRateLimitObject(converted)
+		if delta.Snapshot != nil {
+			applyUsageSnapshot(a, delta.Snapshot)
 		}
-
-		// Legacy: response object with usage
-		if resp, ok := obj["response"].(map[string]any); ok {
-			if rl, ok := resp["rate_limit"].(map[string]any); ok {
-				converted := map[string]interface{}{}
-				for k, v := range rl {
-					converted[k] = v
-				}
-				a.applyRateLimitObject(converted)
-			}
-			if ru := parseRequestUsage(resp); ru != nil {
-				ru.AccountID = a.ID
-				a.mu.Lock()
-				ru.PlanType = a.PlanType
-				a.mu.Unlock()
-				h.recordUsage(a, *ru)
-			}
-		}
-
-		// Legacy: direct usage object
-		if ru := parseRequestUsage(obj); ru != nil {
-			ru.AccountID = a.ID
-			a.mu.Lock()
-			ru.PlanType = a.PlanType
-			a.mu.Unlock()
-			h.recordUsage(a, *ru)
+		if delta.Usage != nil {
+			h.recordUsage(a, *enrichUsageRecord(a, userID, delta.Usage, headerPrimaryPct, headerSecondaryPct))
 		}
 	}
 }

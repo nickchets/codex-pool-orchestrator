@@ -10,18 +10,25 @@ _(empty — truthful idle handoff; successor cards are hydrated in `NEXT`)_
 
 ### NEXT
 
-#### REPO-CPO-REFAC-P1-T3: Unify usage ingestion
-1. Replace duplicated header/body/SSE usage parsing with one canonical `UsageDelta` pipeline.
-2. Keep provider-specific parsing only as strategy implementations over the shared contract.
-3. Lock parity with JSON, SSE, and header-driven usage fixtures before touching scoring or analytics.
+#### REPO-CPO-REFAC-P1-T5: Collapse duplicated response streaming usage capture
+1. Extract one shared response-stream usage recorder for buffered and streamed proxy paths in `main.go`.
+2. Preserve managed API-key SSE failure handling, Claude two-event accumulation, and conversation pinning semantics exactly.
+3. Lock parity with targeted proxy/usage tests before touching retry or routing behavior.
 
-**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 90s -run "TestMergeUsage|TestParse|TestExtract|TestUsageStore" ./...`
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse" ./...`
 
 ### BLOCKED
 
 _(none)_
 
 ### DONE
+
+#### REPO-CPO-REFAC-P1-T3: Unify usage ingestion
+1. Replace duplicated header/body/SSE usage parsing with one canonical `UsageDelta` pipeline.
+2. Keep provider-specific parsing only as strategy implementations over the shared contract.
+3. Lock parity with JSON, SSE, and header-driven usage fixtures before touching scoring or analytics.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go build ./... && go test -count=1 -timeout 90s -run "TestMergeUsage|TestParse|TestExtract|TestUsageStore|TestCodexProviderParseUsageHeaders|TestParseRequestUsageFromSSE" ./... && go test ./... && systemctl --user is-active codex-pool.service && curl -fsS http://127.0.0.1:8989/healthz && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_usage_ingestion.json`
 
 #### REPO-CPO-BUG-P1-T4: Enforce codex seat cutoff and sticky selection semantics
 1. Exclude Codex seats from fresh routing as soon as observed 5h or 7d usage reaches `90%`, instead of allowing the exact threshold to stay routable.

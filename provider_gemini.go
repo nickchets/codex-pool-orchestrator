@@ -171,25 +171,7 @@ func (p *GeminiProvider) RefreshToken(ctx context.Context, acc *Account, transpo
 }
 
 func (p *GeminiProvider) ParseUsage(obj map[string]any) *RequestUsage {
-	// Gemini format: {"usageMetadata": {"promptTokenCount": N, "candidatesTokenCount": N, "totalTokenCount": N, "cachedContentTokenCount": N}}
-	usageMap, ok := obj["usageMetadata"].(map[string]any)
-	if !ok || usageMap == nil {
-		return nil
-	}
-
-	ru := &RequestUsage{Timestamp: time.Now()}
-	ru.InputTokens = readInt64(usageMap, "promptTokenCount")
-	ru.OutputTokens = readInt64(usageMap, "candidatesTokenCount")
-	ru.CachedInputTokens = readInt64(usageMap, "cachedContentTokenCount")
-
-	// Calculate billable tokens
-	ru.BillableTokens = ru.InputTokens - ru.CachedInputTokens + ru.OutputTokens
-
-	if ru.InputTokens == 0 && ru.OutputTokens == 0 {
-		return nil
-	}
-
-	return ru
+	return parseGeminiUsagePayload(obj)
 }
 
 func (p *GeminiProvider) ParseUsageHeaders(acc *Account, headers http.Header) {

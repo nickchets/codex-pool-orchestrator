@@ -40,3 +40,4 @@ Run `codex-pool-orchestrator` as a repo-local product capsule that provides a mu
 - The first governed refactor wave on 2026-03-22 restored a full green Go test baseline and added live `/responses` smoke verification on the deployed user service.
 - The second governed refactor wave on 2026-03-22 froze request-planning contracts into a dedicated layer so buffered, streamed, and websocket request entrypaths reuse one routing plan.
 - The next governed bugfix slice on 2026-03-22 hardened Codex seat selection so exact `90%` quota thresholds now block fresh routing, streamed requests retain session affinity when possible, and `/status` previews match the real sticky selector.
+- The next governed refactor wave on 2026-03-22 unified usage ingestion under a shared `UsageDelta` contract so provider parsers and non-SSE body fallback no longer maintain separate token/rate-limit parsing branches.

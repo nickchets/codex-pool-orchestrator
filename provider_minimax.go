@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // MinimaxProvider handles MiniMax API accounts.
@@ -60,43 +59,14 @@ func (p *MinimaxProvider) RefreshToken(ctx context.Context, acc *Account, transp
 }
 
 func (p *MinimaxProvider) ParseUsage(obj map[string]any) *RequestUsage {
-	// MiniMax uses the Anthropic API format since the base URL is /anthropic
 	eventType, _ := obj["type"].(string)
 
 	if eventType == "message_delta" {
-		usageMap, ok := obj["usage"].(map[string]any)
-		if !ok {
-			return nil
-		}
-		ru := &RequestUsage{Timestamp: time.Now()}
-		ru.OutputTokens = readInt64(usageMap, "output_tokens")
-		if ru.OutputTokens == 0 {
-			return nil
-		}
-		ru.BillableTokens = ru.OutputTokens
-		return ru
+		return parseAnthropicMessageDeltaUsage(obj)
 	}
 
 	if eventType == "message_start" {
-		msg, ok := obj["message"].(map[string]any)
-		if !ok {
-			return nil
-		}
-		usageMap, ok := msg["usage"].(map[string]any)
-		if !ok {
-			return nil
-		}
-		ru := &RequestUsage{Timestamp: time.Now()}
-		ru.InputTokens = readInt64(usageMap, "input_tokens")
-		ru.CachedInputTokens = readInt64(usageMap, "cache_read_input_tokens")
-		if ru.InputTokens == 0 {
-			return nil
-		}
-		if model, ok := msg["model"].(string); ok {
-			ru.Model = model
-		}
-		ru.BillableTokens = clampNonNegative(ru.InputTokens - ru.CachedInputTokens)
-		return ru
+		return parseAnthropicMessageStartUsage(obj)
 	}
 
 	return nil
