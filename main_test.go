@@ -1,9 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -20,7 +26,7 @@ func TestBuildWhamUsageURLKeepsBackendAPI(t *testing.T) {
 func TestCodexProviderUpstreamURLBackendAPIPathUsesWhamBase(t *testing.T) {
 	responsesBase, _ := url.Parse("https://chatgpt.com/backend-api/codex")
 	whamBase, _ := url.Parse("https://chatgpt.com/backend-api")
-	provider := NewCodexProvider(responsesBase, whamBase, nil)
+	provider := NewCodexProvider(responsesBase, whamBase, nil, responsesBase)
 
 	got := provider.UpstreamURL("/backend-api/codex/models")
 	if got.String() != whamBase.String() {
@@ -183,6 +189,118 @@ func TestParseClaudeResetAt(t *testing.T) {
 	}
 	if fromUnix.UTC().Unix() != resetAt.Unix() {
 		t.Fatalf("unix reset = %v want %v", fromUnix.UTC(), resetAt)
+	}
+}
+
+func TestCodexProviderLoadsManagedOpenAIAPIKeyAccount(t *testing.T) {
+	apiBase, _ := url.Parse("https://api.openai.com")
+	provider := NewCodexProvider(apiBase, apiBase, apiBase, apiBase)
+
+	payload := []byte(`{
+	  "OPENAI_API_KEY": "sk-proj-test",
+	  "auth_mode": "api_key",
+	  "plan_type": "api",
+	  "health_status": "healthy",
+	  "health_error": "",
+	  "dead": false
+	}`)
+
+	acc, err := provider.LoadAccount("openai_api_deadbeef.json", "/tmp/openai_api_deadbeef.json", payload)
+	if err != nil {
+		t.Fatalf("load account: %v", err)
+	}
+	if acc == nil {
+		t.Fatal("expected account")
+	}
+	if acc.AuthMode != accountAuthModeAPIKey {
+		t.Fatalf("auth_mode=%q", acc.AuthMode)
+	}
+	if acc.PlanType != "api" {
+		t.Fatalf("plan_type=%q", acc.PlanType)
+	}
+	if acc.AccessToken != "sk-proj-test" {
+		t.Fatalf("access_token=%q", acc.AccessToken)
+	}
+}
+
+func TestTryOnceManagedOpenAIAPIKeyUsesAPIBase(t *testing.T) {
+	var seenPaths []string
+	var seenAuth []string
+	var seenBodies []string
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPaths = append(seenPaths, r.URL.Path)
+		seenAuth = append(seenAuth, r.Header.Get("Authorization"))
+		body, _ := io.ReadAll(r.Body)
+		seenBodies = append(seenBodies, string(body))
+		if r.Header.Get("ChatGPT-Account-ID") != "" {
+			t.Fatalf("expected no ChatGPT-Account-ID for managed api key")
+		}
+		switch r.URL.Path {
+		case "/v1/responses":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"resp_123","status":"completed"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer apiServer.Close()
+
+	apiBase, _ := url.Parse(apiServer.URL)
+	provider := NewCodexProvider(apiBase, apiBase, apiBase, apiBase)
+	claude := NewClaudeProvider(apiBase)
+	gemini := NewGeminiProvider(apiBase, apiBase)
+	registry := NewProviderRegistry(provider, claude, gemini)
+
+	tmp := t.TempDir()
+	keyPath := filepath.Join(tmp, "openai_api", "openai_api_deadbeef.json")
+	if err := os.MkdirAll(filepath.Dir(keyPath), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(keyPath, []byte(`{"OPENAI_API_KEY":"sk-proj-test","auth_mode":"api_key","plan_type":"api"}`), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	acc := &Account{
+		ID:          "openai_api_deadbeef",
+		Type:        AccountTypeCodex,
+		File:        keyPath,
+		AccessToken: "sk-proj-test",
+		PlanType:    "api",
+		AuthMode:    accountAuthModeAPIKey,
+	}
+	h := &proxyHandler{
+		cfg:       config{},
+		transport: http.DefaultTransport,
+		registry:  registry,
+	}
+
+	body := []byte(`{"model":"gpt-4.1-mini","input":"hi"}`)
+	req, err := http.NewRequest(http.MethodPost, "http://pool.local/v1/responses", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, _, _, err := h.tryOnce(context.Background(), req, body, apiBase, provider, acc, "req-test")
+	if err != nil {
+		t.Fatalf("tryOnce: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if len(seenPaths) < 2 {
+		t.Fatalf("expected probe and request, saw %v", seenPaths)
+	}
+	if seenPaths[0] != "/v1/responses" || seenPaths[1] != "/v1/responses" {
+		t.Fatalf("unexpected paths: %v", seenPaths)
+	}
+	if !strings.Contains(seenBodies[0], `"model":"gpt-5.4"`) {
+		t.Fatalf("expected responses probe body, got %q", seenBodies[0])
+	}
+	if strings.TrimSpace(seenBodies[1]) != string(body) {
+		t.Fatalf("unexpected forwarded request body: %q", seenBodies[1])
+	}
+	for _, auth := range seenAuth {
+		if auth != "Bearer sk-proj-test" {
+			t.Fatalf("unexpected auth header %q", auth)
+		}
 	}
 }
 

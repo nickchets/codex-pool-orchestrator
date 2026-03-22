@@ -24,6 +24,11 @@ const (
 	AccountTypeMinimax AccountType = "minimax"
 )
 
+const (
+	accountAuthModeOAuth  = "oauth"
+	accountAuthModeAPIKey = "api_key"
+)
+
 // Switch away only after usage exceeds 90%, i.e. when remaining headroom is strictly below 10%.
 const codexPreemptiveUsedThreshold = 0.90
 
@@ -81,6 +86,7 @@ func routingStateLocked(a *Account, now time.Time, accountType AccountType, requ
 	if a == nil {
 		return routingState{Eligible: false, BlockReason: "missing_account"}
 	}
+	isManagedCodexAPI := isManagedCodexAPIKeyAccount(a)
 	primaryUsed, secondaryUsed := effectiveUsageForRouting(a.Usage, now)
 	state := routingState{
 		Eligible:          true,
@@ -109,16 +115,16 @@ func routingStateLocked(a *Account, now time.Time, accountType AccountType, requ
 		state.BlockReason = "plan_mismatch"
 		return state
 	}
-	if a.Type != AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
+	if (a.Type != AccountTypeCodex || isManagedCodexAPI) && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
 		state.Eligible = false
 		state.BlockReason = "rate_limited"
 		state.RecoveryAt = a.RateLimitUntil
 		return state
 	}
-	if a.Type == AccountTypeCodex && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
+	if a.Type == AccountTypeCodex && !isManagedCodexAPI && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
 		state.CodexRateLimitBypass = true
 	}
-	if a.Type == AccountTypeCodex {
+	if a.Type == AccountTypeCodex && !isManagedCodexAPI {
 		primaryBlocked := primaryUsed > codexPreemptiveUsedThreshold
 		secondaryBlocked := secondaryUsed > codexPreemptiveUsedThreshold
 		switch {
@@ -156,6 +162,7 @@ type Account struct {
 	// We keep it for debugging/fallback but prefer AccountID when present.
 	IDTokenChatGPTAccountID string
 	PlanType                string
+	AuthMode                string
 	Disabled                bool
 	Inflight                int64
 	ExpiresAt               time.Time
@@ -166,9 +173,32 @@ type Account struct {
 	Dead                    bool
 	LastUsed                time.Time
 	RateLimitUntil          time.Time
+	HealthStatus            string
+	HealthError             string
+	HealthCheckedAt         time.Time
+	LastHealthyAt           time.Time
 
 	// Aggregated token counters (in-memory for now; persist later)
 	Totals AccountUsage
+}
+
+func accountAuthMode(a *Account) string {
+	if a == nil {
+		return accountAuthModeOAuth
+	}
+	mode := strings.TrimSpace(strings.ToLower(a.AuthMode))
+	if mode == "" {
+		return accountAuthModeOAuth
+	}
+	return mode
+}
+
+func isManagedCodexAPIKeyAccount(a *Account) bool {
+	return a != nil && a.Type == AccountTypeCodex && accountAuthMode(a) == accountAuthModeAPIKey
+}
+
+func codexAccountCountsAgainstQuota(a *Account) bool {
+	return a != nil && a.Type == AccountTypeCodex && !isManagedCodexAPIKeyAccount(a)
 }
 
 func (a *Account) applyRateLimitObject(rl map[string]interface{}) {
@@ -355,10 +385,17 @@ func (a *Account) applyRequestUsage(u RequestUsage) {
 
 // CodexAuthJSON is the format for Codex auth.json files.
 type CodexAuthJSON struct {
-	OpenAIKey   *string    `json:"OPENAI_API_KEY"`
-	Tokens      *TokenData `json:"tokens"`
-	LastRefresh *time.Time `json:"last_refresh"`
-	Dead        bool       `json:"dead"`
+	OpenAIKey       *string    `json:"OPENAI_API_KEY"`
+	Tokens          *TokenData `json:"tokens"`
+	LastRefresh     *time.Time `json:"last_refresh"`
+	LastHealthyAt   *time.Time `json:"last_healthy_at"`
+	HealthCheckedAt *time.Time `json:"health_checked_at"`
+	HealthStatus    string     `json:"health_status"`
+	HealthError     string     `json:"health_error"`
+	PlanType        string     `json:"plan_type"`
+	AuthMode        string     `json:"auth_mode"`
+	Dead            bool       `json:"dead"`
+	Disabled        bool       `json:"disabled"`
 }
 
 type TokenData struct {
@@ -406,16 +443,21 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 	var accs []*Account
 
 	// Load accounts from provider subdirectories: pool/codex/, pool/claude/, pool/gemini/
-	providerDirs := map[string]AccountType{
-		"codex":   AccountTypeCodex,
-		"claude":  AccountTypeClaude,
-		"gemini":  AccountTypeGemini,
-		"kimi":    AccountTypeKimi,
-		"minimax": AccountTypeMinimax,
+	type providerDir struct {
+		name        string
+		accountType AccountType
+	}
+	providerDirs := []providerDir{
+		{name: "codex", accountType: AccountTypeCodex},
+		{name: "openai_api", accountType: AccountTypeCodex},
+		{name: "claude", accountType: AccountTypeClaude},
+		{name: "gemini", accountType: AccountTypeGemini},
+		{name: "kimi", accountType: AccountTypeKimi},
+		{name: "minimax", accountType: AccountTypeMinimax},
 	}
 
-	for subdir, accountType := range providerDirs {
-		providerDir := filepath.Join(dir, subdir)
+	for _, spec := range providerDirs {
+		providerDir := filepath.Join(dir, spec.name)
 		entries, err := os.ReadDir(providerDir)
 		if os.IsNotExist(err) {
 			continue // Skip if provider directory doesn't exist
@@ -424,7 +466,7 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 			return nil, fmt.Errorf("read pool dir %s: %w", providerDir, err)
 		}
 
-		provider := registry.ForType(accountType)
+		provider := registry.ForType(spec.accountType)
 		if provider == nil {
 			continue
 		}
@@ -672,6 +714,20 @@ func (p *poolState) peekCandidateAt(now time.Time, accountType AccountType, requ
 }
 
 func (p *poolState) selectEligibleCandidateLocked(now time.Time, exclude map[string]bool, accountType AccountType, requiredPlan string, advanceRR bool) *Account {
+	if accountType == AccountTypeCodex {
+		if acc := p.selectEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, advanceRR, func(a *Account) bool {
+			return !isManagedCodexAPIKeyAccount(a)
+		}); acc != nil {
+			return acc
+		}
+		return p.selectEligibleCandidateMatchingLocked(now, exclude, accountType, "", advanceRR, func(a *Account) bool {
+			return isManagedCodexAPIKeyAccount(a)
+		})
+	}
+	return p.selectEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, advanceRR, nil)
+}
+
+func (p *poolState) selectEligibleCandidateMatchingLocked(now time.Time, exclude map[string]bool, accountType AccountType, requiredPlan string, advanceRR bool, include func(*Account) bool) *Account {
 	n := len(p.accounts)
 	if n == 0 {
 		return nil
@@ -688,6 +744,9 @@ func (p *poolState) selectEligibleCandidateLocked(now time.Time, exclude map[str
 	start := int(p.rr % uint64(n))
 	for i := 0; i < n; i++ {
 		a := p.accounts[(start+i)%n]
+		if include != nil && !include(a) {
+			continue
+		}
 		if exclude != nil && exclude[a.ID] {
 			continue
 		}
@@ -968,6 +1027,47 @@ func saveCodexAccount(a *Account) error {
 		return fmt.Errorf("parse %s: %w", a.File, err)
 	}
 
+	if isManagedCodexAPIKeyAccount(a) {
+		root["OPENAI_API_KEY"] = a.AccessToken
+		root["auth_mode"] = accountAuthModeAPIKey
+		if strings.TrimSpace(a.PlanType) != "" {
+			root["plan_type"] = strings.TrimSpace(a.PlanType)
+		} else {
+			root["plan_type"] = "api"
+		}
+		if !a.HealthCheckedAt.IsZero() {
+			root["health_checked_at"] = a.HealthCheckedAt.UTC().Format(time.RFC3339Nano)
+		}
+		if strings.TrimSpace(a.HealthStatus) != "" {
+			root["health_status"] = strings.TrimSpace(a.HealthStatus)
+		} else {
+			delete(root, "health_status")
+		}
+		if strings.TrimSpace(a.HealthError) != "" {
+			root["health_error"] = strings.TrimSpace(a.HealthError)
+		} else {
+			delete(root, "health_error")
+		}
+		if !a.LastHealthyAt.IsZero() {
+			root["last_healthy_at"] = a.LastHealthyAt.UTC().Format(time.RFC3339Nano)
+		} else {
+			delete(root, "last_healthy_at")
+		}
+		if a.Disabled {
+			root["disabled"] = true
+		} else {
+			delete(root, "disabled")
+		}
+		if a.Dead {
+			root["dead"] = true
+		} else {
+			delete(root, "dead")
+		}
+		delete(root, "tokens")
+		delete(root, "last_refresh")
+		return atomicWriteJSON(a.File, root)
+	}
+
 	tokensAny := root["tokens"]
 	tokens, ok := tokensAny.(map[string]any)
 	if !ok || tokens == nil {
@@ -1235,6 +1335,9 @@ func (p *poolState) timeWeightedUsageByType(accountType AccountType) UsageSnapsh
 		if accountType != "" && a.Type != accountType {
 			continue
 		}
+		if a.Type == AccountTypeCodex && !codexAccountCountsAgainstQuota(a) {
+			continue
+		}
 		usedP, usedS := effectiveUsageForRouting(a.Usage, now)
 
 		// Compute time weight for primary window
@@ -1323,6 +1426,9 @@ func (p *poolState) getPoolUtilization() []PoolUtilization {
 
 	for _, a := range p.accounts {
 		if a.Dead || a.Disabled {
+			continue
+		}
+		if a.Type == AccountTypeCodex && !codexAccountCountsAgainstQuota(a) {
 			continue
 		}
 

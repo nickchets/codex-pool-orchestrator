@@ -25,7 +25,7 @@ func TestProxyStreamedRequestClaude(t *testing.T) {
 	defer upstream.Close()
 
 	baseURL, _ := url.Parse(upstream.URL)
-	codex := NewCodexProvider(baseURL, baseURL, baseURL)
+	codex := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
 	claude := NewClaudeProvider(baseURL)
 	gemini := NewGeminiProvider(baseURL, baseURL)
 	registry := NewProviderRegistry(codex, claude, gemini)

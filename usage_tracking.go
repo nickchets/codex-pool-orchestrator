@@ -47,6 +47,7 @@ func (h *proxyHandler) refreshUsageIfStale() {
 		hasToken := a.AccessToken != ""
 		retrievedAt := a.Usage.RetrievedAt
 		accType := a.Type
+		authMode := accountAuthMode(a)
 		rateLimitUntil := a.RateLimitUntil
 		a.mu.Unlock()
 
@@ -114,6 +115,10 @@ func (h *proxyHandler) refreshUsageIfStale() {
 					log.Printf("claude usage fetch %s failed: %v", a.ID, err)
 				}
 			}
+			continue
+		}
+
+		if accType == AccountTypeCodex && authMode == accountAuthModeAPIKey {
 			continue
 		}
 

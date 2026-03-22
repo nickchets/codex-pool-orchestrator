@@ -21,14 +21,16 @@ type CodexProvider struct {
 	responsesBase *url.URL
 	whamBase      *url.URL
 	refreshBase   *url.URL
+	apiBase       *url.URL
 }
 
 // NewCodexProvider creates a new Codex provider.
-func NewCodexProvider(responsesBase, whamBase, refreshBase *url.URL) *CodexProvider {
+func NewCodexProvider(responsesBase, whamBase, refreshBase, apiBase *url.URL) *CodexProvider {
 	return &CodexProvider{
 		responsesBase: responsesBase,
 		whamBase:      whamBase,
 		refreshBase:   refreshBase,
+		apiBase:       apiBase,
 	}
 }
 
@@ -41,6 +43,30 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 	if err := json.Unmarshal(data, &aj); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	if aj.OpenAIKey != nil && strings.TrimSpace(*aj.OpenAIKey) != "" {
+		acc := &Account{
+			Type:        AccountTypeCodex,
+			ID:          strings.TrimSuffix(name, filepath.Ext(name)),
+			File:        path,
+			AccessToken: strings.TrimSpace(*aj.OpenAIKey),
+			PlanType:    firstNonEmpty(strings.TrimSpace(aj.PlanType), "api"),
+			AuthMode:    accountAuthModeAPIKey,
+			Disabled:    aj.Disabled,
+			Dead:        aj.Dead,
+		}
+		if strings.TrimSpace(aj.AuthMode) != "" {
+			acc.AuthMode = strings.TrimSpace(aj.AuthMode)
+		}
+		if aj.HealthCheckedAt != nil {
+			acc.HealthCheckedAt = *aj.HealthCheckedAt
+		}
+		if aj.LastHealthyAt != nil {
+			acc.LastHealthyAt = *aj.LastHealthyAt
+		}
+		acc.HealthStatus = strings.TrimSpace(aj.HealthStatus)
+		acc.HealthError = strings.TrimSpace(aj.HealthError)
+		return acc, nil
+	}
 	if aj.Tokens == nil {
 		return nil, nil
 	}
@@ -51,6 +77,7 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 		AccessToken:  aj.Tokens.AccessToken,
 		RefreshToken: aj.Tokens.RefreshToken,
 		IDToken:      aj.Tokens.IDToken,
+		Disabled:     aj.Disabled,
 	}
 	if aj.Tokens.AccountID != nil {
 		acc.AccountID = strings.TrimSpace(*aj.Tokens.AccountID)
@@ -61,6 +88,7 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 		acc.AccountID = acc.IDTokenChatGPTAccountID
 	}
 	acc.PlanType = claims.PlanType
+	acc.AuthMode = accountAuthModeOAuth
 	acc.ExpiresAt = claims.ExpiresAt
 	if acc.ExpiresAt.IsZero() && aj.LastRefresh != nil {
 		acc.ExpiresAt = aj.LastRefresh.Add(20 * time.Hour)
@@ -74,6 +102,9 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 
 func (p *CodexProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 	req.Header.Set("Authorization", "Bearer "+acc.AccessToken)
+	if isManagedCodexAPIKeyAccount(acc) {
+		return
+	}
 	// ChatGPT Account ID needed for some endpoints
 	chatgptAccID := acc.AccountID
 	if chatgptAccID == "" {
@@ -326,6 +357,13 @@ func (p *CodexProvider) UpstreamURL(path string) *url.URL {
 	return p.responsesBase
 }
 
+func (p *CodexProvider) UpstreamURLForAccount(path string, acc *Account) *url.URL {
+	if isManagedCodexAPIKeyAccount(acc) && p.apiBase != nil {
+		return p.apiBase
+	}
+	return p.UpstreamURL(path)
+}
+
 func (p *CodexProvider) MatchesPath(path string) bool {
 	return strings.HasPrefix(path, "/v1/") ||
 		strings.HasPrefix(path, "/responses") ||
@@ -349,6 +387,27 @@ func (p *CodexProvider) NormalizePath(path string) string {
 		return trimmed
 	}
 	return path
+}
+
+func (p *CodexProvider) NormalizePathForAccount(path string, acc *Account) string {
+	if !isManagedCodexAPIKeyAccount(acc) {
+		return p.NormalizePath(path)
+	}
+	switch {
+	case strings.HasPrefix(path, "/responses"):
+		return "/v1" + path
+	case strings.HasPrefix(path, "/v1/"):
+		return path
+	default:
+		return path
+	}
+}
+
+func (p *CodexProvider) SupportsAccountPath(path string, acc *Account) bool {
+	if !isManagedCodexAPIKeyAccount(acc) {
+		return true
+	}
+	return strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/responses")
 }
 
 func (p *CodexProvider) DetectsSSE(path string, contentType string) bool {
@@ -409,6 +468,27 @@ func parseCodexClaims(idToken string) codexJWTClaims {
 		out.PlanType = "pro"
 	}
 	return out
+}
+
+func providerUpstreamURLForAccount(provider Provider, path string, acc *Account) *url.URL {
+	if codexProvider, ok := provider.(*CodexProvider); ok {
+		return codexProvider.UpstreamURLForAccount(path, acc)
+	}
+	return provider.UpstreamURL(path)
+}
+
+func providerNormalizePathForAccount(provider Provider, path string, acc *Account) string {
+	if codexProvider, ok := provider.(*CodexProvider); ok {
+		return codexProvider.NormalizePathForAccount(path, acc)
+	}
+	return provider.NormalizePath(path)
+}
+
+func providerSupportsPathForAccount(provider Provider, path string, acc *Account) bool {
+	if codexProvider, ok := provider.(*CodexProvider); ok {
+		return codexProvider.SupportsAccountPath(path, acc)
+	}
+	return true
 }
 
 type codexJWTClaims struct {

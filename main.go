@@ -30,6 +30,7 @@ type config struct {
 	responsesBase *url.URL
 	whamBase      *url.URL
 	refreshBase   *url.URL
+	openAIAPIBase *url.URL
 	geminiBase    *url.URL // Gemini CloudCode endpoint (for OAuth/Code Assist mode)
 	geminiAPIBase *url.URL // Gemini API endpoint (for API key mode)
 	claudeBase    *url.URL // Claude API endpoint
@@ -99,6 +100,7 @@ func buildConfig() config {
 	cfg.responsesBase = mustParse(getenv("UPSTREAM_RESPONSES_BASE", "https://chatgpt.com/backend-api/codex"))
 	cfg.whamBase = mustParse(getenv("UPSTREAM_WHAM_BASE", "https://chatgpt.com/backend-api"))
 	cfg.refreshBase = mustParse(getenv("UPSTREAM_REFRESH_BASE", "https://auth.openai.com"))
+	cfg.openAIAPIBase = mustParse(getenv("UPSTREAM_OPENAI_API_BASE", "https://api.openai.com"))
 	cfg.geminiBase = mustParse(getenv("UPSTREAM_GEMINI_BASE", "https://cloudcode-pa.googleapis.com"))
 	cfg.geminiAPIBase = mustParse(getenv("UPSTREAM_GEMINI_API_BASE", "https://generativelanguage.googleapis.com"))
 	cfg.claudeBase = mustParse(getenv("UPSTREAM_CLAUDE_BASE", "https://api.anthropic.com"))
@@ -180,7 +182,7 @@ func main() {
 	cfg := buildConfig()
 
 	// Create provider registry
-	codexProvider := NewCodexProvider(cfg.responsesBase, cfg.whamBase, cfg.refreshBase)
+	codexProvider := NewCodexProvider(cfg.responsesBase, cfg.whamBase, cfg.refreshBase, cfg.openAIAPIBase)
 	claudeProvider := NewClaudeProvider(cfg.claudeBase)
 	geminiProvider := NewGeminiProvider(cfg.geminiBase, cfg.geminiAPIBase)
 	kimiProvider := NewKimiProvider(cfg.kimiBase)
@@ -935,11 +937,23 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		}
 		lastStatus = resp.StatusCode
 
-		if resp.StatusCode == http.StatusTooManyRequests {
+		if resp.StatusCode == http.StatusTooManyRequests && !isManagedCodexAPIKeyAccount(acc) {
 			h.applyRateLimit(acc, resp.Header, defaultRateLimitBackoff)
 			acc.mu.Lock()
 			acc.Penalty += 1.0
 			acc.mu.Unlock()
+		}
+
+		if isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired) {
+			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			resp.Body.Close()
+			errBody = bodyForInspection(nil, errBody)
+			lastErr = h.handleManagedCodexAPIKeyFailure(reqID, acc, resp, errBody)
+			if lastErr == nil {
+				lastErr = fmt.Errorf("managed api fallback %s", resp.Status)
+			}
+			h.recent.add(lastErr.Error())
+			continue
 		}
 
 		// Handle 402 Payment Required - often means deactivated workspace/subscription
@@ -970,6 +984,18 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			resp.Body.Close()
 			errBody = bodyForInspection(nil, errBody)
 			errBodyStr := string(errBody)
+
+			if isManagedCodexAPIKeyAccount(acc) {
+				lastErr = h.handleManagedCodexAPIKeyFailure(reqID, acc, resp, errBody)
+				if lastErr == nil {
+					lastErr = fmt.Errorf("managed api fallback %s", resp.Status)
+				}
+				h.recent.add(lastErr.Error())
+				if h.cfg.debug {
+					log.Printf("[%s] attempt %d/%d account=%s retryable status=%d refreshFailed=%v", reqID, attempt, attempts, acc.ID, resp.StatusCode, refreshFailed)
+				}
+				continue
+			}
 
 			// Mark account health and try another one.
 			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
@@ -1048,6 +1074,8 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			fw = &flushWriter{w: w, f: flusher, flushInterval: h.cfg.flushInterval}
 			writer = fw
 		}
+		managedStreamFailed := false
+		var managedStreamFailureOnce sync.Once
 
 		// For SSE streams, intercept usage events inline as they flow through
 		if isSSE {
@@ -1056,6 +1084,23 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			var claudeAccum *RequestUsage
 			writer = &sseInterceptWriter{
 				w: writer,
+				eventCallback: func(data []byte) {
+					if !isManagedCodexAPIKeyAccount(acc) {
+						return
+					}
+					disposition, ok := classifyManagedOpenAIAPISSEError(data)
+					if !ok {
+						return
+					}
+					managedStreamFailureOnce.Do(func() {
+						managedStreamFailed = true
+						applyManagedOpenAIAPIDisposition(acc, disposition, nil, time.Now())
+						if err := saveAccount(acc); err != nil {
+							log.Printf("[%s] warning: failed to save managed api key %s stream failure: %v", reqID, acc.ID, err)
+						}
+						log.Printf("[%s] managed api key %s stream failure: dead=%v rate_limited=%v reason=%s", reqID, acc.ID, disposition.MarkDead, disposition.RateLimit, disposition.Reason)
+					})
+				},
 				callback: func(data []byte) {
 					// Parse the JSON event data - try object first, then array
 					var obj map[string]any
@@ -1152,7 +1197,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			h.updateUsageFromBody(acc, respSample)
 		}
 
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 && !managedStreamFailed {
 			// Success: pin conversation if possible (if request didn't include it, try to learn from response).
 			if conversationID == "" && len(respSample) > 0 {
 				conversationID = extractConversationIDFromSSE(respSample)
@@ -1161,6 +1206,14 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 				h.pool.pin(conversationID, acc.ID)
 			}
 			acc.mu.Lock()
+			if isManagedCodexAPIKeyAccount(acc) {
+				acc.Dead = false
+				acc.HealthStatus = "healthy"
+				acc.HealthError = ""
+				acc.HealthCheckedAt = time.Now()
+				acc.LastHealthyAt = acc.HealthCheckedAt
+				acc.RateLimitUntil = time.Time{}
+			}
 			acc.LastUsed = time.Now()
 			// Successful request - decay penalty faster (proves account works)
 			if acc.Penalty > 0 {
@@ -1234,6 +1287,16 @@ func (h *proxyHandler) proxyRequestWebSocket(
 		}
 	}
 
+	if !providerSupportsPathForAccount(provider, r.URL.Path, acc) {
+		http.Error(w, fmt.Sprintf("account %s does not support path %s", acc.ID, r.URL.Path), http.StatusServiceUnavailable)
+		return
+	}
+	if err := h.maybeProbeManagedCodexAPIKey(r.Context(), acc); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	targetBase = providerUpstreamURLForAccount(provider, r.URL.Path, acc)
+
 	acc.mu.Lock()
 	access := acc.AccessToken
 	acc.mu.Unlock()
@@ -1247,7 +1310,7 @@ func (h *proxyHandler) proxyRequestWebSocket(
 	*outURL = *r.URL
 	outURL.Scheme = targetBase.Scheme
 	outURL.Host = targetBase.Host
-	outURL.Path = singleJoin(targetBase.Path, provider.NormalizePath(r.URL.Path))
+	outURL.Path = singleJoin(targetBase.Path, providerNormalizePathForAccount(provider, r.URL.Path, acc))
 
 	// For Claude OAuth tokens, add beta=true query param (required for OAuth to work)
 	if provider.Type() == AccountTypeClaude && strings.HasPrefix(access, "sk-ant-oat") {
@@ -1286,14 +1349,23 @@ func (h *proxyHandler) proxyRequestWebSocket(
 			statusCode = resp.StatusCode
 			provider.ParseUsageHeaders(acc, resp.Header)
 
-			if resp.StatusCode == http.StatusTooManyRequests {
+			if resp.StatusCode == http.StatusTooManyRequests && !isManagedCodexAPIKeyAccount(acc) {
 				h.applyRateLimit(acc, resp.Header, defaultRateLimitBackoff)
 				acc.mu.Lock()
 				acc.Penalty += 1.0
 				acc.mu.Unlock()
 			}
 
-			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			if isManagedCodexAPIKeyAccount(acc) && resp.StatusCode != http.StatusSwitchingProtocols {
+				if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || (resp.StatusCode >= 500 && resp.StatusCode <= 599) {
+					errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+					decompressed := bodyForInspection(nil, errBody)
+					if err := h.handleManagedCodexAPIKeyFailure(reqID, acc, resp, decompressed); err != nil {
+						h.recent.add(err.Error())
+					}
+					resp.Body = io.NopCloser(bytes.NewReader(errBody))
+				}
+			} else if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 				acc.mu.Lock()
 				permanentCodexFailure := acc.Type == AccountTypeCodex && isPermanentCodexAuthFailure(resp, nil)
 				markDead := refreshFailed && acc.Type != AccountTypeCodex
@@ -1323,6 +1395,14 @@ func (h *proxyHandler) proxyRequestWebSocket(
 					h.pool.pin(conversationID, acc.ID)
 				}
 				acc.mu.Lock()
+				if isManagedCodexAPIKeyAccount(acc) {
+					acc.Dead = false
+					acc.HealthStatus = "healthy"
+					acc.HealthError = ""
+					acc.HealthCheckedAt = time.Now()
+					acc.LastHealthyAt = acc.HealthCheckedAt
+					acc.RateLimitUntil = time.Time{}
+				}
 				acc.LastUsed = time.Now()
 				if acc.Penalty > 0 {
 					acc.Penalty *= 0.5
@@ -1370,13 +1450,14 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 	providerType AccountType,
 	provider Provider,
 	targetBase *url.URL,
+	accountHint *Account,
 	start time.Time,
 ) {
 	outURL := new(url.URL)
 	*outURL = *r.URL
 	outURL.Scheme = targetBase.Scheme
 	outURL.Host = targetBase.Host
-	outURL.Path = singleJoin(targetBase.Path, provider.NormalizePath(r.URL.Path))
+	outURL.Path = singleJoin(targetBase.Path, providerNormalizePathForAccount(provider, r.URL.Path, accountHint))
 
 	// For Claude OAuth passthrough tokens, add beta=true query param.
 	if providerType == AccountTypeClaude {
@@ -1487,11 +1568,21 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	if !providerSupportsPathForAccount(provider, r.URL.Path, acc) {
+		http.Error(w, fmt.Sprintf("account %s does not support path %s", acc.ID, r.URL.Path), http.StatusServiceUnavailable)
+		return
+	}
+	if err := h.maybeProbeManagedCodexAPIKey(ctx, acc); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	targetBase = providerUpstreamURLForAccount(provider, r.URL.Path, acc)
+
 	outURL := new(url.URL)
 	*outURL = *r.URL
 	outURL.Scheme = targetBase.Scheme
 	outURL.Host = targetBase.Host
-	outURL.Path = singleJoin(targetBase.Path, provider.NormalizePath(r.URL.Path))
+	outURL.Path = singleJoin(targetBase.Path, providerNormalizePathForAccount(provider, r.URL.Path, acc))
 
 	acc.mu.Lock()
 	access := acc.AccessToken
@@ -1530,6 +1621,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 
 	// Always overwrite client-provided auth; the proxy is the single source of truth.
 	outReq.Header.Del("Authorization")
+	outReq.Header.Del("ChatGPT-Account-ID")
 	outReq.Header.Del("X-Api-Key")
 	outReq.Header.Del("x-goog-api-key")
 
@@ -1574,13 +1666,20 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		log.Printf("[%s] request body sample (%d bytes): %s", reqID, reqSample.Len(), safeText(reqSample.Bytes()))
 	}
 
-	if resp.StatusCode == http.StatusTooManyRequests {
+	if resp.StatusCode == http.StatusTooManyRequests && !isManagedCodexAPIKeyAccount(acc) {
 		h.applyRateLimit(acc, resp.Header, defaultRateLimitBackoff)
 		acc.mu.Lock()
 		acc.Penalty += 1.0
 		acc.mu.Unlock()
 	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+	if isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		decompressed := bodyForInspection(nil, errBody)
+		if err := h.handleManagedCodexAPIKeyFailure(reqID, acc, resp, decompressed); err != nil {
+			h.recent.add(err.Error())
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(errBody))
+	} else if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		// Log the error body for debugging
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 		decompressed := bodyForInspection(nil, errBody) // nil request - will auto-detect gzip
@@ -1637,6 +1736,8 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		fw = &flushWriter{w: w, f: flusher, flushInterval: h.cfg.flushInterval}
 		writer = fw
 	}
+	managedStreamFailed := false
+	var managedStreamFailureOnce sync.Once
 
 	// Tee a bounded sample for usage extraction and conversation pinning.
 	sampleLimit := int64(16 * 1024)
@@ -1658,6 +1759,23 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		var claudeAccum *RequestUsage
 		writer = &sseInterceptWriter{
 			w: writer,
+			eventCallback: func(data []byte) {
+				if !isManagedCodexAPIKeyAccount(acc) {
+					return
+				}
+				disposition, ok := classifyManagedOpenAIAPISSEError(data)
+				if !ok {
+					return
+				}
+				managedStreamFailureOnce.Do(func() {
+					managedStreamFailed = true
+					applyManagedOpenAIAPIDisposition(acc, disposition, nil, time.Now())
+					if err := saveAccount(acc); err != nil {
+						log.Printf("[%s] warning: failed to save managed api key %s stream failure: %v", reqID, acc.ID, err)
+					}
+					log.Printf("[%s] managed api key %s stream failure: dead=%v rate_limited=%v reason=%s", reqID, acc.ID, disposition.MarkDead, disposition.RateLimit, disposition.Reason)
+				})
+			},
 			callback: func(data []byte) {
 				var obj map[string]any
 				if err := json.Unmarshal(data, &obj); err != nil {
@@ -1740,7 +1858,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		h.updateUsageFromBody(acc, respSample)
 	}
 
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 && !managedStreamFailed {
 		conversationID := ""
 		if len(respSample) > 0 {
 			conversationID = extractConversationIDFromSSE(respSample)
@@ -1749,6 +1867,14 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 			h.pool.pin(conversationID, acc.ID)
 		}
 		acc.mu.Lock()
+		if isManagedCodexAPIKeyAccount(acc) {
+			acc.Dead = false
+			acc.HealthStatus = "healthy"
+			acc.HealthError = ""
+			acc.HealthCheckedAt = time.Now()
+			acc.LastHealthyAt = acc.HealthCheckedAt
+			acc.RateLimitUntil = time.Time{}
+		}
 		acc.LastUsed = time.Now()
 		if acc.Penalty > 0 {
 			acc.Penalty *= 0.5
@@ -1915,9 +2041,18 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	targetBase := provider.UpstreamURL(r.URL.Path)
+	var accountHint *Account
+	if providerType == AccountTypeCodex {
+		accountHint = &Account{Type: AccountTypeCodex, AuthMode: accountAuthModeAPIKey, PlanType: "api"}
+		if !providerSupportsPathForAccount(provider, r.URL.Path, accountHint) {
+			http.Error(w, "openai api passthrough does not support this path", http.StatusBadRequest)
+			return
+		}
+	}
+
+	targetBase := providerUpstreamURLForAccount(provider, r.URL.Path, accountHint)
 	if isWebSocketUpgradeRequest(r) {
-		h.proxyPassthroughWebSocket(w, r, reqID, providerType, provider, targetBase, start)
+		h.proxyPassthroughWebSocket(w, r, reqID, providerType, provider, targetBase, accountHint, start)
 		return
 	}
 	streamBody := shouldStreamBody(r, h.cfg.maxInMemoryBodyBytes)
@@ -1926,7 +2061,7 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 			log.Printf("[%s] passthrough streaming body: method=%s path=%s provider=%s content-length=%d",
 				reqID, r.Method, r.URL.Path, providerType, r.ContentLength)
 		}
-		h.proxyPassthroughStreamed(w, r, reqID, providerType, provider, targetBase, start)
+		h.proxyPassthroughStreamed(w, r, reqID, providerType, provider, targetBase, accountHint, start)
 		return
 	}
 
@@ -1971,7 +2106,7 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 	*outURL = *r.URL
 	outURL.Scheme = targetBase.Scheme
 	outURL.Host = targetBase.Host
-	outURL.Path = singleJoin(targetBase.Path, provider.NormalizePath(r.URL.Path))
+	outURL.Path = singleJoin(targetBase.Path, providerNormalizePathForAccount(provider, r.URL.Path, accountHint))
 
 	var body io.Reader
 	if len(bodyBytes) > 0 {
@@ -2062,7 +2197,7 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 	}
 }
 
-func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.Request, reqID string, providerType AccountType, provider Provider, targetBase *url.URL, start time.Time) {
+func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.Request, reqID string, providerType AccountType, provider Provider, targetBase *url.URL, accountHint *Account, start time.Time) {
 	timeout := clientOrDefaultTimeout(r, h.cfg.requestTimeout, h.cfg.streamTimeout, nil)
 
 	ctx := r.Context()
@@ -2079,7 +2214,7 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 	*outURL = *r.URL
 	outURL.Scheme = targetBase.Scheme
 	outURL.Host = targetBase.Host
-	outURL.Path = singleJoin(targetBase.Path, provider.NormalizePath(r.URL.Path))
+	outURL.Path = singleJoin(targetBase.Path, providerNormalizePathForAccount(provider, r.URL.Path, accountHint))
 
 	var reqSample *bytes.Buffer
 	var body io.Reader = r.Body
@@ -2189,12 +2324,21 @@ func (h *proxyHandler) tryOnce(
 		}
 	}
 
+	if !providerSupportsPathForAccount(provider, in.URL.Path, acc) {
+		return nil, nil, false, fmt.Errorf("account %s does not support path %s", acc.ID, in.URL.Path)
+	}
+	if err := h.maybeProbeManagedCodexAPIKey(ctx, acc); err != nil {
+		return nil, nil, false, err
+	}
+
+	targetBase = providerUpstreamURLForAccount(provider, in.URL.Path, acc)
+
 	outURL := new(url.URL)
 	*outURL = *in.URL
 	outURL.Scheme = targetBase.Scheme
 	outURL.Host = targetBase.Host
 	// Use provider's NormalizePath method for path handling
-	outURL.Path = singleJoin(targetBase.Path, provider.NormalizePath(in.URL.Path))
+	outURL.Path = singleJoin(targetBase.Path, providerNormalizePathForAccount(provider, in.URL.Path, acc))
 
 	// For Claude OAuth tokens, add beta=true query param (required for OAuth to work)
 	if provider.Type() == AccountTypeClaude && strings.HasPrefix(acc.AccessToken, "sk-ant-oat") {

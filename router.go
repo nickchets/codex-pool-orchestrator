@@ -179,6 +179,26 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.handleOperatorCodexAdd(w, r)
 		return
+	case "/operator/codex/api-key-add":
+		if !h.checkLocalOperatorAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleOperatorCodexAPIKeyAdd(w, r)
+		return
+	case "/operator/account-delete":
+		if !h.checkLocalOperatorAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleOperatorAccountDelete(w, r)
+		return
 	case "/favicon.ico":
 		http.NotFound(w, r)
 		return

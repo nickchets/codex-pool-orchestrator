@@ -124,9 +124,10 @@ func (fw *flushWriter) stop() {}
 // sseInterceptWriter wraps a writer and scans the SSE stream for token_count events.
 // It passes all data through to the underlying writer while extracting token data inline.
 type sseInterceptWriter struct {
-	w        io.Writer
-	buf      []byte
-	callback func(eventData []byte)
+	w             io.Writer
+	buf           []byte
+	callback      func(eventData []byte)
+	eventCallback func(eventData []byte)
 }
 
 func (sw *sseInterceptWriter) Write(p []byte) (int, error) {
@@ -176,17 +177,6 @@ func (sw *sseInterceptWriter) scanForEvents() {
 }
 
 func (sw *sseInterceptWriter) processEvent(event []byte) {
-	// Look for usage in the response
-	// OpenAI/Codex format: "usage":{"input_tokens":N,...}
-	// Claude format: "type":"message_start" or "type":"message_delta" with usage
-	// Gemini format: "usageMetadata":{"promptTokenCount":N,...}
-	hasCodexUsage := bytes.Contains(event, []byte(`"usage":{"`)) && bytes.Contains(event, []byte(`"input_tokens":`))
-	hasClaudeUsage := (bytes.Contains(event, []byte(`"type":"message_start"`)) || bytes.Contains(event, []byte(`"type":"message_delta"`))) && bytes.Contains(event, []byte(`"usage":`))
-	hasGeminiUsage := bytes.Contains(event, []byte(`"usageMetadata":{"`)) && bytes.Contains(event, []byte(`"promptTokenCount":`))
-	if !hasCodexUsage && !hasClaudeUsage && !hasGeminiUsage {
-		return
-	}
-
 	// Find the data: prefix and extract JSON from there
 	dataIdx := bytes.Index(event, []byte("data: "))
 	if dataIdx < 0 {
@@ -213,6 +203,20 @@ func (sw *sseInterceptWriter) processEvent(event []byte) {
 		}
 	}
 	data = bytes.TrimSpace(data)
+	if len(data) > 0 && sw.eventCallback != nil {
+		sw.eventCallback(data)
+	}
+
+	// Look for usage in the response
+	// OpenAI/Codex format: "usage":{"input_tokens":N,...}
+	// Claude format: "type":"message_start" or "type":"message_delta" with usage
+	// Gemini format: "usageMetadata":{"promptTokenCount":N,...}
+	hasCodexUsage := bytes.Contains(event, []byte(`"usage":{"`)) && bytes.Contains(event, []byte(`"input_tokens":`))
+	hasClaudeUsage := (bytes.Contains(event, []byte(`"type":"message_start"`)) || bytes.Contains(event, []byte(`"type":"message_delta"`))) && bytes.Contains(event, []byte(`"usage":`))
+	hasGeminiUsage := bytes.Contains(event, []byte(`"usageMetadata":{"`)) && bytes.Contains(event, []byte(`"promptTokenCount":`))
+	if !hasCodexUsage && !hasClaudeUsage && !hasGeminiUsage {
+		return
+	}
 
 	if len(data) > 0 && sw.callback != nil {
 		sw.callback(data)

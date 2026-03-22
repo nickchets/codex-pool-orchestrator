@@ -16,11 +16,13 @@ type StatusData struct {
 	Uptime               time.Duration                 `json:"uptime"`
 	TotalCount           int                           `json:"total_count"`
 	CodexCount           int                           `json:"codex_count"`
+	CodexSeatCount       int                           `json:"codex_seat_count,omitempty"`
 	GeminiCount          int                           `json:"gemini_count"`
 	ClaudeCount          int                           `json:"claude_count"`
 	KimiCount            int                           `json:"kimi_count"`
 	MinimaxCount         int                           `json:"minimax_count"`
 	PoolUsers            int                           `json:"pool_users,omitempty"`
+	OpenAIAPIPool        OpenAIAPIPoolStatus           `json:"openai_api_pool"`
 	PoolSummary          PoolDashboardSummary          `json:"pool_summary"`
 	CurrentSeat          *CurrentSeatStatus            `json:"current_seat,omitempty"`
 	ActiveSeat           *CurrentSeatStatus            `json:"active_seat,omitempty"`
@@ -46,6 +48,14 @@ type PoolDashboardProviderSum struct {
 	EligibleAccounts         int     `json:"eligible_accounts"`
 	TimeWeightedPrimaryPct   float64 `json:"time_weighted_primary_pct"`
 	TimeWeightedSecondaryPct float64 `json:"time_weighted_secondary_pct"`
+}
+
+type OpenAIAPIPoolStatus struct {
+	TotalKeys    int    `json:"total_keys"`
+	HealthyKeys  int    `json:"healthy_keys"`
+	EligibleKeys int    `json:"eligible_keys"`
+	DeadKeys     int    `json:"dead_keys"`
+	NextKeyID    string `json:"next_key_id,omitempty"`
 }
 
 type PoolDashboardWorkspaceGroup struct {
@@ -103,12 +113,14 @@ type AccountStatus struct {
 	ID                 string               `json:"id"`
 	Type               string               `json:"type"`
 	PlanType           string               `json:"plan_type,omitempty"`
+	AuthMode           string               `json:"auth_mode,omitempty"`
 	AccountID          string               `json:"account_id,omitempty"`
 	Email              string               `json:"email,omitempty"`
 	Subject            string               `json:"subject,omitempty"`
 	ChatGPTUserID      string               `json:"chatgpt_user_id,omitempty"`
 	WorkspaceID        string               `json:"workspace_id,omitempty"`
 	SeatKey            string               `json:"seat_key,omitempty"`
+	FallbackOnly       bool                 `json:"fallback_only,omitempty"`
 	Disabled           bool                 `json:"disabled"`
 	Dead               bool                 `json:"dead"`
 	PrimaryUsed        float64              `json:"primary_used_pct"`
@@ -122,6 +134,10 @@ type AccountStatus struct {
 	LastRefreshAt      string               `json:"last_refresh_at,omitempty"`
 	AuthExpiresAt      string               `json:"auth_expires_at,omitempty"`
 	AuthExpiresIn      string               `json:"auth_expires_in,omitempty"`
+	HealthStatus       string               `json:"health_status,omitempty"`
+	HealthError        string               `json:"health_error,omitempty"`
+	HealthCheckedAt    string               `json:"health_checked_at,omitempty"`
+	LastHealthyAt      string               `json:"last_healthy_at,omitempty"`
 	LocalLastUsed      string               `json:"local_last_used,omitempty"`
 	UsageObserved      string               `json:"usage_observed,omitempty"`
 	Score              float64              `json:"score"`
@@ -327,6 +343,9 @@ func seatKeyFor(claims codexJWTClaims, workspaceID, fallback string) string {
 }
 
 func poolIdentityForAccount(a *Account) (codexJWTClaims, string, string) {
+	if isManagedCodexAPIKeyAccount(a) {
+		return codexJWTClaims{}, "", firstNonEmpty(a.ID, "openai_api")
+	}
 	claims := parseCodexClaims(a.IDToken)
 	workspaceID := firstNonEmpty(a.AccountID, a.IDTokenChatGPTAccountID, claims.ChatGPTAccountID)
 	seatKey := seatKeyFor(claims, workspaceID, a.ID)
@@ -349,6 +368,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 	earliestRecovery := time.Time{}
 	var activeSeat *currentSeatCandidate
 	var lastUsedSeat *currentSeatCandidate
+	var nextOpenAIAPIKey *currentSeatCandidate
 	activeSeatCount := 0
 
 	h.pool.mu.RLock()
@@ -359,6 +379,11 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		switch a.Type {
 		case AccountTypeCodex:
 			data.CodexCount++
+			if isManagedCodexAPIKeyAccount(a) {
+				data.OpenAIAPIPool.TotalKeys++
+			} else {
+				data.CodexSeatCount++
+			}
 		case AccountTypeGemini:
 			data.GeminiCount++
 		case AccountTypeClaude:
@@ -375,18 +400,21 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		secondaryUsed := routing.SecondaryUsed
 		effectivePrimary := primaryUsed
 		effectiveSecondary := secondaryUsed
+		authMode := accountAuthMode(a)
 		claims, workspaceID, seatKey := poolIdentityForAccount(a)
 
 		status := AccountStatus{
 			ID:                 a.ID,
 			Type:               string(a.Type),
 			PlanType:           a.PlanType,
+			AuthMode:           authMode,
 			AccountID:          firstNonEmpty(a.AccountID, a.IDTokenChatGPTAccountID),
 			Email:              claims.Email,
 			Subject:            claims.Subject,
 			ChatGPTUserID:      claims.ChatGPTUserID,
 			WorkspaceID:        workspaceID,
 			SeatKey:            seatKey,
+			FallbackOnly:       isManagedCodexAPIKeyAccount(a),
 			Disabled:           a.Disabled,
 			Dead:               a.Dead,
 			PrimaryUsed:        primaryUsed * 100,
@@ -414,6 +442,14 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		if !a.LastRefresh.IsZero() {
 			status.LastRefreshAt = a.LastRefresh.UTC().Format(time.RFC3339)
 		}
+		if !a.HealthCheckedAt.IsZero() {
+			status.HealthCheckedAt = a.HealthCheckedAt.UTC().Format(time.RFC3339)
+		}
+		if !a.LastHealthyAt.IsZero() {
+			status.LastHealthyAt = a.LastHealthyAt.UTC().Format(time.RFC3339)
+		}
+		status.HealthStatus = strings.TrimSpace(a.HealthStatus)
+		status.HealthError = sanitizeStatusMessage(a.HealthError)
 		authExpiresAt := a.ExpiresAt
 		if authExpiresAt.IsZero() && !claims.ExpiresAt.IsZero() {
 			authExpiresAt = claims.ExpiresAt
@@ -445,30 +481,32 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		}
 		providerSummary[providerKey] = prov
 
-		groupKey := workspaceKeyFor(status.Type, workspaceID)
-		group := workspaceGroups[groupKey]
-		if group == nil {
-			group = &poolWorkspaceAccumulator{
-				WorkspaceID: workspaceID,
-				Provider:    status.Type,
-				SeatKeys:    make(map[string]struct{}),
-				AccountIDs:  make(map[string]struct{}),
-				Emails:      make(map[string]struct{}),
+		if !status.FallbackOnly {
+			groupKey := workspaceKeyFor(status.Type, workspaceID)
+			group := workspaceGroups[groupKey]
+			if group == nil {
+				group = &poolWorkspaceAccumulator{
+					WorkspaceID: workspaceID,
+					Provider:    status.Type,
+					SeatKeys:    make(map[string]struct{}),
+					AccountIDs:  make(map[string]struct{}),
+					Emails:      make(map[string]struct{}),
+				}
+				workspaceGroups[groupKey] = group
 			}
-			workspaceGroups[groupKey] = group
-		}
-		group.SeatCount++
-		group.SeatKeys[seatKey] = struct{}{}
-		group.AccountIDs[status.ID] = struct{}{}
-		if status.Email != "" {
-			group.Emails[status.Email] = struct{}{}
-		}
-		if routing.Eligible {
-			group.EligibleCount++
-		} else {
-			group.BlockedCount++
-			if routing.RecoveryAt.After(now) && (group.NextRecoveryAt.IsZero() || routing.RecoveryAt.Before(group.NextRecoveryAt)) {
-				group.NextRecoveryAt = routing.RecoveryAt
+			group.SeatCount++
+			group.SeatKeys[seatKey] = struct{}{}
+			group.AccountIDs[status.ID] = struct{}{}
+			if status.Email != "" {
+				group.Emails[status.Email] = struct{}{}
+			}
+			if routing.Eligible {
+				group.EligibleCount++
+			} else {
+				group.BlockedCount++
+				if routing.RecoveryAt.After(now) && (group.NextRecoveryAt.IsZero() || routing.RecoveryAt.Before(group.NextRecoveryAt)) {
+					group.NextRecoveryAt = routing.RecoveryAt
+				}
 			}
 		}
 
@@ -488,6 +526,21 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		if prefersLastUsedSeat(candidate, lastUsedSeat) {
 			candidateCopy := candidate
 			lastUsedSeat = &candidateCopy
+		}
+		if status.FallbackOnly {
+			if status.Dead {
+				data.OpenAIAPIPool.DeadKeys++
+			}
+			if status.HealthStatus == "healthy" && !status.Dead && !status.Disabled {
+				data.OpenAIAPIPool.HealthyKeys++
+			}
+			if routing.Eligible {
+				data.OpenAIAPIPool.EligibleKeys++
+				if nextOpenAIAPIKey == nil || prefersBestEligibleSeat(candidate, nextOpenAIAPIKey) {
+					candidateCopy := candidate
+					nextOpenAIAPIKey = &candidateCopy
+				}
+			}
 		}
 
 		a.mu.Unlock()
@@ -517,7 +570,11 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 	if sameSeatStatus(data.ActiveSeat, data.LastUsedSeat) {
 		data.LastUsedSeat = nil
 	}
-	if nextAccount := h.pool.peekCandidateAt(now, "", ""); nextAccount != nil {
+	nextAccount := h.pool.peekCandidateAt(now, AccountTypeCodex, "")
+	if nextAccount == nil {
+		nextAccount = h.pool.peekCandidateAt(now, "", "")
+	}
+	if nextAccount != nil {
 		if nextCandidate, ok := candidateByID[nextAccount.ID]; ok {
 			nextBasis := "If a new unpinned request starts now, the pool will choose this seat."
 			if data.ActiveSeat != nil && sameSeatStatus(data.ActiveSeat, currentSeatStatusFromCandidate(&nextCandidate, nextBasis, activeSeatCount)) {
@@ -530,6 +587,9 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		data.BestEligibleSeat = nil
 	}
 	data.CurrentSeat = firstSeatStatus(data.ActiveSeat, data.BestEligibleSeat, data.LastUsedSeat)
+	if nextOpenAIAPIKey != nil {
+		data.OpenAIAPIPool.NextKeyID = nextOpenAIAPIKey.status.ID
+	}
 
 	for _, account := range data.Accounts {
 		if account.Routing.Eligible {
@@ -630,8 +690,17 @@ func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
 		"pct": func(v float64) string {
 			return fmt.Sprintf("%.0f%%", v)
 		},
+		"clip": func(v string, max int) string {
+			return clipMiddle(v, max)
+		},
+		"clipOpaque": func(v string) string {
+			return clipOpaque(v)
+		},
 		"join": func(items []string, sep string) string {
 			return strings.Join(items, sep)
+		},
+		"sanitize": func(v string) string {
+			return sanitizeStatusMessage(v)
 		},
 		"score": func(v float64) string {
 			return fmt.Sprintf("%.2f", v)
@@ -811,11 +880,46 @@ const statusHTML = `<!DOCTYPE html>
             box-shadow: 0 10px 22px rgba(31, 111, 235, 0.18);
             border-color: #58a6ff;
         }
+        .danger-btn {
+            border-color: #f85149;
+            background: linear-gradient(180deg, rgba(248, 81, 73, 0.22), rgba(218, 54, 51, 0.14));
+            color: #ffe2e0;
+        }
+        .danger-btn:hover {
+            box-shadow: 0 10px 22px rgba(248, 81, 73, 0.16);
+            border-color: #ff7b72;
+        }
         .action-btn:disabled {
             cursor: wait;
             opacity: 0.7;
             transform: none;
             box-shadow: none;
+        }
+        .row-action-btn {
+            margin-top: 0;
+            padding: 6px 10px;
+            font-size: 12px;
+            white-space: nowrap;
+        }
+        .action-row {
+            display: flex;
+            gap: 10px;
+            margin-top: 14px;
+            flex-wrap: wrap;
+        }
+        .action-input {
+            flex: 1 1 260px;
+            min-width: 220px;
+            border: 1px solid #30363d;
+            background: #0d1117;
+            color: #c9d1d9;
+            border-radius: 6px;
+            padding: 10px 12px;
+        }
+        .action-input:focus {
+            outline: none;
+            border-color: #58a6ff;
+            box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.18);
         }
         .result-block {
             margin-top: 14px;
@@ -889,9 +993,16 @@ const statusHTML = `<!DOCTYPE html>
         .tag-gemini { background: #ea4335; color: #fff; }
         .tag-claude { background: #cc785c; color: #fff; }
         .tag-codex { background: #10a37f; color: #fff; }
+        .tag-api { background: #1f6feb; color: #fff; }
         .tag-disabled { background: #6e7681; color: #fff; }
         .tag-dead { background: #f85149; color: #fff; }
         .usage-cell { white-space: nowrap; }
+        .detail-line {
+            display: block;
+            max-width: 340px;
+            white-space: normal;
+            overflow-wrap: anywhere;
+        }
         .effective { color: #8b949e; font-size: 11px; }
         .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
         a { color: #58a6ff; text-decoration: none; }
@@ -909,7 +1020,7 @@ const statusHTML = `<!DOCTYPE html>
         <div class="operator-card">
             <div class="operator-title">Operator Action</div>
             <div class="muted">
-                Starts the same flow as the operator <code>codex-oauth-start</code> command, keeps the popup opener attached, and refreshes this page automatically when pool seat state changes.
+                Starts the same flow as <code>python3 /home/lap/tools/codex_pool_manager.py codex-oauth-start</code>, keeps the popup opener attached, and refreshes this page automatically when pool seat state changes.
             </div>
             <button id="codex-oauth-start-btn" class="action-btn" onclick="startCodexOAuthFromStatus()">Start Codex OAuth</button>
             <div id="codex-oauth-start-status" class="muted" style="margin-top: 10px;"></div>
@@ -919,6 +1030,23 @@ const statusHTML = `<!DOCTYPE html>
                 <div id="codex-oauth-start-outcome" class="muted" style="margin-top: 10px;"></div>
                 <a id="codex-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px;">Open OAuth Page</a>
             </div>
+        </div>
+        <div class="operator-card">
+            <div class="operator-title">Fallback API Pool</div>
+            <div class="muted">
+                These OpenAI API keys are used only when all Codex subscription seats are unavailable. Each added key is stored locally and probed with a minimal <code>/v1/responses</code> health check so quota/auth failures show up before the pool has to rely on it.
+            </div>
+            <div class="result-block">
+                <div><strong>Keys:</strong> {{.OpenAIAPIPool.TotalKeys}}</div>
+                <div><strong>Healthy:</strong> {{.OpenAIAPIPool.HealthyKeys}}</div>
+                <div><strong>Eligible now:</strong> {{.OpenAIAPIPool.EligibleKeys}}</div>
+                {{if .OpenAIAPIPool.NextKeyID}}<div><strong>Next fallback key:</strong> <span class="mono" title="{{.OpenAIAPIPool.NextKeyID}}">{{clip .OpenAIAPIPool.NextKeyID 24}}</span></div>{{end}}
+            </div>
+            <div class="action-row">
+                <input id="openai-api-key-input" class="action-input mono" type="password" autocomplete="off" spellcheck="false" placeholder="sk-proj-..." />
+                <button id="openai-api-key-add-btn" class="action-btn" onclick="addOpenAIApiKeyFromStatus()">Add API Key</button>
+            </div>
+            <div id="openai-api-key-add-status" class="muted" style="margin-top: 10px;"></div>
         </div>
         {{end}}
         <div class="operator-card seat-card">
@@ -930,8 +1058,8 @@ const statusHTML = `<!DOCTYPE html>
             <div class="result-block">
                 <div><strong>Routing:</strong> {{.RoutingStatus}}</div>
                 <div><strong>Headroom:</strong> {{printf "%.0f%%" .PrimaryHeadroomPct}} / {{printf "%.0f%%" .SecondaryHeadroomPct}}</div>
-                {{if .WorkspaceID}}<div><strong>Workspace:</strong> <span class="mono">{{.WorkspaceID}}</span></div>{{end}}
-                {{if .SeatKey}}<div><strong>Seat:</strong> <span class="mono">{{.SeatKey}}</span></div>{{end}}
+                {{if .WorkspaceID}}<div><strong>Workspace:</strong> <span class="mono" title="{{.WorkspaceID}}">{{clipOpaque .WorkspaceID}}</span></div>{{end}}
+                {{if .SeatKey}}<div><strong>Seat:</strong> <span class="mono" title="{{.SeatKey}}">{{clipOpaque .SeatKey}}</span></div>{{end}}
                 {{if gt .Inflight 0}}<div><strong>Inflight:</strong> {{.Inflight}}</div>{{end}}
                 <div><strong>Last used:</strong> {{.LocalLastUsed}}</div>
                 {{if gt .ActiveSeatCount 1}}<div><strong>Active seats now:</strong> {{.ActiveSeatCount}}</div>{{end}}
@@ -950,8 +1078,8 @@ const statusHTML = `<!DOCTYPE html>
             <div class="result-block">
                 <div><strong>Routing:</strong> {{.RoutingStatus}}</div>
                 <div><strong>Headroom:</strong> {{printf "%.0f%%" .PrimaryHeadroomPct}} / {{printf "%.0f%%" .SecondaryHeadroomPct}}</div>
-                {{if .WorkspaceID}}<div><strong>Workspace:</strong> <span class="mono">{{.WorkspaceID}}</span></div>{{end}}
-                {{if .SeatKey}}<div><strong>Seat:</strong> <span class="mono">{{.SeatKey}}</span></div>{{end}}
+                {{if .WorkspaceID}}<div><strong>Workspace:</strong> <span class="mono" title="{{.WorkspaceID}}">{{clipOpaque .WorkspaceID}}</span></div>{{end}}
+                {{if .SeatKey}}<div><strong>Seat:</strong> <span class="mono" title="{{.SeatKey}}">{{clipOpaque .SeatKey}}</span></div>{{end}}
                 <div><strong>Last used:</strong> {{.LocalLastUsed}}</div>
             </div>
         </div>
@@ -965,8 +1093,8 @@ const statusHTML = `<!DOCTYPE html>
             <div class="result-block">
                 <div><strong>Routing:</strong> {{.RoutingStatus}}</div>
                 <div><strong>Headroom:</strong> {{printf "%.0f%%" .PrimaryHeadroomPct}} / {{printf "%.0f%%" .SecondaryHeadroomPct}}</div>
-                {{if .WorkspaceID}}<div><strong>Workspace:</strong> <span class="mono">{{.WorkspaceID}}</span></div>{{end}}
-                {{if .SeatKey}}<div><strong>Seat:</strong> <span class="mono">{{.SeatKey}}</span></div>{{end}}
+                {{if .WorkspaceID}}<div><strong>Workspace:</strong> <span class="mono" title="{{.WorkspaceID}}">{{clipOpaque .WorkspaceID}}</span></div>{{end}}
+                {{if .SeatKey}}<div><strong>Seat:</strong> <span class="mono" title="{{.SeatKey}}">{{clipOpaque .SeatKey}}</span></div>{{end}}
                 <div><strong>Last used:</strong> {{.LocalLastUsed}}</div>
             </div>
         </div>
@@ -992,9 +1120,15 @@ const statusHTML = `<!DOCTYPE html>
             <div class="stat-label">Next Recovery</div>
         </div>
         <div class="stat">
-            <div class="stat-value">{{.CodexCount}}</div>
-            <div class="stat-label">Codex</div>
+            <div class="stat-value">{{if .CodexSeatCount}}{{.CodexSeatCount}}{{else}}{{.CodexCount}}{{end}}</div>
+            <div class="stat-label">Codex Seats</div>
         </div>
+        {{if or .LocalOperatorEnabled (gt .OpenAIAPIPool.TotalKeys 0)}}
+        <div class="stat">
+            <div class="stat-value">{{.OpenAIAPIPool.TotalKeys}}</div>
+            <div class="stat-label">OpenAI API Keys</div>
+        </div>
+        {{end}}
         <div class="stat">
             <div class="stat-value">{{.GeminiCount}}</div>
             <div class="stat-label">Gemini</div>
@@ -1082,6 +1216,9 @@ const statusHTML = `<!DOCTYPE html>
     {{end}}
 
     <h2 style="color: #58a6ff; margin-top: 20px; margin-bottom: 10px;">🪑 Seats</h2>
+    {{if .LocalOperatorEnabled}}
+    <div id="account-action-status" class="muted" style="margin: 0 0 12px;"></div>
+    {{end}}
     <div class="table-wrap">
     <table>
         <tr>
@@ -1098,11 +1235,12 @@ const statusHTML = `<!DOCTYPE html>
             <th>Auth TTL</th>
             <th>Local Last Used</th>
             <th>Local Tokens</th>
+            {{if .LocalOperatorEnabled}}<th>Action</th>{{end}}
         </tr>
         {{range .Accounts}}
         <tr>
             <td>
-                {{.ID}}
+                <span title="{{.ID}}">{{clip .ID 30}}</span>
                 {{if .Disabled}}<span class="tag tag-disabled">disabled</span>{{end}}
                 {{if .Dead}}<span class="tag tag-dead">dead</span>{{end}}
                 {{if .Email}}<br><small>{{.Email}}</small>{{end}}
@@ -1116,16 +1254,19 @@ const statusHTML = `<!DOCTYPE html>
                 {{if eq .PlanType "pro"}}<span class="tag tag-pro">pro</span>{{end}}
                 {{if eq .PlanType "plus"}}<span class="tag tag-plus">plus</span>{{end}}
                 {{if eq .PlanType "team"}}<span class="tag tag-team">team</span>{{end}}
+                {{if eq .PlanType "api"}}<span class="tag tag-api">api</span>{{end}}
                 {{if eq .PlanType "max"}}<span class="tag tag-claude">max</span>{{end}}
                 {{if eq .PlanType "gemini"}}<span class="tag tag-gemini">gemini</span>{{end}}
                 {{if eq .PlanType "claude"}}<span class="tag tag-claude">claude</span>{{end}}
             </td>
-            <td class="mono">{{if .WorkspaceID}}{{.WorkspaceID}}{{else}}unknown{{end}}</td>
-            <td class="mono">{{if .SeatKey}}{{.SeatKey}}{{else}}{{.ID}}{{end}}</td>
+            <td class="mono" title="{{if .WorkspaceID}}{{.WorkspaceID}}{{else}}unknown{{end}}">{{if .WorkspaceID}}{{clipOpaque .WorkspaceID}}{{else}}unknown{{end}}</td>
+            <td class="mono" title="{{if .SeatKey}}{{.SeatKey}}{{else}}{{.ID}}{{end}}">{{if .SeatKey}}{{clipOpaque .SeatKey}}{{else}}{{clip .ID 24}}{{end}}</td>
             <td>
                 {{if .Routing.Eligible}}<span class="status-ok">eligible</span>{{else}}<span class="status-warn">{{.Routing.BlockReason}}</span>{{end}}
-                <br><small>headroom {{printf "%.0f%%" .Routing.PrimaryHeadroomPct}} / {{printf "%.0f%%" .Routing.SecondaryHeadroomPct}}</small>
-                {{if .UsageObserved}}<br><small>usage {{.UsageObserved}}</small>{{end}}
+                {{if .FallbackOnly}}<br><small><span class="tag tag-api">fallback</span></small>{{end}}
+                <br><small class="detail-line">headroom {{printf "%.0f%%" .Routing.PrimaryHeadroomPct}} / {{printf "%.0f%%" .Routing.SecondaryHeadroomPct}}</small>
+                {{if .UsageObserved}}<br><small class="detail-line">usage {{.UsageObserved}}</small>{{end}}
+                {{if .FallbackOnly}}<br><small class="detail-line" title="{{sanitize .HealthError}}">health {{if .HealthStatus}}{{.HealthStatus}}{{else}}unknown{{end}}{{if .HealthError}} · {{clip (sanitize .HealthError) 88}}{{end}}</small>{{end}}
             </td>
             <td class="usage-cell">
                 {{remainingBar .Routing.PrimaryHeadroomPct}}<small>remaining {{pct .Routing.PrimaryHeadroomPct}}</small>
@@ -1143,9 +1284,21 @@ const statusHTML = `<!DOCTYPE html>
                 {{else if .Disabled}}<span class="status-warn">—</span>
                 {{else}}{{score .Score}}{{end}}
             </td>
-            <td>{{.AuthExpiresIn}}</td>
+            <td>{{if .AuthExpiresIn}}{{.AuthExpiresIn}}{{else if .FallbackOnly}}managed key{{else}}—{{end}}</td>
             <td>{{.LocalLastUsed}}</td>
             <td>{{.LocalTokens}}</td>
+            {{if $.LocalOperatorEnabled}}
+            <td>
+                <button
+                    class="action-btn danger-btn row-action-btn"
+                    data-account-id="{{.ID}}"
+                    data-account-label="{{if .Email}}{{.Email}}{{else}}{{.ID}}{{end}}"
+                    data-account-kind="{{if .FallbackOnly}}API key{{else}}account{{end}}"
+                    onclick="deleteAccountFromStatus(this)">
+                    {{if .FallbackOnly}}Delete Key{{else}}Delete{{end}}
+                </button>
+            </td>
+            {{end}}
         </tr>
         {{end}}
     </table>
@@ -1492,6 +1645,118 @@ const statusHTML = `<!DOCTYPE html>
                 if (!codexOAuthPopup) {
                     button.disabled = false;
                 }
+            }
+        }
+
+        async function addOpenAIApiKeyFromStatus() {
+            const input = document.getElementById('openai-api-key-input');
+            const button = document.getElementById('openai-api-key-add-btn');
+            const status = document.getElementById('openai-api-key-add-status');
+            if (!input || !button || !status) {
+                return;
+            }
+
+            const apiKey = String(input.value || '').trim();
+            if (!apiKey) {
+                status.style.color = '#f85149';
+                status.textContent = 'Enter an OpenAI API key first.';
+                return;
+            }
+
+            button.disabled = true;
+            status.style.color = '#8b949e';
+            status.textContent = 'Saving API key and running health probe...';
+
+            try {
+                const response = await fetch('/operator/codex/api-key-add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ api_key: apiKey })
+                });
+                const text = await response.text();
+                let data = null;
+                try {
+                    data = text ? JSON.parse(text) : null;
+                } catch (parseError) {
+                    data = null;
+                }
+                if (!response.ok) {
+                    throw new Error((data && data.error) || text || 'Failed to add API key');
+                }
+
+                input.value = '';
+                const accountID = String((data && data.account_id) || 'openai_api');
+                const healthStatus = String((data && data.health_status) || 'unknown');
+                const healthError = String((data && data.health_error) || '').trim();
+                if (data && data.dead) {
+                    status.style.color = '#d29922';
+                    status.textContent = 'Stored ' + accountID + ', but it is currently marked dead' + (healthError ? ': ' + healthError : '.');
+                } else {
+                    status.style.color = '#3fb950';
+                    status.textContent = 'Stored ' + accountID + '. Health: ' + healthStatus + (healthError ? ' (' + healthError + ')' : '') + '. Reloading status...';
+                }
+                window.setTimeout(() => window.location.reload(), 900);
+            } catch (error) {
+                status.style.color = '#f85149';
+                status.textContent = 'Failed to add API key: ' + (error && error.message ? error.message : error);
+            } finally {
+                button.disabled = false;
+            }
+        }
+
+        async function deleteAccountFromStatus(button) {
+            const status = document.getElementById('account-action-status');
+            if (!button) {
+                return;
+            }
+
+            const accountID = String(button.getAttribute('data-account-id') || '').trim();
+            const label = String(button.getAttribute('data-account-label') || accountID).trim();
+            const kind = String(button.getAttribute('data-account-kind') || 'account').trim();
+            if (!accountID) {
+                return;
+            }
+
+            if (!window.confirm('Delete ' + kind + ' ' + label + '? This removes the local file from the pool.')) {
+                return;
+            }
+
+            button.disabled = true;
+            if (status) {
+                status.style.color = '#8b949e';
+                status.textContent = 'Deleting ' + kind + ' ' + label + '...';
+            }
+
+            try {
+                const response = await fetch('/operator/account-delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ account_id: accountID })
+                });
+                const text = await response.text();
+                let data = null;
+                try {
+                    data = text ? JSON.parse(text) : null;
+                } catch (parseError) {
+                    data = null;
+                }
+                if (!response.ok) {
+                    throw new Error((data && data.error) || text || 'Failed to delete account');
+                }
+
+                if (status) {
+                    status.style.color = '#3fb950';
+                    status.textContent = (data && data.already_removed)
+                        ? kind + ' ' + label + ' was already gone. Reloading status...'
+                        : 'Deleted ' + kind + ' ' + label + '. Reloading status...';
+                }
+                window.setTimeout(() => window.location.reload(), 700);
+            } catch (error) {
+                if (status) {
+                    status.style.color = '#f85149';
+                    status.textContent = 'Failed to delete ' + kind + ': ' + (error && error.message ? error.message : error);
+                }
+                button.disabled = false;
             }
         }
 

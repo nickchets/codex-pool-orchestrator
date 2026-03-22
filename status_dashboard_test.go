@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -130,6 +133,59 @@ func TestBuildPoolDashboardDataGroupsWorkspaceSeats(t *testing.T) {
 	}
 }
 
+func TestBuildPoolDashboardDataTracksOpenAIAPIPool(t *testing.T) {
+	now := time.Date(2026, 3, 19, 13, 0, 0, 0, time.UTC)
+	seat := &Account{
+		ID:        "healthy-seat",
+		Type:      AccountTypeCodex,
+		PlanType:  "team",
+		AccountID: "workspace-a",
+		IDToken:   testCodexIDToken(t, "user-a", "workspace-a", "a@example.com", "sub-a", now.Add(4*time.Hour)),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.20,
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	apiKey := &Account{
+		ID:              "openai_api_deadbeef",
+		Type:            AccountTypeCodex,
+		PlanType:        "api",
+		AuthMode:        accountAuthModeAPIKey,
+		HealthStatus:    "healthy",
+		HealthCheckedAt: now.Add(-2 * time.Minute),
+		LastHealthyAt:   now.Add(-2 * time.Minute),
+	}
+
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{seat, apiKey}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	data := h.buildPoolDashboardData(now)
+	if data.CodexSeatCount != 1 {
+		t.Fatalf("codex_seat_count=%d", data.CodexSeatCount)
+	}
+	if data.OpenAIAPIPool.TotalKeys != 1 {
+		t.Fatalf("api total=%d", data.OpenAIAPIPool.TotalKeys)
+	}
+	if data.OpenAIAPIPool.HealthyKeys != 1 {
+		t.Fatalf("api healthy=%d", data.OpenAIAPIPool.HealthyKeys)
+	}
+	if data.OpenAIAPIPool.EligibleKeys != 1 {
+		t.Fatalf("api eligible=%d", data.OpenAIAPIPool.EligibleKeys)
+	}
+	if data.OpenAIAPIPool.NextKeyID != "openai_api_deadbeef" {
+		t.Fatalf("next api key=%q", data.OpenAIAPIPool.NextKeyID)
+	}
+	if len(data.WorkspaceGroups) != 1 {
+		t.Fatalf("workspace groups should exclude api keys, got %d", len(data.WorkspaceGroups))
+	}
+	if !data.Accounts[1].FallbackOnly {
+		t.Fatalf("expected fallback_only account status, got %+v", data.Accounts[1])
+	}
+}
+
 func TestBuildPoolDashboardDataSelectsCurrentSeatFromInflightAndLastUsed(t *testing.T) {
 	now := time.Date(2026, 3, 19, 13, 0, 0, 0, time.UTC)
 	current := &Account{
@@ -238,6 +294,44 @@ func TestBuildPoolDashboardDataSeparatesLastUsedAndBestEligibleWhenIdle(t *testi
 	}
 	if data.CurrentSeat == nil || data.CurrentSeat.ID != "healthy-seat" {
 		t.Fatalf("current_seat=%+v", data.CurrentSeat)
+	}
+}
+
+func TestBuildPoolDashboardDataPrefersCodexSeatPreviewBeforeFallbackAPIKey(t *testing.T) {
+	now := time.Date(2026, 3, 19, 13, 0, 0, 0, time.UTC)
+	codexSeat := &Account{
+		ID:        "healthy-seat",
+		Type:      AccountTypeCodex,
+		PlanType:  "team",
+		AccountID: "workspace-a",
+		IDToken:   testCodexIDToken(t, "user-a", "workspace-a", "a@example.com", "sub-a", now.Add(4*time.Hour)),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.20,
+		},
+	}
+	fallbackKey := &Account{
+		ID:          "openai_api_deadbeef",
+		Type:        AccountTypeCodex,
+		PlanType:    "api",
+		AuthMode:    accountAuthModeAPIKey,
+		AccessToken: "sk-proj-test",
+	}
+
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{codexSeat, fallbackKey}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	data := h.buildPoolDashboardData(now)
+	if data.BestEligibleSeat == nil || data.BestEligibleSeat.ID != "healthy-seat" {
+		t.Fatalf("best_eligible_seat=%+v", data.BestEligibleSeat)
+	}
+	if data.CurrentSeat == nil || data.CurrentSeat.ID != "healthy-seat" {
+		t.Fatalf("current_seat=%+v", data.CurrentSeat)
+	}
+	if data.OpenAIAPIPool.NextKeyID != "openai_api_deadbeef" {
+		t.Fatalf("next api key=%q", data.OpenAIAPIPool.NextKeyID)
 	}
 }
 
@@ -475,6 +569,203 @@ func TestLocalOperatorCodexOAuthStartRejectsForwardedRequests(t *testing.T) {
 	}
 }
 
+func TestLocalOperatorCodexAPIKeyAddStoresManagedKey(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_probe","status":"completed"}`))
+	}))
+	defer apiServer.Close()
+
+	baseURL, err := url.Parse(apiServer.URL)
+	if err != nil {
+		t.Fatalf("parse api base: %v", err)
+	}
+	codex := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	claude := NewClaudeProvider(baseURL)
+	gemini := NewGeminiProvider(baseURL, baseURL)
+
+	poolDir := t.TempDir()
+	h := &proxyHandler{
+		cfg:       config{poolDir: poolDir},
+		pool:      newPoolState(nil, false),
+		registry:  NewProviderRegistry(codex, claude, gemini),
+		transport: http.DefaultTransport,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/codex/api-key-add", strings.NewReader(`{"api_key":"sk-proj-test"}`))
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode json: %v", err)
+	}
+	accountID, _ := payload["account_id"].(string)
+	if accountID == "" {
+		t.Fatalf("missing account_id: %+v", payload)
+	}
+	if payload["health_status"] != "healthy" {
+		t.Fatalf("unexpected health_status: %+v", payload)
+	}
+	if h.pool.count() != 1 {
+		t.Fatalf("pool count=%d", h.pool.count())
+	}
+	keyPath := filepath.Join(poolDir, managedOpenAIAPISubdir, accountID+".json")
+	if _, err := os.Stat(keyPath); err != nil {
+		t.Fatalf("expected stored key file at %s: %v", keyPath, err)
+	}
+}
+
+func TestLocalOperatorCodexAPIKeyAddMarksQuotaKeyDead(t *testing.T) {
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/responses" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"You exceeded your current quota, please check your plan and billing details.","type":"insufficient_quota","code":"insufficient_quota"}}`))
+	}))
+	defer apiServer.Close()
+
+	baseURL, err := url.Parse(apiServer.URL)
+	if err != nil {
+		t.Fatalf("parse api base: %v", err)
+	}
+	codex := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	claude := NewClaudeProvider(baseURL)
+	gemini := NewGeminiProvider(baseURL, baseURL)
+
+	poolDir := t.TempDir()
+	h := &proxyHandler{
+		cfg:       config{poolDir: poolDir},
+		pool:      newPoolState(nil, false),
+		registry:  NewProviderRegistry(codex, claude, gemini),
+		transport: http.DefaultTransport,
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/codex/api-key-add", strings.NewReader(`{"api_key":"sk-proj-test"}`))
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode json: %v", err)
+	}
+	if payload["health_status"] != "dead" {
+		t.Fatalf("unexpected health_status: %+v", payload)
+	}
+	if payload["dead"] != true {
+		t.Fatalf("expected dead=true, got %+v", payload)
+	}
+}
+
+func TestLocalOperatorAccountDeleteRemovesManagedAPIKeyAndReloadsPool(t *testing.T) {
+	apiBase, err := url.Parse("https://api.openai.com")
+	if err != nil {
+		t.Fatalf("parse api base: %v", err)
+	}
+	codex := NewCodexProvider(apiBase, apiBase, apiBase, apiBase)
+	claude := NewClaudeProvider(apiBase)
+	gemini := NewGeminiProvider(apiBase, apiBase)
+
+	poolDir := t.TempDir()
+	acc, _, err := saveManagedOpenAIAPIKey(poolDir, "sk-proj-test-delete")
+	if err != nil {
+		t.Fatalf("save managed key: %v", err)
+	}
+
+	h := &proxyHandler{
+		cfg:      config{poolDir: poolDir},
+		pool:     newPoolState([]*Account{acc}, false),
+		registry: NewProviderRegistry(codex, claude, gemini),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/account-delete", strings.NewReader(`{"account_id":"`+acc.ID+`"}`))
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(acc.File); !os.IsNotExist(err) {
+		t.Fatalf("expected key file to be removed, stat err=%v", err)
+	}
+	if h.pool.count() != 0 {
+		t.Fatalf("pool count=%d", h.pool.count())
+	}
+}
+
+func TestLocalOperatorAccountDeleteRejectsInflightAccount(t *testing.T) {
+	apiBase, err := url.Parse("https://api.openai.com")
+	if err != nil {
+		t.Fatalf("parse api base: %v", err)
+	}
+	codex := NewCodexProvider(apiBase, apiBase, apiBase, apiBase)
+	claude := NewClaudeProvider(apiBase)
+	gemini := NewGeminiProvider(apiBase, apiBase)
+
+	poolDir := t.TempDir()
+	codexDir := filepath.Join(poolDir, "codex")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	authPath := filepath.Join(codexDir, "seat-a.json")
+	if err := os.WriteFile(authPath, []byte(`{"tokens":{"access_token":"access","refresh_token":"refresh"}}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	h := &proxyHandler{
+		cfg: config{poolDir: poolDir},
+		pool: newPoolState([]*Account{{
+			ID:          "seat-a",
+			Type:        AccountTypeCodex,
+			File:        authPath,
+			AccessToken: "access",
+			Inflight:    1,
+		}}, false),
+		registry: NewProviderRegistry(codex, claude, gemini),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/account-delete", strings.NewReader(`{"account_id":"seat-a"}`))
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if _, err := os.Stat(authPath); err != nil {
+		t.Fatalf("expected auth file to remain: %v", err)
+	}
+	if h.pool.count() != 1 {
+		t.Fatalf("pool count=%d", h.pool.count())
+	}
+}
+
 func TestLocalOperatorCodexOAuthStartDisabledInFriendMode(t *testing.T) {
 	stubCodexLoopbackEnsure(t)
 
@@ -564,7 +855,15 @@ func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 	body := rr.Body.String()
 	for _, fragment := range []string{
 		"Start Codex OAuth",
-		"operator <code>codex-oauth-start</code> command",
+		"Fallback API Pool",
+		"Add API Key",
+		"openai-api-key-input",
+		"/operator/codex/api-key-add",
+		"/operator/account-delete",
+		"deleteAccountFromStatus",
+		"account-action-status",
+		"/v1/responses",
+		"codex_pool_manager.py codex-oauth-start",
 		"/operator/codex/oauth-start",
 		"Open OAuth Page",
 		"keeps the popup opener attached",
@@ -621,8 +920,11 @@ func TestServeStatusPageHidesOperatorActionOutsideLoopback(t *testing.T) {
 	body := rr.Body.String()
 	for _, forbidden := range []string{
 		"Start Codex OAuth",
-		"operator <code>codex-oauth-start</code> command",
+		"codex_pool_manager.py codex-oauth-start",
 		"/operator/codex/oauth-start",
+		"Fallback API Pool",
+		"/operator/codex/api-key-add",
+		"/operator/account-delete",
 	} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("unexpected fragment %q in body", forbidden)

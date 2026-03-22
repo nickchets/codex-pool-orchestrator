@@ -86,7 +86,7 @@ func TestProxyWebSocketPoolRewritesAuthAndPinsSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse upstream URL: %v", err)
 	}
-	codex := NewCodexProvider(baseURL, baseURL, baseURL)
+	codex := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
 	claude := NewClaudeProvider(baseURL)
 	gemini := NewGeminiProvider(baseURL, baseURL)
 	registry := NewProviderRegistry(codex, claude, gemini)
@@ -189,7 +189,7 @@ func TestProxyWebSocketPoolAcceptsAuthFromSubprotocol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse upstream URL: %v", err)
 	}
-	codex := NewCodexProvider(baseURL, baseURL, baseURL)
+	codex := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
 	claude := NewClaudeProvider(baseURL)
 	gemini := NewGeminiProvider(baseURL, baseURL)
 	registry := NewProviderRegistry(codex, claude, gemini)
@@ -279,7 +279,7 @@ func TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat(t
 	if err != nil {
 		t.Fatalf("parse upstream URL: %v", err)
 	}
-	codex := NewCodexProvider(baseURL, baseURL, baseURL)
+	codex := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
 	claude := NewClaudeProvider(baseURL)
 	gemini := NewGeminiProvider(baseURL, baseURL)
 	registry := NewProviderRegistry(codex, claude, gemini)
@@ -347,7 +347,7 @@ func TestProxyWebSocketPassthroughPreservesAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse upstream URL: %v", err)
 	}
-	codex := NewCodexProvider(baseURL, baseURL, baseURL)
+	codex := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
 	claude := NewClaudeProvider(baseURL)
 	gemini := NewGeminiProvider(baseURL, baseURL)
 	registry := NewProviderRegistry(codex, claude, gemini)

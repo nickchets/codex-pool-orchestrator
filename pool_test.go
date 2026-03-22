@@ -213,6 +213,55 @@ func TestCandidateRequiredPlanOverridesPinnedConversation(t *testing.T) {
 	}
 }
 
+func TestCandidateFallsBackToManagedOpenAIAPIKeyWhenCodexSeatsUnavailable(t *testing.T) {
+	blockedSeat := &Account{
+		ID:       "blocked-seat",
+		Type:     AccountTypeCodex,
+		PlanType: "pro",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.15,
+			SecondaryUsedPercent: 0.96,
+			SecondaryResetAt:     time.Now().Add(2 * time.Hour),
+		},
+	}
+	apiKey := &Account{
+		ID:           "openai-api-key",
+		Type:         AccountTypeCodex,
+		PlanType:     "api",
+		AuthMode:     accountAuthModeAPIKey,
+		HealthStatus: "healthy",
+	}
+
+	p := newPoolState([]*Account{blockedSeat, apiKey}, false)
+
+	got := p.candidate("", nil, AccountTypeCodex, "pro")
+	if got == nil || got.ID != "openai-api-key" {
+		t.Fatalf("expected managed api key fallback, got %+v", got)
+	}
+}
+
+func TestRoutingStateBlocksRateLimitedManagedOpenAIAPIKey(t *testing.T) {
+	now := time.Now()
+	apiKey := &Account{
+		ID:             "openai-api-key",
+		Type:           AccountTypeCodex,
+		PlanType:       "api",
+		AuthMode:       accountAuthModeAPIKey,
+		RateLimitUntil: now.Add(2 * time.Minute),
+	}
+
+	apiKey.mu.Lock()
+	routing := routingStateLocked(apiKey, now, AccountTypeCodex, "")
+	apiKey.mu.Unlock()
+
+	if routing.Eligible {
+		t.Fatalf("expected rate-limited managed api key to be blocked")
+	}
+	if routing.BlockReason != "rate_limited" {
+		t.Fatalf("block_reason=%q", routing.BlockReason)
+	}
+}
+
 func TestMergeUsagePreservesExistingFields(t *testing.T) {
 	prev := UsageSnapshot{
 		PrimaryUsedPercent:   0.2,
