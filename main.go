@@ -490,6 +490,14 @@ func (h *proxyHandler) applyUpstreamAuthFailureDisposition(reqID string, acc *Ac
 	if acc == nil || resp == nil {
 		return
 	}
+	if isGitLabClaudeAccount(acc) {
+		disposition := classifyManagedGitLabClaudeError(resp.StatusCode, resp.Header, inspectedBody)
+		applyManagedGitLabClaudeDisposition(acc, disposition, resp.Header, time.Now())
+		if disposition.MarkDead {
+			log.Printf("[%s] gitlab claude account %s marked dead: %s", reqID, acc.ID, disposition.Reason)
+		}
+		return
+	}
 	if acc.Type == AccountTypeCodex && isPermanentCodexAuthFailure(resp, inspectedBody) {
 		markAccountDead(reqID, acc, "codex upstream account_deactivated")
 		return
@@ -511,6 +519,14 @@ func (h *proxyHandler) applyUpstreamAuthFailureDisposition(reqID string, acc *Ac
 
 func (h *proxyHandler) applyPreCopyUpstreamStatusDisposition(reqID string, acc *Account, resp *http.Response, refreshFailed bool, inspectedBody []byte) error {
 	if acc == nil || resp == nil {
+		return nil
+	}
+	if isGitLabClaudeAccount(acc) && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		disposition := classifyManagedGitLabClaudeError(resp.StatusCode, resp.Header, inspectedBody)
+		applyManagedGitLabClaudeDisposition(acc, disposition, resp.Header, time.Now())
+		if disposition.MarkDead {
+			log.Printf("[%s] gitlab claude account %s unavailable: %s", reqID, acc.ID, disposition.Reason)
+		}
 		return nil
 	}
 	if resp.StatusCode == http.StatusTooManyRequests && !isManagedCodexAPIKeyAccount(acc) {
@@ -2304,6 +2320,9 @@ func (h *proxyHandler) needsRefresh(a *Account) bool {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if isGitLabClaudeAccount(a) && (strings.TrimSpace(a.AccessToken) == "" || len(a.ExtraHeaders) == 0) {
+		return true
+	}
 	if a.RefreshToken == "" {
 		return false
 	}

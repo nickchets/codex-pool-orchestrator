@@ -189,6 +189,16 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.handleOperatorCodexAPIKeyAdd(w, r)
 		return
+	case "/operator/claude/gitlab-token-add":
+		if !h.checkLocalOperatorAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleOperatorClaudeGitLabTokenAdd(w, r)
+		return
 	case "/operator/account-delete":
 		if !h.checkLocalOperatorAuth(w, r) {
 			return

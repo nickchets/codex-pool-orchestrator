@@ -2,6 +2,29 @@
 
 > Repo-local evidence for root harness proof execution.
 
+### 2026-03-22T21:25:00Z | REPO-CPO-FEAT-P1-T13
+- Commands
+  - `go test /home/lap/projects/codex-pool-orchestrator -run 'TestClaudeProviderLoadsGitLabManagedAccount|TestClaudeProviderSetAuthHeadersForGitLabManagedAccount|TestClaudeProviderRefreshGitLabManagedAccount|TestProviderUpstreamURLForGitLabClaudeAccount|TestNeedsRefreshWhenGitLabClaudeGatewayStateMissing|TestClassifyManagedGitLabClaudeErrorQuotaExceeded'`
+  - `go test /home/lap/projects/codex-pool-orchestrator`
+  - `go build /home/lap/projects/codex-pool-orchestrator`
+  - `go build -o /home/lap/.local/bin/codex-pool /home/lap/projects/codex-pool-orchestrator`
+  - `systemctl --user restart codex-pool.service`
+  - `systemctl --user status codex-pool.service --no-pager`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status | rg -n "GitLab Claude Pool|gitlab-claude-token-add-btn|gitlab-claude-instance-input|GitLab Claude Tokens"`
+  - `curl -sS -X POST http://127.0.0.1:8989/operator/claude/gitlab-token-add -H 'Content-Type: application/json' --data '{"token":""}'`
+  - `python3 /home/lap/tools/codex_pool_manager.py status --strict`
+- Result
+  - PASS
+  - Added a new managed `gitlab_duo` Claude account mode that stores a GitLab source token, mints short-lived Duo direct-access gateway credentials via `/api/v4/ai/third_party_agents/direct_access`, and reuses the existing Claude `/v1/messages` routing path instead of forking a second provider surface.
+  - Claude provider logic is now account-aware for GitLab-backed upstream base URLs and custom GitLab gateway headers; refresh/health state persists to disk and missing/expired gateway state triggers re-minting before use.
+  - Runtime handling now classifies GitLab-backed Claude auth/rate-limit failures separately from native Claude OAuth so bad source tokens can be sidelined without inheriting the old "refresh failed => dead Claude OAuth seat" behavior.
+  - `/status` now exposes a local-operator GitLab Claude pool card with token + instance URL inputs, pool counts, and a dedicated `POST /operator/claude/gitlab-token-add` endpoint.
+  - Focused GitLab Claude tests, package-level `go test`, and `go build` all passed.
+  - After deploy, `systemctl --user status codex-pool.service --no-pager` showed the service active on PID `227412`, `/healthz` returned `{"status":"ok","uptime":"15s"}`, the served `/status` HTML contained the new GitLab Claude pool DOM hooks, the new operator endpoint returned the expected validation error `{"error":"token is required"}` for an empty payload, and `python3 /home/lap/tools/codex_pool_manager.py status --strict` returned `PASS`.
+- Notes
+  - This slice deliberately stops at PAT/OAuth source-token onboarding and direct-access minting. Live end-to-end Claude Code traffic through GitLab-backed seats still needs a real source token smoke once the operator adds one.
+
 ### 2026-03-19T21:56:10Z | REPO-CPO-PROOF-T1
 - Commands
   - `go build ./...`

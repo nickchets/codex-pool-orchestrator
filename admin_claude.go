@@ -66,7 +66,9 @@ func (h *proxyHandler) handleClaudeList(w http.ResponseWriter, r *http.Request) 
 	for _, acc := range accounts {
 		if acc.Type == AccountTypeClaude {
 			tokenType := "api_key"
-			if strings.HasPrefix(acc.AccessToken, "sk-ant-oat") {
+			if isGitLabClaudeAccount(acc) {
+				tokenType = "gitlab"
+			} else if strings.HasPrefix(acc.AccessToken, "sk-ant-oat") {
 				tokenType = "oauth"
 			}
 			result = append(result, accountInfo{

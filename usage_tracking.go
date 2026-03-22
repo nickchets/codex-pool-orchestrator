@@ -88,6 +88,26 @@ func (h *proxyHandler) refreshUsageIfStale() {
 
 		// Claude accounts have their own usage endpoint
 		if accType == AccountTypeClaude {
+			if isGitLabClaudeAccount(a) {
+				if !h.cfg.disableRefresh && (h.needsRefresh(a) || missingGitLabClaudeGatewayState(a)) {
+					if err := h.refreshAccount(context.Background(), a); err != nil {
+						if isRateLimitError(err) {
+							h.applyRateLimit(a, nil, defaultRateLimitBackoff)
+							continue
+						}
+						log.Printf("gitlab claude refresh %s failed: %v", a.ID, err)
+					} else {
+						a.mu.Lock()
+						if a.Dead {
+							log.Printf("resurrecting gitlab claude account %s after successful refresh", a.ID)
+							a.Dead = false
+							a.Penalty = 0
+						}
+						a.mu.Unlock()
+					}
+				}
+				continue
+			}
 			// Proactive refresh for OAuth tokens
 			if !h.cfg.disableRefresh && h.needsRefresh(a) {
 				if err := h.refreshAccount(context.Background(), a); err != nil {
@@ -352,6 +372,10 @@ func parseClaudeResetAt(value any) (time.Time, bool) {
 
 // fetchClaudeUsage fetches usage data from Claude's /api/oauth/usage endpoint.
 func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
+	if isGitLabClaudeAccount(a) {
+		return nil
+	}
+
 	// Only OAuth tokens can use the usage endpoint
 	a.mu.Lock()
 	access := a.AccessToken

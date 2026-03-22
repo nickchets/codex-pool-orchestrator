@@ -27,6 +27,7 @@ const (
 const (
 	accountAuthModeOAuth  = "oauth"
 	accountAuthModeAPIKey = "api_key"
+	accountAuthModeGitLab = "gitlab_duo"
 )
 
 // Codex seats leave rotation once usage reaches 90%, i.e. when remaining headroom is 10% or below.
@@ -181,6 +182,9 @@ type Account struct {
 	HealthError             string
 	HealthCheckedAt         time.Time
 	LastHealthyAt           time.Time
+	SourceBaseURL           string
+	UpstreamBaseURL         string
+	ExtraHeaders            map[string]string
 
 	// Aggregated token counters (in-memory for now; persist later)
 	Totals AccountUsage
@@ -346,9 +350,24 @@ type ClaudeAuthJSON struct {
 	// API key format
 	APIKey   string `json:"api_key,omitempty"`
 	PlanType string `json:"plan_type,omitempty"` // optional: pro, max, etc.
+	AuthMode string `json:"auth_mode,omitempty"`
 
 	// OAuth format (from Claude Code keychain)
 	ClaudeAiOauth *ClaudeOAuthData `json:"claudeAiOauth,omitempty"`
+
+	// GitLab-managed Claude format.
+	GitLabToken            string            `json:"gitlab_token,omitempty"`
+	GitLabInstanceURL      string            `json:"gitlab_instance_url,omitempty"`
+	GitLabGatewayToken     string            `json:"gitlab_gateway_token,omitempty"`
+	GitLabGatewayBaseURL   string            `json:"gitlab_gateway_base_url,omitempty"`
+	GitLabGatewayHeaders   map[string]string `json:"gitlab_gateway_headers,omitempty"`
+	GitLabGatewayExpiresAt time.Time         `json:"gitlab_gateway_expires_at,omitempty"`
+	Disabled               bool              `json:"disabled,omitempty"`
+	Dead                   bool              `json:"dead,omitempty"`
+	HealthStatus           string            `json:"health_status,omitempty"`
+	HealthError            string            `json:"health_error,omitempty"`
+	HealthCheckedAt        *time.Time        `json:"health_checked_at,omitempty"`
+	LastHealthyAt          *time.Time        `json:"last_healthy_at,omitempty"`
 }
 
 // ClaudeOAuthData is the OAuth token structure from Claude Code.
@@ -373,6 +392,7 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 		{name: "codex", accountType: AccountTypeCodex},
 		{name: "openai_api", accountType: AccountTypeCodex},
 		{name: "claude", accountType: AccountTypeClaude},
+		{name: "claude_gitlab", accountType: AccountTypeClaude},
 		{name: "gemini", accountType: AccountTypeGemini},
 		{name: "kimi", accountType: AccountTypeKimi},
 		{name: "minimax", accountType: AccountTypeMinimax},
@@ -989,6 +1009,9 @@ func saveAccount(a *Account) error {
 	case AccountTypeGemini:
 		return saveGeminiAccount(a)
 	case AccountTypeClaude:
+		if isGitLabClaudeAccount(a) {
+			return saveGitLabClaudeAccount(a)
+		}
 		return saveClaudeAccount(a)
 	default:
 		return saveCodexAccount(a)

@@ -336,6 +336,9 @@ func providerUpstreamURLForAccount(provider Provider, path string, acc *Account)
 	if codexProvider, ok := provider.(*CodexProvider); ok {
 		return codexProvider.UpstreamURLForAccount(path, acc)
 	}
+	if claudeProvider, ok := provider.(*ClaudeProvider); ok {
+		return claudeProvider.UpstreamURLForAccount(path, acc)
+	}
 	return provider.UpstreamURL(path)
 }
 

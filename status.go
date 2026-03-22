@@ -23,6 +23,7 @@ type StatusData struct {
 	MinimaxCount         int                           `json:"minimax_count"`
 	PoolUsers            int                           `json:"pool_users,omitempty"`
 	OpenAIAPIPool        OpenAIAPIPoolStatus           `json:"openai_api_pool"`
+	GitLabClaudePool     GitLabClaudePoolStatus        `json:"gitlab_claude_pool"`
 	PoolSummary          PoolDashboardSummary          `json:"pool_summary"`
 	CurrentSeat          *CurrentSeatStatus            `json:"current_seat,omitempty"`
 	ActiveSeat           *CurrentSeatStatus            `json:"active_seat,omitempty"`
@@ -56,6 +57,14 @@ type OpenAIAPIPoolStatus struct {
 	EligibleKeys int    `json:"eligible_keys"`
 	DeadKeys     int    `json:"dead_keys"`
 	NextKeyID    string `json:"next_key_id,omitempty"`
+}
+
+type GitLabClaudePoolStatus struct {
+	TotalTokens    int    `json:"total_tokens"`
+	HealthyTokens  int    `json:"healthy_tokens"`
+	EligibleTokens int    `json:"eligible_tokens"`
+	DeadTokens     int    `json:"dead_tokens"`
+	NextTokenID    string `json:"next_token_id,omitempty"`
 }
 
 type PoolDashboardWorkspaceGroup struct {
@@ -369,6 +378,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 	var activeSeat *currentSeatCandidate
 	var lastUsedSeat *currentSeatCandidate
 	var nextOpenAIAPIKey *currentSeatCandidate
+	var nextGitLabClaudeToken *currentSeatCandidate
 	activeSeatCount := 0
 
 	h.pool.mu.RLock()
@@ -542,6 +552,22 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 				}
 			}
 		}
+		if isGitLabClaudeAccount(a) {
+			data.GitLabClaudePool.TotalTokens++
+			if status.Dead {
+				data.GitLabClaudePool.DeadTokens++
+			}
+			if status.HealthStatus == "healthy" && !status.Dead && !status.Disabled {
+				data.GitLabClaudePool.HealthyTokens++
+			}
+			if routing.Eligible {
+				data.GitLabClaudePool.EligibleTokens++
+				if nextGitLabClaudeToken == nil || prefersBestEligibleSeat(candidate, nextGitLabClaudeToken) {
+					candidateCopy := candidate
+					nextGitLabClaudeToken = &candidateCopy
+				}
+			}
+		}
 
 		a.mu.Unlock()
 		data.Accounts = append(data.Accounts, status)
@@ -589,6 +615,9 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 	data.CurrentSeat = firstSeatStatus(data.ActiveSeat, data.BestEligibleSeat, data.LastUsedSeat)
 	if nextOpenAIAPIKey != nil {
 		data.OpenAIAPIPool.NextKeyID = nextOpenAIAPIKey.status.ID
+	}
+	if nextGitLabClaudeToken != nil {
+		data.GitLabClaudePool.NextTokenID = nextGitLabClaudeToken.status.ID
 	}
 
 	for _, account := range data.Accounts {
@@ -1048,6 +1077,26 @@ const statusHTML = `<!DOCTYPE html>
             </div>
             <div id="openai-api-key-add-status" class="muted" style="margin-top: 10px;"></div>
         </div>
+        <div class="operator-card">
+            <div class="operator-title">GitLab Claude Pool</div>
+            <div class="muted">
+                These GitLab tokens mint short-lived Duo direct-access credentials for Claude through GitLab's Anthropic-compatible gateway. Store a PAT or OAuth access token; the pool refreshes gateway headers/tokens automatically and keeps Claude Code pointed at this same local proxy.
+            </div>
+            <div class="result-block">
+                <div><strong>Tokens:</strong> {{.GitLabClaudePool.TotalTokens}}</div>
+                <div><strong>Healthy:</strong> {{.GitLabClaudePool.HealthyTokens}}</div>
+                <div><strong>Eligible now:</strong> {{.GitLabClaudePool.EligibleTokens}}</div>
+                {{if .GitLabClaudePool.NextTokenID}}<div><strong>Next token:</strong> <span class="mono" title="{{.GitLabClaudePool.NextTokenID}}">{{clip .GitLabClaudePool.NextTokenID 24}}</span></div>{{end}}
+            </div>
+            <div class="action-row" style="margin-bottom: 10px;">
+                <input id="gitlab-claude-instance-input" class="action-input mono" type="text" autocomplete="off" spellcheck="false" placeholder="https://gitlab.com" value="https://gitlab.com" />
+            </div>
+            <div class="action-row">
+                <input id="gitlab-claude-token-input" class="action-input mono" type="password" autocomplete="off" spellcheck="false" placeholder="glpat-... or GitLab OAuth token" />
+                <button id="gitlab-claude-token-add-btn" class="action-btn" onclick="addGitLabClaudeTokenFromStatus()">Add GitLab Token</button>
+            </div>
+            <div id="gitlab-claude-token-add-status" class="muted" style="margin-top: 10px;"></div>
+        </div>
         {{end}}
         <div class="operator-card seat-card">
             <div class="operator-title">Current Active Seat</div>
@@ -1127,6 +1176,12 @@ const statusHTML = `<!DOCTYPE html>
         <div class="stat">
             <div class="stat-value">{{.OpenAIAPIPool.TotalKeys}}</div>
             <div class="stat-label">OpenAI API Keys</div>
+        </div>
+        {{end}}
+        {{if or .LocalOperatorEnabled (gt .GitLabClaudePool.TotalTokens 0)}}
+        <div class="stat">
+            <div class="stat-value">{{.GitLabClaudePool.TotalTokens}}</div>
+            <div class="stat-label">GitLab Claude Tokens</div>
         </div>
         {{end}}
         <div class="stat">
@@ -1699,6 +1754,64 @@ const statusHTML = `<!DOCTYPE html>
             } catch (error) {
                 status.style.color = '#f85149';
                 status.textContent = 'Failed to add API key: ' + (error && error.message ? error.message : error);
+            } finally {
+                button.disabled = false;
+            }
+        }
+
+        async function addGitLabClaudeTokenFromStatus() {
+            const tokenInput = document.getElementById('gitlab-claude-token-input');
+            const instanceInput = document.getElementById('gitlab-claude-instance-input');
+            const button = document.getElementById('gitlab-claude-token-add-btn');
+            const status = document.getElementById('gitlab-claude-token-add-status');
+            if (!tokenInput || !instanceInput || !button || !status) {
+                return;
+            }
+
+            const token = String(tokenInput.value || '').trim();
+            const instanceURL = String(instanceInput.value || '').trim() || 'https://gitlab.com';
+            if (!token) {
+                status.style.color = '#f85149';
+                status.textContent = 'Enter a GitLab token first.';
+                return;
+            }
+
+            button.disabled = true;
+            status.style.color = '#8b949e';
+            status.textContent = 'Saving GitLab token and fetching Duo direct-access credentials...';
+
+            try {
+                const response = await fetch('/operator/claude/gitlab-token-add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token: token, instance_url: instanceURL })
+                });
+                const text = await response.text();
+                let data = null;
+                try {
+                    data = text ? JSON.parse(text) : null;
+                } catch (parseError) {
+                    data = null;
+                }
+                if (!response.ok) {
+                    throw new Error((data && data.error) || text || 'Failed to add GitLab token');
+                }
+
+                tokenInput.value = '';
+                const accountID = String((data && data.account_id) || 'claude_gitlab');
+                const healthStatus = String((data && data.health_status) || 'unknown');
+                const healthError = String((data && data.health_error) || '').trim();
+                if (data && data.dead) {
+                    status.style.color = '#d29922';
+                    status.textContent = 'Stored ' + accountID + ', but it is currently marked dead' + (healthError ? ': ' + healthError : '.');
+                } else {
+                    status.style.color = '#3fb950';
+                    status.textContent = 'Stored ' + accountID + '. Health: ' + healthStatus + (healthError ? ' (' + healthError + ')' : '') + '. Reloading status...';
+                }
+                window.setTimeout(() => window.location.reload(), 900);
+            } catch (error) {
+                status.style.color = '#f85149';
+                status.textContent = 'Failed to add GitLab token: ' + (error && error.message ? error.message : error);
             } finally {
                 button.disabled = false;
             }

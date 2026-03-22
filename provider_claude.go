@@ -33,6 +33,48 @@ func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, 
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 
+	if strings.TrimSpace(cj.GitLabToken) != "" {
+		acc := &Account{
+			Type:            AccountTypeClaude,
+			ID:              strings.TrimSuffix(name, filepath.Ext(name)),
+			File:            path,
+			AccessToken:     strings.TrimSpace(cj.GitLabGatewayToken),
+			RefreshToken:    strings.TrimSpace(cj.GitLabToken),
+			PlanType:        firstNonEmpty(strings.TrimSpace(cj.PlanType), "gitlab_duo"),
+			AuthMode:        accountAuthModeGitLab,
+			Disabled:        cj.Disabled,
+			Dead:            cj.Dead,
+			HealthStatus:    strings.TrimSpace(cj.HealthStatus),
+			HealthError:     strings.TrimSpace(cj.HealthError),
+			SourceBaseURL:   firstNonEmpty(strings.TrimSpace(cj.GitLabInstanceURL), defaultGitLabInstanceURL),
+			UpstreamBaseURL: firstNonEmpty(strings.TrimSpace(cj.GitLabGatewayBaseURL), defaultGitLabClaudeGatewayURL),
+			ExtraHeaders:    copyStringMap(cj.GitLabGatewayHeaders),
+		}
+		var root map[string]any
+		if err := json.Unmarshal(data, &root); err == nil {
+			if lr, ok := root["last_refresh"].(string); ok && lr != "" {
+				if t, err := time.Parse(time.RFC3339Nano, lr); err == nil {
+					acc.LastRefresh = t
+				} else if t, err := time.Parse(time.RFC3339, lr); err == nil {
+					acc.LastRefresh = t
+				}
+			}
+		}
+		if !cj.GitLabGatewayExpiresAt.IsZero() {
+			acc.ExpiresAt = cj.GitLabGatewayExpiresAt
+		}
+		if cj.HealthCheckedAt != nil {
+			acc.HealthCheckedAt = *cj.HealthCheckedAt
+		}
+		if cj.LastHealthyAt != nil {
+			acc.LastHealthyAt = *cj.LastHealthyAt
+		}
+		if acc.HealthStatus == "" {
+			acc.HealthStatus = "unknown"
+		}
+		return acc, nil
+	}
+
 	acc := &Account{
 		Type: AccountTypeClaude,
 		ID:   strings.TrimSuffix(name, filepath.Ext(name)),
@@ -78,6 +120,17 @@ func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, 
 }
 
 func (p *ClaudeProvider) SetAuthHeaders(req *http.Request, acc *Account) {
+	if isGitLabClaudeAccount(acc) {
+		req.Header.Set("Authorization", "Bearer "+acc.AccessToken)
+		for key, value := range acc.ExtraHeaders {
+			if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
+				continue
+			}
+			req.Header.Set(key, value)
+		}
+		return
+	}
+
 	// OAuth tokens start with sk-ant-oat, API keys with sk-ant-api
 	if strings.HasPrefix(acc.AccessToken, "sk-ant-oat") {
 		req.Header.Set("Authorization", "Bearer "+acc.AccessToken)
@@ -87,6 +140,10 @@ func (p *ClaudeProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 }
 
 func (p *ClaudeProvider) RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error {
+	if isGitLabClaudeAccount(acc) {
+		return refreshGitLabClaudeAccess(ctx, acc, transport)
+	}
+
 	// Only OAuth tokens (not API keys) can be refreshed
 	if !strings.HasPrefix(acc.AccessToken, "sk-ant-oat") {
 		// API keys don't need refresh
@@ -118,6 +175,15 @@ func (p *ClaudeProvider) ParseUsageHeaders(acc *Account, headers http.Header) {
 
 func (p *ClaudeProvider) UpstreamURL(path string) *url.URL {
 	return p.claudeBase
+}
+
+func (p *ClaudeProvider) UpstreamURLForAccount(path string, acc *Account) *url.URL {
+	if isGitLabClaudeAccount(acc) {
+		if parsed, err := url.Parse(firstNonEmpty(strings.TrimSpace(acc.UpstreamBaseURL), defaultGitLabClaudeGatewayURL)); err == nil {
+			return parsed
+		}
+	}
+	return p.UpstreamURL(path)
 }
 
 func (p *ClaudeProvider) MatchesPath(path string) bool {

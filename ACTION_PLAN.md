@@ -23,6 +23,13 @@ _(none)_
 
 ### DONE
 
+#### REPO-CPO-FEAT-P1-T13: Add GitLab-backed Claude pool lane
+1. Add a managed GitLab Claude account mode that stores GitLab source tokens, mints short-lived Duo direct-access credentials, and routes `/v1/messages` traffic through GitLab's Anthropic-compatible gateway without forking a second Claude path.
+2. Expose local-operator status UI + endpoint for adding GitLab tokens and surface pool counts/eligibility in `/status`.
+3. Lock the slice with targeted Go tests, package build/test, strict runbook status, and live `/status` + operator-endpoint smoke on the restarted user service.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test /home/lap/projects/codex-pool-orchestrator -run 'TestClaudeProviderLoadsGitLabManagedAccount|TestClaudeProviderSetAuthHeadersForGitLabManagedAccount|TestClaudeProviderRefreshGitLabManagedAccount|TestProviderUpstreamURLForGitLabClaudeAccount|TestNeedsRefreshWhenGitLabClaudeGatewayStateMissing|TestClassifyManagedGitLabClaudeErrorQuotaExceeded' && go test /home/lap/projects/codex-pool-orchestrator && go build /home/lap/projects/codex-pool-orchestrator && go build -o /home/lap/.local/bin/codex-pool /home/lap/projects/codex-pool-orchestrator && systemctl --user restart codex-pool.service && python3 /home/lap/tools/codex_pool_manager.py status --strict && curl -fsS http://127.0.0.1:8989/healthz && curl -fsS http://127.0.0.1:8989/status | rg 'GitLab Claude Pool|gitlab-claude-token-add-btn|gitlab-claude-instance-input|GitLab Claude Tokens' && curl -sS -X POST http://127.0.0.1:8989/operator/claude/gitlab-token-add -H 'Content-Type: application/json' --data '{"token":""}'`
+
 #### REPO-CPO-REFAC-P1-T9: Reuse shared pre-copy status disposition in websocket flow
 1. Switch `proxyRequestWebSocket` `ModifyResponse` status handling to the shared pre-copy disposition helpers instead of carrying a third local copy of managed API failure classification, auth-failure penalties, and `5xx` penalties.
 2. Preserve websocket-specific `101` handling, protocol auth rewrite, session pinning, and client-visible error bodies exactly.
