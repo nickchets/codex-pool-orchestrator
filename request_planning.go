@@ -127,20 +127,25 @@ func buildBufferedRequestShape(r *http.Request, bodyBytes, bodySample []byte) Re
 	}
 }
 
-func buildStreamedRequestShape(r *http.Request) RequestShape {
-	return RequestShape{
-		Path: r.URL.Path,
-	}
-}
-
-func buildWebSocketRequestShape(r *http.Request) RequestShape {
+func requestConversationIDFromSessionInputs(r *http.Request) string {
 	conversationID := strings.TrimSpace(r.URL.Query().Get("session_id"))
 	if conversationID == "" {
 		conversationID = extractConversationIDFromHeaders(r.Header)
 	}
+	return conversationID
+}
+
+func buildStreamedRequestShape(r *http.Request) RequestShape {
 	return RequestShape{
 		Path:           r.URL.Path,
-		ConversationID: conversationID,
+		ConversationID: requestConversationIDFromSessionInputs(r),
+	}
+}
+
+func buildWebSocketRequestShape(r *http.Request) RequestShape {
+	return RequestShape{
+		Path:           r.URL.Path,
+		ConversationID: requestConversationIDFromSessionInputs(r),
 	}
 }
 

@@ -23,6 +23,13 @@ _(none)_
 
 ### DONE
 
+#### REPO-CPO-BUG-P1-T4: Enforce codex seat cutoff and sticky selection semantics
+1. Exclude Codex seats from fresh routing as soon as observed 5h or 7d usage reaches `90%`, instead of allowing the exact threshold to stay routable.
+2. Reuse the most recently used eligible seat for new unpinned Codex work so the pool drains one seat until headroom reaches the cutoff, instead of spreading load evenly by score alone.
+3. Preserve session affinity for streamed requests when a session header is present, and align `/status` copy and preview logic with the real selector.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go build ./... && go test -count=1 -timeout 90s -run "TestBuild.*RequestShape|TestCandidate|TestRoutingState|TestBuildPoolDashboardData|TestServeStatusPageClarifiesQuotaVsLocalFields" ./... && go test ./... && systemctl --user is-active codex-pool.service && curl -fsS http://127.0.0.1:8989/healthz && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_sticky_logic.json`
+
 #### REPO-CPO-REFAC-P1-T2: Freeze request planning contracts
 1. Introduce canonical types for `AdmissionResult`, `RequestShape`, and `RoutePlan`.
 2. Move provider/path/model/required-plan planning into a pure layer that can be reused by buffered, streamed, and websocket flows.

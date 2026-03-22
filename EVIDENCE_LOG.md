@@ -70,3 +70,32 @@
   - This wave intentionally froze planning contracts without changing downstream pool candidate semantics; required-plan filtering still happens only after `RoutePlan` selection.
   - A governed sidecar review flagged dead `RequestShape` transport/inspectability fields that were only referenced by tests; they were removed before the final deploy so the committed contract stays minimal.
   - The current root-side `codex exec -p root_bureaucracy` lane emitted repeated upstream auth-refresh `401` noise while reviewing the diff, so it cannot be treated as a clean independent close gate on this machine yet.
+
+### 2026-03-22T13:48:50Z | REPO-CPO-BUG-P1-T4
+- Commands
+  - `go test -count=1 -timeout 90s -run "TestBuild.*RequestShape|TestCandidate|TestRoutingState|TestBuildPoolDashboardData|TestServeStatusPageClarifiesQuotaVsLocalFields" ./...`
+  - `go test ./...`
+  - `go build ./...`
+  - `cp /home/lap/.local/bin/codex-pool /home/lap/.local/bin/codex-pool.backup_20260322T134451Z`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `systemctl --user is-active codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_sticky_logic.json`
+  - `AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && timeout 60s curl -sS -N -o /tmp/cpo_live_proxy_sticky_logic.sse -w '%{http_code}' http://127.0.0.1:8989/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}'`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_sticky_logic_after_smoke.json`
+- Result
+  - PASS
+  - Exact-threshold routing now blocks Codex seats at observed `used >= 90%` for both 5h and 7d windows; the old `> 90%` loophole is covered by updated unit tests.
+  - Fresh unpinned selection now reuses the most recently used eligible seat before score-based spreading, so the pool drains one seat until it reaches the cutoff instead of rotating evenly.
+  - Streamed requests now inherit session/header affinity into `RequestShape.ConversationID`, which lets pinning logic apply to streamed paths when the client provides a session identifier.
+  - After deploy, `systemctl --user is-active codex-pool.service` returned `active`, `/healthz` returned `{"status":"ok","uptime":"19s"}`, and live `/responses` smoke returned HTTP `200` with completed SSE output `OK`.
+  - `/status?format=json` after restart showed `current_seat.id == active_seat.id == "andy_2"` and `best_eligible_seat == null`, matching the new sticky-selection semantics instead of advertising a different preview seat while one active seat is already being drained.
+- Artifacts
+  - `/tmp/cpo_status_sticky_logic.json`
+  - `/tmp/cpo_status_sticky_logic_after_smoke.json`
+  - `/tmp/cpo_live_proxy_sticky_logic.sse`
+  - `/home/lap/.local/bin/codex-pool.backup_20260322T134451Z`
+- Notes
+  - The selector change intentionally preserves the existing hard weekly cutoff for fresh routing; once observed 7d usage reaches `90%`, the seat leaves the candidate pool until the next observed reset.
+  - A governed sidecar review also pointed out that streamed requests were bypassing affinity whenever the body was opaque; the final patch fixed that by extracting session identifiers from headers/query in the streamed request shape.

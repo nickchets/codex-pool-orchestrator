@@ -1357,7 +1357,7 @@ const statusHTML = `<!DOCTYPE html>
     <p style="margin-top: 20px; color: #8b949e; font-size: 12px;">
         <strong>Note:</strong> Remaining columns show remaining headroom, not used quota.
         Primary/Secondary usage and recovery come from the latest observed quota snapshot.
-        Codex seats stay eligible at exactly 10% remaining and switch only once headroom drops below 10%.
+        Codex seats leave rotation once headroom reaches 10% remaining and stay out until the observed reset restores headroom.
         <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">Auth TTL</code>,
         <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">Local Last Used</code>, and
         <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">Local Tokens</code>

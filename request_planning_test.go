@@ -43,17 +43,18 @@ func TestBuildBufferedRequestShapeExtractsConversationAndModel(t *testing.T) {
 
 func TestBuildStreamedRequestShapeIsOpaque(t *testing.T) {
 	req := httptest.NewRequest("POST", "http://example.com/v1/messages", nil)
+	req.Header.Set("Session-Id", "stream-thread-1")
 
 	shape := buildStreamedRequestShape(req)
 
 	if shape.Path != "/v1/messages" {
 		t.Fatalf("path = %q", shape.Path)
 	}
+	if shape.ConversationID != "stream-thread-1" {
+		t.Fatalf("conversation_id = %q", shape.ConversationID)
+	}
 	if shape.RequestedModel != "" {
 		t.Fatalf("requested_model = %q", shape.RequestedModel)
-	}
-	if shape.ConversationID != "" {
-		t.Fatalf("conversation_id = %q", shape.ConversationID)
 	}
 }
 

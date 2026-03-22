@@ -29,7 +29,7 @@ const (
 	accountAuthModeAPIKey = "api_key"
 )
 
-// Switch away only after usage exceeds 90%, i.e. when remaining headroom is strictly below 10%.
+// Codex seats leave rotation once usage reaches 90%, i.e. when remaining headroom is 10% or below.
 const codexPreemptiveUsedThreshold = 0.90
 
 type routingState struct {
@@ -67,6 +67,10 @@ func effectiveUsageForRouting(snapshot UsageSnapshot, now time.Time) (float64, f
 		secondaryUsed = 0
 	}
 	return primaryUsed, secondaryUsed
+}
+
+func usageAtOrAbovePreemptiveThreshold(used float64) bool {
+	return used >= codexPreemptiveUsedThreshold
 }
 
 func earliestFutureTime(now time.Time, candidates ...time.Time) time.Time {
@@ -125,8 +129,8 @@ func routingStateLocked(a *Account, now time.Time, accountType AccountType, requ
 		state.CodexRateLimitBypass = true
 	}
 	if a.Type == AccountTypeCodex && !isManagedCodexAPI {
-		primaryBlocked := primaryUsed > codexPreemptiveUsedThreshold
-		secondaryBlocked := secondaryUsed > codexPreemptiveUsedThreshold
+		primaryBlocked := usageAtOrAbovePreemptiveThreshold(primaryUsed)
+		secondaryBlocked := usageAtOrAbovePreemptiveThreshold(secondaryUsed)
 		switch {
 		case primaryBlocked && secondaryBlocked:
 			state.Eligible = false
@@ -651,56 +655,17 @@ func accountTier(accType AccountType, planType string) int {
 //
 // Selection strategy:
 //  1. Conversation pinning (stickiness) — only unpin at hard limits
-//  2. Split eligible accounts into Tier 1 and Tier 2
-//  3. If any Tier 1 account has secondary < tierThreshold → pick from Tier 1
-//  4. Else if any Tier 2 account has secondary < tierThreshold → pick from Tier 2
-//  5. Else → pick from all accounts with most headroom
-//  6. Within a tier, use score as tiebreaker (headroom, drain urgency, recency, inflight)
+//  2. Reuse the most recently used eligible account for new unpinned work
+//  3. Split remaining eligible accounts into Tier 1 and Tier 2
+//  4. If any Tier 1 account has secondary < tierThreshold → pick from Tier 1
+//  5. Else if any Tier 2 account has secondary < tierThreshold → pick from Tier 2
+//  6. Else → pick from all accounts with most headroom
+//  7. Within a tier, use score as tiebreaker (headroom, drain urgency, recency, inflight)
 func (p *poolState) candidate(conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string) *Account {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	now := time.Now()
-
-	// Conversation pinning — keep using the same account unless at hard limits
-	if conversationID != "" {
-		if id, ok := p.convPin[conversationID]; ok {
-			if exclude != nil && exclude[id] {
-				// pinned excluded; fall through to selection
-			} else if a := p.getLocked(id); a != nil {
-				a.mu.Lock()
-				routing := routingStateLocked(a, now, accountType, requiredPlan)
-				ok := routing.Eligible
-				if ok && routing.CodexRateLimitBypass && p.debug {
-					log.Printf("ignoring rate limit for codex account %s (until %s)",
-						id, a.RateLimitUntil.Format(time.RFC3339))
-				}
-				// Also unpin if token is expired - don't wait for a failed request
-				if ok && !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now) {
-					ok = false
-					if p.debug {
-						log.Printf("unpinning conversation %s from expired account %s",
-							conversationID, id)
-					}
-				} else if !ok && p.debug {
-					log.Printf(
-						"unpinning conversation %s from account %s (%s, primary=%.0f%% secondary=%.0f%%)",
-						conversationID,
-						id,
-						routing.BlockReason,
-						routing.PrimaryUsed*100,
-						routing.SecondaryUsed*100,
-					)
-				}
-				a.mu.Unlock()
-				if ok {
-					return a
-				}
-			}
-		}
-	}
-
-	return p.selectEligibleCandidateLocked(now, exclude, accountType, requiredPlan, true)
+	return p.candidateAtLocked(time.Now(), conversationID, exclude, accountType, requiredPlan, true)
 }
 
 func (p *poolState) peekCandidate(accountType AccountType, requiredPlan string) *Account {
@@ -710,7 +675,105 @@ func (p *poolState) peekCandidate(accountType AccountType, requiredPlan string) 
 func (p *poolState) peekCandidateAt(now time.Time, accountType AccountType, requiredPlan string) *Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.selectEligibleCandidateLocked(now, nil, accountType, requiredPlan, false)
+	return p.candidateAtLocked(now, "", nil, accountType, requiredPlan, false)
+}
+
+func (p *poolState) candidateAtLocked(now time.Time, conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string, advanceRR bool) *Account {
+	if pinned := p.pinnedEligibleCandidateLocked(now, conversationID, exclude, accountType, requiredPlan); pinned != nil {
+		return pinned
+	}
+	if sticky := p.stickyEligibleCandidateLocked(now, exclude, accountType, requiredPlan); sticky != nil {
+		return sticky
+	}
+	return p.selectEligibleCandidateLocked(now, exclude, accountType, requiredPlan, advanceRR)
+}
+
+func (p *poolState) pinnedEligibleCandidateLocked(now time.Time, conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string) *Account {
+	if conversationID == "" {
+		return nil
+	}
+	id, ok := p.convPin[conversationID]
+	if !ok {
+		return nil
+	}
+	if exclude != nil && exclude[id] {
+		return nil
+	}
+	a := p.getLocked(id)
+	if a == nil {
+		return nil
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	routing := routingStateLocked(a, now, accountType, requiredPlan)
+	ok = routing.Eligible
+	if ok && routing.CodexRateLimitBypass && p.debug {
+		log.Printf("ignoring rate limit for codex account %s (until %s)",
+			id, a.RateLimitUntil.Format(time.RFC3339))
+	}
+	if ok && !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now) {
+		ok = false
+		if p.debug {
+			log.Printf("unpinning conversation %s from expired account %s",
+				conversationID, id)
+		}
+	} else if !ok && p.debug {
+		log.Printf(
+			"unpinning conversation %s from account %s (%s, primary=%.0f%% secondary=%.0f%%)",
+			conversationID,
+			id,
+			routing.BlockReason,
+			routing.PrimaryUsed*100,
+			routing.SecondaryUsed*100,
+		)
+	}
+	if !ok {
+		return nil
+	}
+	return a
+}
+
+func (p *poolState) stickyEligibleCandidateLocked(now time.Time, exclude map[string]bool, accountType AccountType, requiredPlan string) *Account {
+	if accountType == AccountTypeCodex {
+		if acc := p.stickyEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, func(a *Account) bool {
+			return !isManagedCodexAPIKeyAccount(a)
+		}); acc != nil {
+			return acc
+		}
+		return p.stickyEligibleCandidateMatchingLocked(now, exclude, accountType, "", func(a *Account) bool {
+			return isManagedCodexAPIKeyAccount(a)
+		})
+	}
+	return p.stickyEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, nil)
+}
+
+func (p *poolState) stickyEligibleCandidateMatchingLocked(now time.Time, exclude map[string]bool, accountType AccountType, requiredPlan string, include func(*Account) bool) *Account {
+	var sticky *Account
+	var stickyLastUsed time.Time
+
+	for _, a := range p.accounts {
+		if include != nil && !include(a) {
+			continue
+		}
+		if exclude != nil && exclude[a.ID] {
+			continue
+		}
+
+		a.mu.Lock()
+		lastUsed := a.LastUsed
+		expired := !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now)
+		routing := routingStateLocked(a, now, accountType, requiredPlan)
+		ok := routing.Eligible && !expired && !lastUsed.IsZero()
+		if ok && (sticky == nil || lastUsed.After(stickyLastUsed)) {
+			sticky = a
+			stickyLastUsed = lastUsed
+		}
+		a.mu.Unlock()
+	}
+
+	return sticky
 }
 
 func (p *poolState) selectEligibleCandidateLocked(now time.Time, exclude map[string]bool, accountType AccountType, requiredPlan string, advanceRR bool) *Account {

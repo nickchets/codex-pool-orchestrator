@@ -241,8 +241,8 @@ func TestBuildPoolDashboardDataSelectsCurrentSeatFromInflightAndLastUsed(t *test
 	if data.LastUsedSeat != nil {
 		t.Fatalf("expected last_used_seat to be omitted when it matches active_seat, got %+v", data.LastUsedSeat)
 	}
-	if data.BestEligibleSeat == nil || data.BestEligibleSeat.ID != "older-seat" {
-		t.Fatalf("best_eligible_seat=%+v", data.BestEligibleSeat)
+	if data.BestEligibleSeat != nil {
+		t.Fatalf("expected best_eligible_seat to be omitted when it matches active_seat, got %+v", data.BestEligibleSeat)
 	}
 }
 
@@ -427,7 +427,7 @@ func TestServeStatusPageClarifiesQuotaVsLocalFields(t *testing.T) {
 		"used 15%",
 		"Remaining columns show remaining headroom, not used quota.",
 		"Primary/Secondary usage and recovery come from the latest observed quota snapshot.",
-		"stay eligible at exactly 10% remaining",
+		"leave rotation once headroom reaches 10% remaining",
 		"Status JSON",
 		"Health check",
 	} {

@@ -68,7 +68,7 @@ func TestCandidatePrefersAccountsUnderPreemptiveThreshold(t *testing.T) {
 	}
 }
 
-func TestRoutingStateKeepsExactTenPercentHeadroomEligible(t *testing.T) {
+func TestRoutingStateBlocksExactTenPercentHeadroom(t *testing.T) {
 	now := time.Now()
 	exactThreshold := &Account{
 		ID:   "exact-threshold",
@@ -85,15 +85,15 @@ func TestRoutingStateKeepsExactTenPercentHeadroomEligible(t *testing.T) {
 	routing := routingStateLocked(exactThreshold, now, AccountTypeCodex, "")
 	exactThreshold.mu.Unlock()
 
-	if !routing.Eligible {
-		t.Fatalf("expected exact-threshold seat to remain eligible, block_reason=%s", routing.BlockReason)
+	if routing.Eligible {
+		t.Fatalf("expected exact-threshold seat to be blocked")
 	}
-	if routing.BlockReason != "" {
-		t.Fatalf("expected no block reason at exact threshold, got %q", routing.BlockReason)
+	if routing.BlockReason != "codex_headroom_lt_10" {
+		t.Fatalf("expected codex_headroom_lt_10, got %q", routing.BlockReason)
 	}
 }
 
-func TestPinnedConversationStaysPinnedAtExactPreemptiveThreshold(t *testing.T) {
+func TestPinnedConversationUnpinsAtExactPreemptiveThreshold(t *testing.T) {
 	exactThreshold := &Account{
 		ID:   "exact-threshold",
 		Type: AccountTypeCodex,
@@ -116,8 +116,8 @@ func TestPinnedConversationStaysPinnedAtExactPreemptiveThreshold(t *testing.T) {
 	p.pin("conv", "exact-threshold")
 
 	got := p.candidate("conv", nil, AccountTypeCodex, "")
-	if got == nil || got.ID != "exact-threshold" {
-		t.Fatalf("expected exact-threshold account to stay pinned, got %+v", got)
+	if got == nil || got.ID != "healthy" {
+		t.Fatalf("expected exact-threshold account to unpin to healthy, got %+v", got)
 	}
 }
 
@@ -145,6 +145,73 @@ func TestPinnedConversationUnpinsAbovePreemptiveThreshold(t *testing.T) {
 	got := p.candidate("conv", nil, AccountTypeCodex, "")
 	if got == nil || got.ID != "healthy" {
 		t.Fatalf("expected pinned exhausted account to unpin to healthy, got %+v", got)
+	}
+}
+
+func TestCandidateReusesMostRecentlyUsedEligibleSeat(t *testing.T) {
+	now := time.Now()
+	sticky := &Account{
+		ID:       "sticky",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		LastUsed: now.Add(-15 * time.Second),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.89,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(30 * time.Minute),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	healthier := &Account{
+		ID:       "healthier",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		LastUsed: now.Add(-2 * time.Minute),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.05,
+			SecondaryUsedPercent: 0.05,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{sticky, healthier}, false)
+
+	got := p.candidate("", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != "sticky" {
+		t.Fatalf("expected most recently used eligible seat, got %+v", got)
+	}
+}
+
+func TestCandidateStopsReusingMostRecentlyUsedSeatAtExactPrimaryThreshold(t *testing.T) {
+	now := time.Now()
+	sticky := &Account{
+		ID:       "sticky",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		LastUsed: now.Add(-15 * time.Second),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.90,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(30 * time.Minute),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	healthy := &Account{
+		ID:       "healthy",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{sticky, healthy}, false)
+
+	got := p.candidate("", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != "healthy" {
+		t.Fatalf("expected sticky seat at exact primary threshold to be bypassed, got %+v", got)
 	}
 }
 
