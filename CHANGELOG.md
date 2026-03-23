@@ -9,6 +9,18 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.5.1-dev] - 2026-03-23
+
+### Changed
+- Refactored buffered, streamed, and websocket proxy response handling into smaller explicit seams so retryable status inspection, copied-response delivery, websocket success recovery, and pooled websocket proxy execution are no longer mixed into large inline handler blocks.
+- Shared pre-copy status inspection and replay handling between streamed and websocket lanes while keeping their remaining transport-specific differences explicit.
+- Hydrated the next websocket execution-shell follow-up (`T31`) in repo-local SSOT so the ongoing refactor wave is traceable from plan to evidence.
+
+### Added
+- Focused buffered regression coverage for managed API and GitLab Claude retry/failover paths.
+- Shared proxy account snapshot helpers for buffered, streamed, and websocket response-path tests.
+- Additional websocket finalizer coverage for non-`101` successful recovery and failed-handshake no-op behavior.
+
 ## [0.5.0] - 2026-03-23
 
 ### Added

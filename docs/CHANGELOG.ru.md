@@ -8,6 +8,18 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.5.1-dev] - 2026-03-23
+
+### Изменено
+- Buffered, streamed и websocket response handling разложены на меньшие явные seam-ы, так что retryable status inspection, copied-response delivery, websocket success recovery и pooled websocket proxy execution больше не смешаны в большие inline handler-блоки.
+- Общая pre-copy inspection/replay логика теперь разделяется между streamed и websocket path, при этом transport-specific отличия оставлены явными.
+- В repo-local SSOT гидрирован следующий websocket follow-up (`T31`), так что текущая refactor-волна прослеживается от плана до evidence.
+
+### Добавлено
+- Focused buffered regression coverage для managed API и GitLab Claude retry/failover путей.
+- Общие proxy account snapshot helpers для buffered, streamed и websocket response-path тестов.
+- Дополнительное websocket finalizer покрытие для non-`101` successful recovery и failed-handshake no-op поведения.
+
 ## [0.5.0] - 2026-03-23
 
 ### Добавлено
