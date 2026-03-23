@@ -68,4 +68,4 @@ Optional git metadata may be attached in release automation only, for example:
 - `0.2.0`: websocket auth and dead-seat handling
 - `0.3.0`: tighter operator dashboard logic
 - `0.4.0`: OpenAI API fallback pool
-- `0.5.0-dev`: routing and usage refactor branch now in progress
+- `0.5.0`: request-planning refactor wave, GitLab Claude pool lane, dashboard-first operator landing, and GitLab health-truth hardening

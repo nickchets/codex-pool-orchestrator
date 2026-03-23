@@ -10,23 +10,36 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	managedGitLabClaudeSubdir        = "claude_gitlab"
-	defaultGitLabInstanceURL         = "https://gitlab.com"
-	defaultGitLabClaudeGatewayURL    = "https://cloud.gitlab.com/ai/v1/proxy/anthropic"
-	managedGitLabClaudeDirectAccess  = "/api/v4/ai/third_party_agents/direct_access"
-	managedGitLabClaudeDefaultTTL    = 20 * time.Minute
-	managedGitLabClaudeRateLimitWait = 15 * time.Minute
+	managedGitLabClaudeSubdir                   = "claude_gitlab"
+	defaultGitLabInstanceURL                    = "https://gitlab.com"
+	defaultGitLabClaudeGatewayURL               = "https://cloud.gitlab.com/ai/v1/proxy/anthropic"
+	managedGitLabClaudeDirectAccess             = "/api/v4/ai/third_party_agents/direct_access"
+	managedGitLabClaudeDefaultTTL               = 20 * time.Minute
+	managedGitLabClaudeRateLimitWait            = 15 * time.Minute
+	managedGitLabClaudeGatewayRejectWait        = 2 * time.Minute
+	managedGitLabClaudeQuotaExceededInitialWait = 30 * time.Minute
+	managedGitLabClaudeQuotaExceededMaxWait     = 24 * time.Hour
+)
+
+type managedGitLabClaudeErrorSource string
+
+const (
+	managedGitLabClaudeErrorSourceDirectAccess   managedGitLabClaudeErrorSource = "direct_access"
+	managedGitLabClaudeErrorSourceGatewayRequest managedGitLabClaudeErrorSource = "gateway_request"
 )
 
 type managedGitLabClaudeErrorDisposition struct {
-	MarkDead  bool
-	RateLimit bool
-	Reason    string
+	MarkDead     bool
+	RateLimit    bool
+	Reason       string
+	HealthStatus string
+	Cooldown     time.Duration
 }
 
 func copyStringMap(in map[string]string) map[string]string {
@@ -46,6 +59,83 @@ func copyStringMap(in map[string]string) map[string]string {
 		return nil
 	}
 	return out
+}
+
+func getHeaderValueFold(headers http.Header, key string) string {
+	if headers == nil {
+		return ""
+	}
+	for headerKey, values := range headers {
+		if !strings.EqualFold(headerKey, key) || len(values) == 0 {
+			continue
+		}
+		return strings.TrimSpace(values[0])
+	}
+	return ""
+}
+
+func parseGitLabRateLimitHeaderInt(headers http.Header, key string) (int, bool) {
+	raw := getHeaderValueFold(headers, key)
+	if raw == "" {
+		return 0, false
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, false
+	}
+	return value, true
+}
+
+func applyGitLabDirectAccessHeaders(acc *Account, headers http.Header, now time.Time) {
+	if acc == nil || headers == nil {
+		return
+	}
+
+	name := getHeaderValueFold(headers, "RateLimit-Name")
+	limit, hasLimit := parseGitLabRateLimitHeaderInt(headers, "RateLimit-Limit")
+	remaining, hasRemaining := parseGitLabRateLimitHeaderInt(headers, "RateLimit-Remaining")
+	resetRaw, hasReset := parseGitLabRateLimitHeaderInt(headers, "RateLimit-Reset")
+	retryAfter, hasRetryAfter := parseRetryAfter(headers)
+
+	var resetAt time.Time
+	if hasReset && resetRaw > 0 {
+		resetAt = time.Unix(int64(resetRaw), 0).UTC()
+	} else if hasRetryAfter && retryAfter > 0 {
+		resetAt = now.Add(retryAfter).UTC()
+	}
+
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
+
+	if name != "" {
+		acc.GitLabRateLimitName = name
+	}
+	if hasLimit {
+		acc.GitLabRateLimitLimit = limit
+	}
+	if hasRemaining {
+		acc.GitLabRateLimitRemaining = remaining
+	}
+	if !resetAt.IsZero() {
+		acc.GitLabRateLimitResetAt = resetAt
+	}
+}
+
+func gitLabClaudeQuotaExceededCooldown(nextCount int) time.Duration {
+	if nextCount <= 1 {
+		return managedGitLabClaudeQuotaExceededInitialWait
+	}
+	wait := managedGitLabClaudeQuotaExceededInitialWait
+	for step := 1; step < nextCount; step++ {
+		if wait >= managedGitLabClaudeQuotaExceededMaxWait/2 {
+			return managedGitLabClaudeQuotaExceededMaxWait
+		}
+		wait *= 2
+	}
+	if wait > managedGitLabClaudeQuotaExceededMaxWait {
+		return managedGitLabClaudeQuotaExceededMaxWait
+	}
+	return wait
 }
 
 func isGitLabClaudeAccount(a *Account) bool {
@@ -110,18 +200,7 @@ func saveManagedGitLabClaudeToken(poolDir, instanceURL, sourceToken string) (*Ac
 		return nil, false, statErr
 	}
 
-	root := ClaudeAuthJSON{
-		PlanType:          "gitlab_duo",
-		AuthMode:          accountAuthModeGitLab,
-		GitLabToken:       token,
-		GitLabInstanceURL: normalizedInstanceURL,
-		HealthStatus:      "unknown",
-	}
-	if err := atomicWriteJSON(path, root); err != nil {
-		return nil, false, err
-	}
-
-	return &Account{
+	acc := &Account{
 		Type:            AccountTypeClaude,
 		ID:              accountID,
 		File:            path,
@@ -131,25 +210,54 @@ func saveManagedGitLabClaudeToken(poolDir, instanceURL, sourceToken string) (*Ac
 		HealthStatus:    "unknown",
 		SourceBaseURL:   normalizedInstanceURL,
 		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
-	}, created, nil
+	}
+	if err := saveGitLabClaudeAccountFile(acc, true); err != nil {
+		return nil, false, err
+	}
+
+	return acc, created, nil
 }
 
-func saveGitLabClaudeAccount(a *Account) error {
+func buildGitLabClaudeAuthJSON(a *Account) (ClaudeAuthJSON, error) {
+	if a == nil {
+		return ClaudeAuthJSON{}, fmt.Errorf("nil account")
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
 	root := ClaudeAuthJSON{
-		PlanType:             firstNonEmpty(strings.TrimSpace(a.PlanType), "gitlab_duo"),
-		AuthMode:             accountAuthModeGitLab,
-		GitLabToken:          strings.TrimSpace(a.RefreshToken),
-		GitLabInstanceURL:    firstNonEmpty(strings.TrimSpace(a.SourceBaseURL), defaultGitLabInstanceURL),
-		GitLabGatewayToken:   strings.TrimSpace(a.AccessToken),
-		GitLabGatewayBaseURL: firstNonEmpty(strings.TrimSpace(a.UpstreamBaseURL), defaultGitLabClaudeGatewayURL),
-		GitLabGatewayHeaders: copyStringMap(a.ExtraHeaders),
-		Disabled:             a.Disabled,
-		Dead:                 a.Dead,
-		HealthStatus:         strings.TrimSpace(a.HealthStatus),
-		HealthError:          sanitizeStatusMessage(a.HealthError),
+		PlanType:                 firstNonEmpty(strings.TrimSpace(a.PlanType), "gitlab_duo"),
+		AuthMode:                 accountAuthModeGitLab,
+		GitLabToken:              strings.TrimSpace(a.RefreshToken),
+		GitLabInstanceURL:        firstNonEmpty(strings.TrimSpace(a.SourceBaseURL), defaultGitLabInstanceURL),
+		GitLabGatewayToken:       strings.TrimSpace(a.AccessToken),
+		GitLabGatewayBaseURL:     firstNonEmpty(strings.TrimSpace(a.UpstreamBaseURL), defaultGitLabClaudeGatewayURL),
+		GitLabGatewayHeaders:     copyStringMap(a.ExtraHeaders),
+		GitLabRateLimitName:      strings.TrimSpace(a.GitLabRateLimitName),
+		GitLabRateLimitLimit:     a.GitLabRateLimitLimit,
+		GitLabRateLimitRemaining: a.GitLabRateLimitRemaining,
+		GitLabQuotaExceededCount: a.GitLabQuotaExceededCount,
+		Disabled:                 a.Disabled,
+		Dead:                     a.Dead,
+		HealthStatus:             strings.TrimSpace(a.HealthStatus),
+		HealthError:              sanitizeStatusMessage(a.HealthError),
 	}
 	if !a.ExpiresAt.IsZero() {
 		root.GitLabGatewayExpiresAt = a.ExpiresAt.UTC()
+	}
+	if !a.GitLabRateLimitResetAt.IsZero() {
+		root.GitLabRateLimitResetAt = a.GitLabRateLimitResetAt.UTC()
+	}
+	if !a.GitLabLastQuotaExceededAt.IsZero() {
+		root.GitLabLastQuotaExceededAt = a.GitLabLastQuotaExceededAt.UTC()
+	}
+	if !a.RateLimitUntil.IsZero() {
+		root.RateLimitUntil = a.RateLimitUntil.UTC()
+	}
+	if !a.LastRefresh.IsZero() {
+		value := a.LastRefresh.UTC()
+		root.LastRefresh = &value
 	}
 	if !a.HealthCheckedAt.IsZero() {
 		value := a.HealthCheckedAt.UTC()
@@ -159,64 +267,93 @@ func saveGitLabClaudeAccount(a *Account) error {
 		value := a.LastHealthyAt.UTC()
 		root.LastHealthyAt = &value
 	}
-	if !a.LastRefresh.IsZero() {
-		var existing map[string]any
-		if raw, err := os.ReadFile(a.File); err == nil && len(raw) > 0 {
-			_ = json.Unmarshal(raw, &existing)
+	return root, nil
+}
+
+func loadGitLabClaudeRoot(file string, allowCreate bool) (map[string]any, error) {
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		if allowCreate && os.IsNotExist(err) {
+			return make(map[string]any), nil
 		}
-		if existing == nil {
-			existing = make(map[string]any)
-		}
-		existing["plan_type"] = root.PlanType
-		existing["auth_mode"] = root.AuthMode
-		existing["gitlab_token"] = root.GitLabToken
-		existing["gitlab_instance_url"] = root.GitLabInstanceURL
-		existing["gitlab_gateway_token"] = root.GitLabGatewayToken
-		existing["gitlab_gateway_base_url"] = root.GitLabGatewayBaseURL
-		if len(root.GitLabGatewayHeaders) > 0 {
-			existing["gitlab_gateway_headers"] = root.GitLabGatewayHeaders
-		} else {
-			delete(existing, "gitlab_gateway_headers")
-		}
-		if !root.GitLabGatewayExpiresAt.IsZero() {
-			existing["gitlab_gateway_expires_at"] = root.GitLabGatewayExpiresAt.UTC().Format(time.RFC3339Nano)
-		} else {
-			delete(existing, "gitlab_gateway_expires_at")
-		}
-		if root.Disabled {
-			existing["disabled"] = true
-		} else {
-			delete(existing, "disabled")
-		}
-		if root.Dead {
-			existing["dead"] = true
-		} else {
-			delete(existing, "dead")
-		}
-		if root.HealthStatus != "" {
-			existing["health_status"] = root.HealthStatus
-		} else {
-			delete(existing, "health_status")
-		}
-		if root.HealthError != "" {
-			existing["health_error"] = root.HealthError
-		} else {
-			delete(existing, "health_error")
-		}
-		if root.HealthCheckedAt != nil {
-			existing["health_checked_at"] = root.HealthCheckedAt.UTC().Format(time.RFC3339Nano)
-		} else {
-			delete(existing, "health_checked_at")
-		}
-		if root.LastHealthyAt != nil {
-			existing["last_healthy_at"] = root.LastHealthyAt.UTC().Format(time.RFC3339Nano)
-		} else {
-			delete(existing, "last_healthy_at")
-		}
-		existing["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
-		return atomicWriteJSON(a.File, existing)
+		return nil, err
 	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("parse %s: empty file", file)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", file, err)
+	}
+	if root == nil {
+		root = make(map[string]any)
+	}
+	return root, nil
+}
+
+func setJSONField(root map[string]any, key string, value any, present bool) {
+	if present {
+		root[key] = value
+		return
+	}
+	delete(root, key)
+}
+
+func setJSONTimeField(root map[string]any, key string, value time.Time) {
+	setJSONField(root, key, value.UTC().Format(time.RFC3339Nano), !value.IsZero())
+}
+
+func setJSONTimePtrField(root map[string]any, key string, value *time.Time) {
+	if value == nil || value.IsZero() {
+		delete(root, key)
+		return
+	}
+	root[key] = value.UTC().Format(time.RFC3339Nano)
+}
+
+func mergeGitLabClaudeAuthJSON(root map[string]any, state ClaudeAuthJSON) {
+	root["plan_type"] = state.PlanType
+	root["auth_mode"] = state.AuthMode
+	root["gitlab_token"] = state.GitLabToken
+	root["gitlab_instance_url"] = state.GitLabInstanceURL
+	setJSONField(root, "gitlab_gateway_token", state.GitLabGatewayToken, strings.TrimSpace(state.GitLabGatewayToken) != "")
+	setJSONField(root, "gitlab_gateway_base_url", state.GitLabGatewayBaseURL, strings.TrimSpace(state.GitLabGatewayBaseURL) != "")
+	setJSONField(root, "gitlab_gateway_headers", state.GitLabGatewayHeaders, len(state.GitLabGatewayHeaders) > 0)
+	setJSONTimeField(root, "gitlab_gateway_expires_at", state.GitLabGatewayExpiresAt)
+	setJSONField(root, "gitlab_rate_limit_name", state.GitLabRateLimitName, strings.TrimSpace(state.GitLabRateLimitName) != "")
+	setJSONField(root, "gitlab_rate_limit_limit", state.GitLabRateLimitLimit, state.GitLabRateLimitLimit > 0)
+	setJSONField(root, "gitlab_rate_limit_remaining", state.GitLabRateLimitRemaining, state.GitLabRateLimitLimit > 0 || state.GitLabRateLimitRemaining > 0)
+	setJSONTimeField(root, "gitlab_rate_limit_reset_at", state.GitLabRateLimitResetAt)
+	setJSONField(root, "gitlab_quota_exceeded_count", state.GitLabQuotaExceededCount, state.GitLabQuotaExceededCount > 0)
+	setJSONTimeField(root, "gitlab_last_quota_exceeded_at", state.GitLabLastQuotaExceededAt)
+	setJSONTimeField(root, "rate_limit_until", state.RateLimitUntil)
+	setJSONTimePtrField(root, "last_refresh", state.LastRefresh)
+	setJSONField(root, "disabled", true, state.Disabled)
+	setJSONField(root, "dead", true, state.Dead)
+	setJSONField(root, "health_status", state.HealthStatus, strings.TrimSpace(state.HealthStatus) != "")
+	setJSONField(root, "health_error", state.HealthError, strings.TrimSpace(state.HealthError) != "")
+	setJSONTimePtrField(root, "health_checked_at", state.HealthCheckedAt)
+	setJSONTimePtrField(root, "last_healthy_at", state.LastHealthyAt)
+
+	delete(root, "api_key")
+	delete(root, "claudeAiOauth")
+}
+
+func saveGitLabClaudeAccountFile(a *Account, allowCreate bool) error {
+	state, err := buildGitLabClaudeAuthJSON(a)
+	if err != nil {
+		return err
+	}
+	root, err := loadGitLabClaudeRoot(a.File, allowCreate)
+	if err != nil {
+		return err
+	}
+	mergeGitLabClaudeAuthJSON(root, state)
 	return atomicWriteJSON(a.File, root)
+}
+
+func saveGitLabClaudeAccount(a *Account) error {
+	return saveGitLabClaudeAccountFile(a, false)
 }
 
 func (h *proxyHandler) handleOperatorClaudeGitLabTokenAdd(w http.ResponseWriter, r *http.Request) {
@@ -241,27 +378,64 @@ func (h *proxyHandler) handleOperatorClaudeGitLabTokenAdd(w http.ResponseWriter,
 		return
 	}
 
-	if err := h.refreshAccount(r.Context(), acc); err != nil {
-		// State is already persisted by refreshAccount.
-	}
+	refreshErr := h.refreshAccount(r.Context(), acc)
 
 	h.reloadAccounts()
 
+	live, liveOK := h.snapshotAccountByID(acc.ID, time.Now())
+	healthStatus := firstNonEmpty(strings.TrimSpace(acc.HealthStatus), "unknown")
+	healthError := sanitizeStatusMessage(acc.HealthError)
+	dead := acc.Dead
+	instanceURL := firstNonEmpty(strings.TrimSpace(acc.SourceBaseURL), defaultGitLabInstanceURL)
+	authExpiresAt := ""
+	if liveOK {
+		healthStatus = firstNonEmpty(strings.TrimSpace(live.HealthStatus), "unknown")
+		healthError = sanitizeStatusMessage(live.HealthError)
+		dead = live.Dead
+		if !live.ExpiresAt.IsZero() {
+			authExpiresAt = live.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+	} else if !acc.ExpiresAt.IsZero() {
+		authExpiresAt = acc.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+
 	respondJSON(w, map[string]any{
-		"status":        "ok",
-		"account_id":    acc.ID,
-		"created":       created,
-		"instance_url":  firstNonEmpty(strings.TrimSpace(acc.SourceBaseURL), defaultGitLabInstanceURL),
-		"health_status": firstNonEmpty(strings.TrimSpace(acc.HealthStatus), "unknown"),
-		"health_error":  sanitizeStatusMessage(acc.HealthError),
-		"dead":          acc.Dead,
-		"auth_expires_at": func() string {
-			if acc.ExpiresAt.IsZero() {
+		"status":     "ok",
+		"account_id": acc.ID,
+		"created":    created,
+		"refresh_ok": refreshErr == nil,
+		"refresh_error": func() string {
+			if refreshErr == nil {
 				return ""
 			}
-			return acc.ExpiresAt.UTC().Format(time.RFC3339)
+			return sanitizeStatusMessage(refreshErr.Error())
 		}(),
+		"instance_url":    instanceURL,
+		"health_status":   healthStatus,
+		"health_error":    healthError,
+		"dead":            dead,
+		"auth_expires_at": authExpiresAt,
 	})
+}
+
+func markGitLabClaudeRefreshError(acc *Account, now time.Time, message string, clearGatewayState bool) error {
+	err := fmt.Errorf("%s", message)
+	if acc == nil {
+		return err
+	}
+
+	acc.mu.Lock()
+	if clearGatewayState {
+		acc.AccessToken = ""
+		acc.ExtraHeaders = nil
+		acc.ExpiresAt = time.Time{}
+	}
+	acc.HealthStatus = "error"
+	acc.HealthError = sanitizeStatusMessage(message)
+	acc.HealthCheckedAt = now
+	acc.Penalty += 0.3
+	acc.mu.Unlock()
+	return err
 }
 
 func refreshGitLabClaudeAccess(ctx context.Context, acc *Account, transport http.RoundTripper) error {
@@ -291,19 +465,14 @@ func refreshGitLabClaudeAccess(ctx context.Context, acc *Account, transport http
 	resp, err := transport.RoundTrip(req)
 	now := time.Now().UTC()
 	if err != nil {
-		acc.mu.Lock()
-		acc.HealthStatus = "error"
-		acc.HealthError = sanitizeStatusMessage(err.Error())
-		acc.HealthCheckedAt = now
-		acc.Penalty += 0.3
-		acc.mu.Unlock()
-		return err
+		return markGitLabClaudeRefreshError(acc, now, err.Error(), false)
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
+	applyGitLabDirectAccessHeaders(acc, resp.Header, now)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		disposition := classifyManagedGitLabClaudeError(resp.StatusCode, resp.Header, body)
+		disposition := classifyManagedGitLabClaudeError(managedGitLabClaudeErrorSourceDirectAccess, resp.StatusCode, resp.Header, body)
 		applyManagedGitLabClaudeDisposition(acc, disposition, resp.Header, now)
 		reason := firstNonEmpty(disposition.Reason, resp.Status)
 		return fmt.Errorf("gitlab direct access failed: %s", reason)
@@ -316,14 +485,14 @@ func refreshGitLabClaudeAccess(ctx context.Context, acc *Account, transport http
 		ExpiresAt int64             `json:"expires_at"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		return fmt.Errorf("decode gitlab direct access response: %w", err)
+		return markGitLabClaudeRefreshError(acc, now, fmt.Sprintf("decode gitlab direct access response: %v", err), true)
 	}
 	if strings.TrimSpace(payload.Token) == "" {
-		return fmt.Errorf("gitlab direct access response did not include token")
+		return markGitLabClaudeRefreshError(acc, now, "gitlab direct access response did not include token", true)
 	}
 	headersCopy := copyStringMap(payload.Headers)
 	if len(headersCopy) == 0 {
-		return fmt.Errorf("gitlab direct access response did not include gateway headers")
+		return markGitLabClaudeRefreshError(acc, now, "gitlab direct access response did not include gateway headers", true)
 	}
 
 	expiresAt := now.Add(managedGitLabClaudeDefaultTTL)
@@ -347,23 +516,37 @@ func refreshGitLabClaudeAccess(ctx context.Context, acc *Account, transport http
 	return nil
 }
 
-func classifyManagedGitLabClaudeError(statusCode int, headers http.Header, body []byte) managedGitLabClaudeErrorDisposition {
+func classifyManagedGitLabClaudeError(source managedGitLabClaudeErrorSource, statusCode int, headers http.Header, body []byte) managedGitLabClaudeErrorDisposition {
 	reason := extractGitLabClaudeErrorSummary(body)
 	lower := strings.ToLower(reason)
 
 	disposition := managedGitLabClaudeErrorDisposition{Reason: reason}
 	switch {
-	case statusCode == http.StatusTooManyRequests:
-		disposition.RateLimit = true
-	case strings.Contains(lower, "usage_quota_exceeded"),
+	case statusCode == http.StatusPaymentRequired,
+		strings.Contains(lower, "usage_quota_exceeded"),
 		strings.Contains(lower, "usage quota exceeded"),
 		strings.Contains(lower, "quota exceeded"),
-		strings.Contains(lower, "rate limit"):
+		strings.Contains(lower, "insufficient_credits"),
+		strings.Contains(lower, "insufficient credits"):
 		disposition.RateLimit = true
-	case statusCode == http.StatusUnauthorized:
+		disposition.HealthStatus = "quota_exceeded"
+		disposition.Cooldown = managedGitLabClaudeQuotaExceededInitialWait
+	case statusCode == http.StatusTooManyRequests:
+		disposition.RateLimit = true
+		disposition.HealthStatus = "rate_limited"
+		disposition.Cooldown = managedGitLabClaudeRateLimitWait
+	case strings.Contains(lower, "rate limit"):
+		disposition.RateLimit = true
+		disposition.HealthStatus = "rate_limited"
+		disposition.Cooldown = managedGitLabClaudeRateLimitWait
+	case source == managedGitLabClaudeErrorSourceGatewayRequest &&
+		(statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden):
+		disposition.RateLimit = true
+		disposition.HealthStatus = "gateway_rejected"
+		disposition.Cooldown = managedGitLabClaudeGatewayRejectWait
+	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
 		disposition.MarkDead = true
-	case statusCode == http.StatusForbidden:
-		disposition.MarkDead = true
+		disposition.HealthStatus = "dead"
 	}
 	if disposition.Reason == "" {
 		disposition.Reason = firstNonEmpty(strings.TrimSpace(headers.Get("Retry-After")), http.StatusText(statusCode))
@@ -384,7 +567,15 @@ func applyManagedGitLabClaudeDisposition(acc *Account, disposition managedGitLab
 	acc.HealthError = reason
 
 	if disposition.RateLimit {
-		wait := managedGitLabClaudeRateLimitWait
+		wait := disposition.Cooldown
+		if disposition.HealthStatus == "quota_exceeded" {
+			acc.GitLabQuotaExceededCount++
+			acc.GitLabLastQuotaExceededAt = now
+			wait = gitLabClaudeQuotaExceededCooldown(acc.GitLabQuotaExceededCount)
+		}
+		if wait <= 0 {
+			wait = managedGitLabClaudeRateLimitWait
+		}
 		if retryAfter := strings.TrimSpace(headers.Get("Retry-After")); retryAfter != "" {
 			if seconds, err := time.ParseDuration(retryAfter + "s"); err == nil && seconds > 0 {
 				wait = seconds
@@ -395,7 +586,9 @@ func applyManagedGitLabClaudeDisposition(acc *Account, disposition managedGitLab
 			acc.RateLimitUntil = until
 		}
 		acc.Dead = false
-		if strings.Contains(strings.ToLower(reason), "quota") {
+		if strings.TrimSpace(disposition.HealthStatus) != "" {
+			acc.HealthStatus = disposition.HealthStatus
+		} else if strings.Contains(strings.ToLower(reason), "quota") {
 			acc.HealthStatus = "quota_exceeded"
 		} else {
 			acc.HealthStatus = "rate_limited"
@@ -406,7 +599,7 @@ func applyManagedGitLabClaudeDisposition(acc *Account, disposition managedGitLab
 
 	if disposition.MarkDead {
 		acc.Dead = true
-		acc.HealthStatus = "dead"
+		acc.HealthStatus = firstNonEmpty(strings.TrimSpace(disposition.HealthStatus), "dead")
 		acc.RateLimitUntil = time.Time{}
 		acc.Penalty += 100.0
 		return

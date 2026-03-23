@@ -186,6 +186,91 @@ func TestBuildPoolDashboardDataTracksOpenAIAPIPool(t *testing.T) {
 	}
 }
 
+func TestBuildPoolDashboardDataShowsGitLabDirectAccessSignals(t *testing.T) {
+	now := time.Date(2026, 3, 23, 6, 45, 0, 0, time.UTC)
+	gitlabClaude := &Account{
+		ID:                       "claude_gitlab_deadbeef",
+		Type:                     AccountTypeClaude,
+		PlanType:                 "gitlab_duo",
+		AuthMode:                 accountAuthModeGitLab,
+		HealthStatus:             "quota_exceeded",
+		HealthError:              "Consumer does not have sufficient credits",
+		LastRefresh:              now.Add(-2 * time.Minute),
+		ExpiresAt:                now.Add(18 * time.Minute),
+		GitLabRateLimitName:      "throttle_authenticated_api",
+		GitLabRateLimitLimit:     2000,
+		GitLabRateLimitRemaining: 1999,
+		GitLabRateLimitResetAt:   now.Add(20 * time.Minute),
+		GitLabQuotaExceededCount: 3,
+		RateLimitUntil:           now.Add(4 * time.Hour),
+	}
+
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{gitlabClaude}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	data := h.buildPoolDashboardData(now)
+	if len(data.Accounts) != 1 {
+		t.Fatalf("accounts=%d", len(data.Accounts))
+	}
+	status := data.Accounts[0]
+	if status.GitLabRateLimitName != "throttle_authenticated_api" {
+		t.Fatalf("gitlab_rate_limit_name=%q", status.GitLabRateLimitName)
+	}
+	if status.GitLabRateLimitLimit != 2000 || status.GitLabRateLimitRemaining != 1999 {
+		t.Fatalf("gitlab rate limit=%d/%d", status.GitLabRateLimitRemaining, status.GitLabRateLimitLimit)
+	}
+	if status.GitLabRateLimitResetIn == "" {
+		t.Fatalf("gitlab_rate_limit_reset_in=%q", status.GitLabRateLimitResetIn)
+	}
+	if status.UsageObserved != "local totals only · GitLab quota hidden" {
+		t.Fatalf("usage_observed=%q", status.UsageObserved)
+	}
+	if status.GitLabQuotaExceededCount != 3 {
+		t.Fatalf("gitlab_quota_exceeded_count=%d", status.GitLabQuotaExceededCount)
+	}
+	if status.GitLabQuotaProbeIn == "" {
+		t.Fatalf("gitlab_quota_probe_in=%q", status.GitLabQuotaProbeIn)
+	}
+	if status.HealthStatus != "quota_exceeded" {
+		t.Fatalf("health_status=%q", status.HealthStatus)
+	}
+}
+
+func TestBuildPoolDashboardDataBlocksGitLabTokensMissingGatewayState(t *testing.T) {
+	now := time.Date(2026, 3, 23, 6, 45, 0, 0, time.UTC)
+	gitlabClaude := &Account{
+		ID:           "claude_gitlab_deadbeef",
+		Type:         AccountTypeClaude,
+		PlanType:     "gitlab_duo",
+		AuthMode:     accountAuthModeGitLab,
+		HealthStatus: "unknown",
+	}
+
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{gitlabClaude}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	data := h.buildPoolDashboardData(now)
+	if data.GitLabClaudePool.EligibleTokens != 0 {
+		t.Fatalf("eligible_tokens=%d", data.GitLabClaudePool.EligibleTokens)
+	}
+	if data.GitLabClaudePool.NextTokenID != "" {
+		t.Fatalf("next_token_id=%q", data.GitLabClaudePool.NextTokenID)
+	}
+	if len(data.Accounts) != 1 {
+		t.Fatalf("accounts=%d", len(data.Accounts))
+	}
+	if data.Accounts[0].Routing.Eligible {
+		t.Fatal("expected token to be blocked")
+	}
+	if data.Accounts[0].Routing.BlockReason != "missing_gateway_state" {
+		t.Fatalf("block_reason=%q", data.Accounts[0].Routing.BlockReason)
+	}
+}
+
 func TestBuildPoolDashboardDataSelectsCurrentSeatFromInflightAndLastUsed(t *testing.T) {
 	now := time.Date(2026, 3, 19, 13, 0, 0, 0, time.UTC)
 	current := &Account{

@@ -175,8 +175,18 @@ func TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction(t *testing.T) 
 	}
 	body := rr.Body.String()
 	for _, fragment := range []string{
+		"Local Operator Dashboard",
+		"Dashboard-first local operator surface",
+		"Codex Dashboard",
+		"Claude Dashboard",
+		"Gemini Dashboard",
+		"Fallback API Pool",
+		"GitLab Claude Pool",
 		"Start Codex OAuth",
 		"/operator/codex/oauth-start",
+		"/operator/codex/api-key-add",
+		"/operator/claude/gitlab-token-add",
+		"/operator/account-delete",
 		"operator <code>codex-oauth-start</code> command",
 		"Open OAuth Page",
 		"fetch('/status?format=json', {",
@@ -195,6 +205,9 @@ func TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction(t *testing.T) 
 		}
 	}
 	for _, forbidden := range []string{
+		"/hero.png",
+		"hero-art",
+		"hero-wrapper",
 		"/admin/codex/add",
 		"/admin/accounts",
 		"noopener noreferrer",

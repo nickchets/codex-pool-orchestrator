@@ -2,6 +2,72 @@
 
 > Repo-local evidence for root harness proof execution.
 
+### 2026-03-23T13:36:00Z | REPO-CPO-REFAC-P1-T16
+- Commands
+  - `go test -count=1 -run 'TestClaudeProviderLoadsGitLabManagedAccount|TestClaudeProviderRefreshGitLabManagedAccount|TestClassifyManagedGitLabClaudeErrorQuotaExceeded|TestBuildPoolDashboardDataShowsGitLabDirectAccessSignals|TestBuildPoolDashboardDataBlocksGitLabTokensMissingGatewayState|TestServeStatusPageReturnsJSONForFormatQuery|TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededPersistsCooldown|TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededBackoffEscalates|TestFinalizeProxyResponseResetsGitLabQuotaBackoffAfterSuccess|TestRefreshAccountOnceGitLabBypassesPerAccountThrottle|TestSaveGitLabClaudeAccountFailsClosedOnMalformedJSON|TestSaveGitLabClaudeAccountRoundTripsGitLabFields|TestRefreshGitLabClaudeAccessMalformed2xxMarksErrorAndClearsGatewayState' ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json`
+  - `python3 /home/lap/tools/codex_pool_manager.py status --strict | jq '.admin_accounts[] | select(.type=="claude" and .plan_type=="gitlab_duo") | {id,health_status,gitlab_quota_exceeded_count,gitlab_last_quota_exceeded_at,last_refresh,expires_at,routing}'`
+- Result
+  - PASS
+  - Managed GitLab Claude persistence is now canonical and fail-closed: `saveManagedGitLabClaudeToken` and `saveGitLabClaudeAccount` both flow through one serializer that preserves unknown top-level fields, persists `last_refresh`, and refuses to rewrite malformed existing JSON.
+  - GitLab refresh truth is stricter: malformed `200 OK` direct-access responses now stamp `health_status=error`, preserve a concrete `health_error`, and clear stale gateway auth state instead of leaving the token looking healthy/usable after a failed refresh.
+  - Routing/status truth is tighter: GitLab Claude accounts with missing gateway token/headers are now blocked with `block_reason=missing_gateway_state`, so `/status?format=json`, pool counters, and `next_token_id` can no longer advertise unusable tokens as eligible.
+  - `/status` and `/admin/accounts` now snapshot account state under short locks, use atomic inflight reads, and avoid zero-time noise for the GitLab account timestamps exported through the admin surface.
+  - Live restart on PID `78244` succeeded; `/healthz` returned `{"status":"ok","uptime":"0s"}` immediately after the final restart, and live `/status?format=json` showed `gitlab_claude_pool.total_tokens=4`, `eligible_tokens=3`, with exhausted token `claude_gitlab_457e812b181e` still blocked as `rate_limited` and healthy tokens remaining eligible.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - The existing exhausted live token still shows `gitlab_last_quota_exceeded_at=null` because its on-disk JSON predates the new field and has not yet been re-persisted through a fresh quota event or healthy recovery cycle; backward-compatible `gitlab_quota_exceeded_count=1` inference still keeps runtime routing truthful.
+
+### 2026-03-23T10:31:00Z | REPO-CPO-BUG-P1-T16
+- Commands
+  - `go test -count=1 -run 'TestClaudeProviderLoadsLegacyQuotaExceededAccountWithDefaultBackoffCount|TestClaudeProviderParseUsageSupportsNonStreamMessagePayload|TestUpdateUsageFromBodyRecordsClaudeNonStreamMessage|TestClaudeProviderLoadsGitLabManagedAccount|TestClaudeProviderSetAuthHeadersForGitLabManagedAccount|TestClaudeProviderRefreshGitLabManagedAccount|TestProviderUpstreamURLForGitLabManagedAccount|TestNeedsRefreshWhenGitLabClaudeGatewayStateMissing|TestClassifyManagedGitLabClaudeErrorQuotaExceeded|TestClassifyManagedGitLabClaudeGatewayForbiddenDoesNotMarkDead|TestClassifyManagedGitLabClaudeDirectAccessForbiddenMarksDead|TestGitLabClaudeQuotaExceededCooldownExpandsExponentially|TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededPersistsCooldown|TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededBackoffEscalates|TestFinalizeProxyResponseResetsGitLabQuotaBackoffAfterSuccess|TestRefreshAccountOnceGitLabBypassesPerAccountThrottle|TestBuildPoolDashboardDataShowsGitLabDirectAccessSignals' ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service && sleep 2 && curl -fsS http://127.0.0.1:8989/healthz`
+  - `python3 /home/lap/tools/codex_pool_manager.py status | jq '.admin_accounts[] | select(.type=="claude" and .plan_type=="gitlab_duo") | {id,health_status,health_error,gitlab_quota_exceeded_count,gitlab_last_quota_exceeded_at,routing}'`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json | jq '.accounts[] | select(.plan_type=="gitlab_duo") | {id,health_status,gitlab_quota_exceeded_count,gitlab_quota_probe_in,routing}'`
+  - `timeout 120s fish -lc 'claude --model sonnet -p "Reply with exactly OK."'`
+- Result
+  - PASS
+  - Replaced the fixed GitLab `quota_exceeded` cooldown with adaptive exponential backoff: `30m -> 1h -> 2h -> 4h -> 8h -> 24h cap`, persisted per token as `gitlab_quota_exceeded_count`.
+  - Successful Claude message responses now clear GitLab quota backoff state and persist the healthy state back to disk; `direct_access` refresh still does not falsely clear monthly exhaustion by itself.
+  - Added backward-compatible load behavior so legacy exhausted GitLab account files that only had `health_status=quota_exceeded` plus `rate_limit_until` are surfaced as backoff level `1` after restart instead of looking like a zero-count state.
+  - `/status?format=json` now exposes `gitlab_quota_exceeded_count` and `gitlab_quota_probe_in`, and `/admin/accounts` now exposes GitLab health/error plus quota-backoff count.
+  - After deploy and restart, health probe returned `{"status":"ok","uptime":"1s"}`, the exhausted token `claude_gitlab_457e812b181e` surfaced as `health_status=quota_exceeded`, `gitlab_quota_exceeded_count=1`, `gitlab_quota_probe_in="5.4h"`, and the real `fish -> claude --model sonnet -p ...` smoke still returned `OK.`.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - The new backoff count for the currently exhausted legacy token comes from backward-compatible load inference because the original on-disk record predated the new counter field.
+
+### 2026-03-23T09:53:01Z | REPO-CPO-BUG-P1-T15
+- Commands
+  - `python3 - <<'PY' ... direct_access -> /v1/messages ... PY`
+  - `go test -count=1 -run 'TestClaudeProviderParseUsageSupportsNonStreamMessagePayload|TestUpdateUsageFromBodyRecordsClaudeNonStreamMessage|TestClaudeProviderLoadsGitLabManagedAccount|TestClaudeProviderSetAuthHeadersForGitLabManagedAccount|TestClaudeProviderRefreshGitLabManagedAccount|TestProviderUpstreamURLForGitLabManagedAccount|TestNeedsRefreshWhenGitLabClaudeGatewayStateMissing|TestClassifyManagedGitLabClaudeErrorQuotaExceeded|TestClassifyManagedGitLabClaudeGatewayForbiddenDoesNotMarkDead|TestClassifyManagedGitLabClaudeDirectAccessForbiddenMarksDead|TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededPersistsCooldown|TestRefreshAccountOnceGitLabBypassesPerAccountThrottle' ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `POOL_USER_TOKEN=$(jq -r '.[0].token' /home/lap/.root_layer/codex_pool/data/pool_users.json) && CLAUDE_POOL_TOKEN=$(curl -fsS --max-time 15 "http://127.0.0.1:8989/config/claude/${POOL_USER_TOKEN}" | jq -r '.access_token') && curl -sS --max-time 90 -D - -X POST http://127.0.0.1:8989/v1/messages -H "Authorization: Bearer ${CLAUDE_POOL_TOKEN}" -H 'Content-Type: application/json' -H 'anthropic-version: 2023-06-01' --data '{"model":"claude-sonnet-4-20250514","max_tokens":64,"messages":[{"role":"user","content":"Reply with exactly OK"}]}'`
+  - `timeout 120s fish -lc 'claude --model sonnet -p "Reply with exactly OK."'`
+  - `python3 /home/lap/tools/codex_pool_manager.py status | jq '.admin_accounts[] | select(.type=="claude" and .plan_type=="gitlab_duo") | {id,dead,health_status,health_error,routing,totals}'`
+- Result
+  - PASS
+  - Live truth check still showed the underlying token split: `claude_gitlab_457e812b181e` returned GitLab gateway `402` with `USAGE_QUOTA_EXCEEDED`, while `claude_gitlab_8d2aa7ac125f` returned real `200 OK`.
+  - Root cause was inside orchestrator routing, not GitLab uptime: message-path GitLab `402` was never routed through fallback, and message-path `403` reused the same `dead` semantics as direct-access token failures. That let transient/stale gateway rejects poison the whole Claude lane, and the 15-minute per-account refresh throttle blocked fresh `direct_access` minting exactly when the retry path needed it.
+  - Fixes in this slice:
+    - GitLab message-path `402 Payment Required` now goes through managed GitLab disposition handling, gets persisted as `rate_limit_until`, and rotates to the next candidate instead of surfacing as terminal pool failure.
+    - GitLab message-path `401/403` is now treated as temporary gateway rejection with cooldown instead of hard `dead`; only direct-access `401/403` still marks the source token dead.
+    - GitLab managed accounts now persist `rate_limit_until` to disk, so `quota_exceeded` exclusion survives service restart instead of disappearing from runtime truth.
+    - GitLab `direct_access` refresh bypasses the generic 15-minute per-account refresh throttle, so a rejected gateway token can be reminted immediately on the same-account retry path while still respecting the global refresh throttle.
+  - After deploy and restart, live pool smoke against `POST /v1/messages` returned HTTP `200` with assistant text `OK`, and the real `fish -> claude --model sonnet -p ...` path also returned `OK.`.
+  - Post-smoke pool state confirmed intended fallback behavior: `claude_gitlab_457e812b181e` stayed `dead=false` but became ineligible with `block_reason=rate_limited`, while `claude_gitlab_8d2aa7ac125f` remained eligible and its local totals incremented to `request_count=2`.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - `python3 /home/lap/tools/codex_pool_manager.py status` still shows `health_status=null` for GitLab entries even though the pool file now persists `health_status=quota_exceeded`; routing truth is correct (`block_reason=rate_limited`, persisted `rate_limit_until`). That display mismatch is a smaller follow-up, not part of the runtime fallback regression itself.
+
 ### 2026-03-22T21:25:00Z | REPO-CPO-FEAT-P1-T13
 - Commands
   - `go test /home/lap/projects/codex-pool-orchestrator -run 'TestClaudeProviderLoadsGitLabManagedAccount|TestClaudeProviderSetAuthHeadersForGitLabManagedAccount|TestClaudeProviderRefreshGitLabManagedAccount|TestProviderUpstreamURLForGitLabClaudeAccount|TestNeedsRefreshWhenGitLabClaudeGatewayStateMissing|TestClassifyManagedGitLabClaudeErrorQuotaExceeded'`
@@ -333,3 +399,35 @@
   - `/tmp/cpo_live_proxy_streamed_error_body_fix.sse`
 - Notes
   - This hotfix closes the audit-found streamed body truncation regression without reopening the broader T8 extraction; websocket response handling remains the next duplicate pre-copy status seam.
+
+### 2026-03-23T13:12:00Z | REPO-CPO-UI-P1-T15
+- Commands
+  - `awk '/<script>/{flag=1;next}/<\/script>/{flag=0}flag' /home/lap/projects/codex-pool-orchestrator/templates/local_landing.html >/tmp/local_landing.js && node -c /tmp/local_landing.js`
+  - `go test -count=1 -run 'TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction|TestServeStatusPageReturnsJSONForFormatQuery|TestBuildPoolDashboardDataShowsGitLabDirectAccessSignals' ./...`
+  - `go build ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `timeout 20s systemctl --user restart codex-pool.service`
+  - `timeout 20s systemctl --user show -p MainPID,ExecMainStartTimestamp codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/ >/tmp/cpo_local_landing_dashboard.html`
+  - `rg -n 'Local Operator Dashboard|Codex Dashboard|Claude Dashboard|Gemini Dashboard|Fallback API Pool|GitLab Claude Pool|/operator/codex/api-key-add|/operator/claude/gitlab-token-add|/operator/account-delete' /tmp/cpo_local_landing_dashboard.html`
+  - `! rg -n '/hero.png|hero-art|hero-wrapper|data-tab="stats"|id="tab-stats"' /tmp/cpo_local_landing_dashboard.html`
+  - `Playwright live smoke on http://127.0.0.1:8989/ with Codex/Claude/Gemini tab snapshots + screenshots`
+  - `python3 /home/lap/tools/root_telegram_operator.py send-report --report-path /home/lap/.root_layer/shared/reports/REPO-CPO-UI-P1-T15_20260323_091337_dashboard_first_landing.md --label cpo_dashboard_first_landing`
+- Result
+  - PASS
+  - The local `/` landing is now dashboard-first: the decorative hero block is gone, `Codex`, `Claude`, and `Gemini` tabs all render live provider dashboards from `/status?format=json`, and setup blocks were pushed below the live operator surfaces.
+  - Codex now exposes both seat state and `Fallback API Pool` controls on the landing, Claude exposes `GitLab Claude Pool` health plus GitLab token add flow, and all provider tables now clip long identifiers while keeping manual delete actions in the interface.
+  - The landing reuses one live data contract instead of drifting into a separate setup-only page; the old dedicated `Status` tab was removed and its live account/workspace summaries were distributed into the provider tabs.
+  - Targeted landing/status tests passed, the embedded-template JS passed standalone syntax check, and the deployed user service restarted onto `MainPID=71683` at `Mon 2026-03-23 09:09:45 EDT`.
+  - Final Playwright smoke on the restarted service showed populated Codex/Claude/Gemini dashboards and `browser_console_messages(level=info)` returned zero errors after the final reload.
+  - Telegram repo-update delivery succeeded through the root operator channel with `message_id=529` and `file_message_id=530`.
+- Artifacts
+  - `/tmp/local_landing.js`
+  - `/tmp/cpo_local_landing_dashboard.html`
+  - `/home/lap/.root_layer/shared/reports/REPO-CPO-UI-P1-T15_20260323_091337_dashboard_first_landing.md`
+  - `/home/lap/.root_layer/shared/spikes/root_telegram_channel_cpo_dashboard_first_landing_20260323_131439/summary.json`
+  - `cpo-landing-codex.png`
+  - `cpo-landing-claude.png`
+  - `cpo-landing-gemini.png`
+- Notes
+  - The next truthful successor remains `REPO-CPO-REFAC-P1-T16` for GitLab Claude persistence/health truth.

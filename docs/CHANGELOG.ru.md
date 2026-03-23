@@ -8,7 +8,16 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
-## [Unreleased] - 0.5.0-dev
+## [0.5.0] - 2026-03-23
+
+### Добавлено
+- GitLab-backed Claude pool с managed Duo direct-access minting.
+- Operator-facing onboarding GitLab Claude токенов и видимость пула в `/status`.
+- Dashboard-first локальная главная страница с live-вкладками `Codex`, `Claude` и `Gemini`, питающимися от `/status?format=json`.
+- Дополнительные operator controls для fallback API keys, GitLab Claude токенов и ручного удаления аккаунтов на локальных dashboard surfaces.
+- GitLab-specific поля в status/admin для cooldown, quota backoff counters и direct-access rate-limit сигналов.
+- Repo-local инженерные файлы: `ACTION_PLAN.md`, `DEBUG.md`,
+  `EVIDENCE_LOG.md`, `PROJECT_MANIFEST.md`.
 
 ### Изменено
 - Логика proxy admission вынесена из основного request handler.
@@ -16,11 +25,15 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 - Для Codex seat включен cutoff при `>= 90%` usage и sticky reuse.
 - Объединен ingestion usage из body, headers и stream-путей.
 - Вынесена общая логика учета usage из response stream.
+- Переиспользована общая retry/error/finalization логика для buffered, streamed и websocket proxy path.
+- Локальная главная страница переведена с setup-first режима на provider-dashboard-first operator surface, декоративный hero-блок удален.
+- Managed GitLab Claude persistence переведен на один canonical fail-closed serializer, а status/admin rendering — на snapshot-based проход с более короткими lock scope.
 
-### Добавлено
-- Регрессионные тесты для admission, request planning и usage ingestion.
-- Repo-local инженерные файлы: `ACTION_PLAN.md`, `DEBUG.md`,
-  `EVIDENCE_LOG.md`, `PROJECT_MANIFEST.md`.
+### Исправлено
+- Обычные non-stream Claude `/v1/messages` ответы теперь попадают в локальные usage totals.
+- Streamed и websocket inspection managed-upstream ошибок теперь сохраняет полный client-visible body, не ломая retryable classification.
+- Обработка GitLab Claude gateway `402/401/403` теперь корректно ротирует токены, сохраняет cooldown state и не убивает живые source tokens по ложному сценарию.
+- Битые успешные GitLab direct-access refresh ответы теперь переводят токен в явный `error` state и очищают stale gateway auth, а не оставляют его ложно healthy.
 
 ## [0.4.0] - 2026-03-22
 

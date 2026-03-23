@@ -491,8 +491,11 @@ func (h *proxyHandler) applyUpstreamAuthFailureDisposition(reqID string, acc *Ac
 		return
 	}
 	if isGitLabClaudeAccount(acc) {
-		disposition := classifyManagedGitLabClaudeError(resp.StatusCode, resp.Header, inspectedBody)
+		disposition := classifyManagedGitLabClaudeError(managedGitLabClaudeErrorSourceGatewayRequest, resp.StatusCode, resp.Header, inspectedBody)
 		applyManagedGitLabClaudeDisposition(acc, disposition, resp.Header, time.Now())
+		if err := saveAccount(acc); err != nil {
+			log.Printf("[%s] warning: failed to save gitlab claude account %s: %v", reqID, acc.ID, err)
+		}
 		if disposition.MarkDead {
 			log.Printf("[%s] gitlab claude account %s marked dead: %s", reqID, acc.ID, disposition.Reason)
 		}
@@ -521,9 +524,12 @@ func (h *proxyHandler) applyPreCopyUpstreamStatusDisposition(reqID string, acc *
 	if acc == nil || resp == nil {
 		return nil
 	}
-	if isGitLabClaudeAccount(acc) && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
-		disposition := classifyManagedGitLabClaudeError(resp.StatusCode, resp.Header, inspectedBody)
+	if isGitLabClaudeAccount(acc) && (resp.StatusCode == http.StatusPaymentRequired || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		disposition := classifyManagedGitLabClaudeError(managedGitLabClaudeErrorSourceGatewayRequest, resp.StatusCode, resp.Header, inspectedBody)
 		applyManagedGitLabClaudeDisposition(acc, disposition, resp.Header, time.Now())
+		if err := saveAccount(acc); err != nil {
+			log.Printf("[%s] warning: failed to save gitlab claude account %s: %v", reqID, acc.ID, err)
+		}
 		if disposition.MarkDead {
 			log.Printf("[%s] gitlab claude account %s unavailable: %s", reqID, acc.ID, disposition.Reason)
 		}
@@ -1020,6 +1026,16 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 			resp.Body.Close()
 			errBody = bodyForInspection(nil, errBody)
+			if isGitLabClaudeAccount(acc) {
+				_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, errBody)
+				if len(errBody) > 0 {
+					lastErr = fmt.Errorf("upstream %s: %s", resp.Status, string(errBody))
+				} else {
+					lastErr = fmt.Errorf("upstream %s", resp.Status)
+				}
+				h.recent.add(lastErr.Error())
+				continue
+			}
 			errStr := string(errBody)
 			// Check for deactivated_workspace or similar permanent failures
 			if strings.Contains(errStr, "deactivated_workspace") || strings.Contains(errStr, "subscription") {
@@ -1749,6 +1765,7 @@ func (h *proxyHandler) finalizeProxyResponse(reqID string, provider Provider, ac
 	}
 
 	now := time.Now()
+	shouldPersistAccountState := false
 	acc.mu.Lock()
 	if isManagedCodexAPIKeyAccount(acc) {
 		acc.Dead = false
@@ -1758,6 +1775,17 @@ func (h *proxyHandler) finalizeProxyResponse(reqID string, provider Provider, ac
 		acc.LastHealthyAt = now
 		acc.RateLimitUntil = time.Time{}
 	}
+	if isGitLabClaudeAccount(acc) {
+		shouldPersistAccountState = acc.Dead || !acc.RateLimitUntil.IsZero() || acc.GitLabQuotaExceededCount > 0 || acc.HealthStatus != "healthy" || acc.HealthError != ""
+		acc.Dead = false
+		acc.HealthStatus = "healthy"
+		acc.HealthError = ""
+		acc.HealthCheckedAt = now
+		acc.LastHealthyAt = now
+		acc.RateLimitUntil = time.Time{}
+		acc.GitLabQuotaExceededCount = 0
+		acc.GitLabLastQuotaExceededAt = time.Time{}
+	}
 	acc.LastUsed = now
 	if acc.Penalty > 0 {
 		acc.Penalty *= 0.5
@@ -1766,6 +1794,11 @@ func (h *proxyHandler) finalizeProxyResponse(reqID string, provider Provider, ac
 		}
 	}
 	acc.mu.Unlock()
+	if shouldPersistAccountState {
+		if err := saveAccount(acc); err != nil {
+			log.Printf("[%s] warning: failed to persist healthy gitlab claude account %s: %v", reqID, acc.ID, err)
+		}
+	}
 }
 
 func (h *proxyHandler) applyRateLimit(a *Account, hdr http.Header, fallback time.Duration) time.Duration {
@@ -2391,7 +2424,8 @@ func (h *proxyHandler) refreshAccountOnce(ctx context.Context, a *Account) error
 	// Per-account rate limiting (persisted to disk via LastRefresh)
 	a.mu.Lock()
 	sinceLastRefresh := time.Since(a.LastRefresh)
-	if !a.LastRefresh.IsZero() && sinceLastRefresh < refreshPerAccountInterval {
+	skipPerAccountThrottle := isGitLabClaudeAccount(a)
+	if !skipPerAccountThrottle && !a.LastRefresh.IsZero() && sinceLastRefresh < refreshPerAccountInterval {
 		a.mu.Unlock()
 		return fmt.Errorf("account refresh rate limited (%s), wait %v", a.ID, refreshPerAccountInterval-sinceLastRefresh)
 	}

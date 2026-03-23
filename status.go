@@ -119,39 +119,46 @@ type PlanCapacityView struct {
 
 // AccountStatus shows the status of a single account.
 type AccountStatus struct {
-	ID                 string               `json:"id"`
-	Type               string               `json:"type"`
-	PlanType           string               `json:"plan_type,omitempty"`
-	AuthMode           string               `json:"auth_mode,omitempty"`
-	AccountID          string               `json:"account_id,omitempty"`
-	Email              string               `json:"email,omitempty"`
-	Subject            string               `json:"subject,omitempty"`
-	ChatGPTUserID      string               `json:"chatgpt_user_id,omitempty"`
-	WorkspaceID        string               `json:"workspace_id,omitempty"`
-	SeatKey            string               `json:"seat_key,omitempty"`
-	FallbackOnly       bool                 `json:"fallback_only,omitempty"`
-	Disabled           bool                 `json:"disabled"`
-	Dead               bool                 `json:"dead"`
-	PrimaryUsed        float64              `json:"primary_used_pct"`
-	SecondaryUsed      float64              `json:"secondary_used_pct"`
-	EffectivePrimary   float64              `json:"effective_primary_pct"`
-	EffectiveSecondary float64              `json:"effective_secondary_pct"`
-	Routing            PoolDashboardRouting `json:"routing"`
-	RecoveryAt         string               `json:"recovery_at,omitempty"`
-	PrimaryResetIn     string               `json:"primary_reset_in,omitempty"`
-	SecondaryResetIn   string               `json:"secondary_reset_in,omitempty"`
-	LastRefreshAt      string               `json:"last_refresh_at,omitempty"`
-	AuthExpiresAt      string               `json:"auth_expires_at,omitempty"`
-	AuthExpiresIn      string               `json:"auth_expires_in,omitempty"`
-	HealthStatus       string               `json:"health_status,omitempty"`
-	HealthError        string               `json:"health_error,omitempty"`
-	HealthCheckedAt    string               `json:"health_checked_at,omitempty"`
-	LastHealthyAt      string               `json:"last_healthy_at,omitempty"`
-	LocalLastUsed      string               `json:"local_last_used,omitempty"`
-	UsageObserved      string               `json:"usage_observed,omitempty"`
-	Score              float64              `json:"score"`
-	Inflight           int64                `json:"inflight"`
-	LocalTokens        int64                `json:"local_tokens"`
+	ID                       string               `json:"id"`
+	Type                     string               `json:"type"`
+	PlanType                 string               `json:"plan_type,omitempty"`
+	AuthMode                 string               `json:"auth_mode,omitempty"`
+	AccountID                string               `json:"account_id,omitempty"`
+	Email                    string               `json:"email,omitempty"`
+	Subject                  string               `json:"subject,omitempty"`
+	ChatGPTUserID            string               `json:"chatgpt_user_id,omitempty"`
+	WorkspaceID              string               `json:"workspace_id,omitempty"`
+	SeatKey                  string               `json:"seat_key,omitempty"`
+	FallbackOnly             bool                 `json:"fallback_only,omitempty"`
+	Disabled                 bool                 `json:"disabled"`
+	Dead                     bool                 `json:"dead"`
+	PrimaryUsed              float64              `json:"primary_used_pct"`
+	SecondaryUsed            float64              `json:"secondary_used_pct"`
+	EffectivePrimary         float64              `json:"effective_primary_pct"`
+	EffectiveSecondary       float64              `json:"effective_secondary_pct"`
+	Routing                  PoolDashboardRouting `json:"routing"`
+	RecoveryAt               string               `json:"recovery_at,omitempty"`
+	PrimaryResetIn           string               `json:"primary_reset_in,omitempty"`
+	SecondaryResetIn         string               `json:"secondary_reset_in,omitempty"`
+	LastRefreshAt            string               `json:"last_refresh_at,omitempty"`
+	AuthExpiresAt            string               `json:"auth_expires_at,omitempty"`
+	AuthExpiresIn            string               `json:"auth_expires_in,omitempty"`
+	HealthStatus             string               `json:"health_status,omitempty"`
+	HealthError              string               `json:"health_error,omitempty"`
+	HealthCheckedAt          string               `json:"health_checked_at,omitempty"`
+	LastHealthyAt            string               `json:"last_healthy_at,omitempty"`
+	LocalLastUsed            string               `json:"local_last_used,omitempty"`
+	UsageObserved            string               `json:"usage_observed,omitempty"`
+	GitLabRateLimitName      string               `json:"gitlab_rate_limit_name,omitempty"`
+	GitLabRateLimitLimit     int                  `json:"gitlab_rate_limit_limit,omitempty"`
+	GitLabRateLimitRemaining int                  `json:"gitlab_rate_limit_remaining"`
+	GitLabRateLimitResetAt   string               `json:"gitlab_rate_limit_reset_at,omitempty"`
+	GitLabRateLimitResetIn   string               `json:"gitlab_rate_limit_reset_in,omitempty"`
+	GitLabQuotaExceededCount int                  `json:"gitlab_quota_exceeded_count,omitempty"`
+	GitLabQuotaProbeIn       string               `json:"gitlab_quota_probe_in,omitempty"`
+	Score                    float64              `json:"score"`
+	Inflight                 int64                `json:"inflight"`
+	LocalTokens              int64                `json:"local_tokens"`
 }
 
 type PoolDashboardRouting struct {
@@ -351,16 +358,6 @@ func seatKeyFor(claims codexJWTClaims, workspaceID, fallback string) string {
 	return seatIdentity + "|" + workspaceID
 }
 
-func poolIdentityForAccount(a *Account) (codexJWTClaims, string, string) {
-	if isManagedCodexAPIKeyAccount(a) {
-		return codexJWTClaims{}, "", firstNonEmpty(a.ID, "openai_api")
-	}
-	claims := parseCodexClaims(a.IDToken)
-	workspaceID := firstNonEmpty(a.AccountID, a.IDTokenChatGPTAccountID, claims.ChatGPTAccountID)
-	seatKey := seatKeyFor(claims, workspaceID, a.ID)
-	return claims, workspaceID, seatKey
-}
-
 func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 	data := StatusData{
 		GeneratedAt: now,
@@ -382,14 +379,17 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 	activeSeatCount := 0
 
 	h.pool.mu.RLock()
-	data.TotalCount = len(h.pool.accounts)
-	for _, a := range h.pool.accounts {
-		a.mu.Lock()
+	accounts := append([]*Account(nil), h.pool.accounts...)
+	h.pool.mu.RUnlock()
 
-		switch a.Type {
+	data.TotalCount = len(accounts)
+	for _, a := range accounts {
+		snapshot := snapshotAccountState(a, now, "", "")
+
+		switch snapshot.Type {
 		case AccountTypeCodex:
 			data.CodexCount++
-			if isManagedCodexAPIKeyAccount(a) {
+			if snapshot.FallbackOnly {
 				data.OpenAIAPIPool.TotalKeys++
 			} else {
 				data.CodexSeatCount++
@@ -404,63 +404,62 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 			data.MinimaxCount++
 		}
 
-		routing := routingStateLocked(a, now, "", "")
+		routing := snapshot.Routing
 		routingRow := buildPoolDashboardRouting(routing, now)
 		primaryUsed := routing.PrimaryUsed
 		secondaryUsed := routing.SecondaryUsed
 		effectivePrimary := primaryUsed
 		effectiveSecondary := secondaryUsed
-		authMode := accountAuthMode(a)
-		claims, workspaceID, seatKey := poolIdentityForAccount(a)
+		claims, workspaceID, seatKey := poolIdentityForSnapshot(snapshot)
 
 		status := AccountStatus{
-			ID:                 a.ID,
-			Type:               string(a.Type),
-			PlanType:           a.PlanType,
-			AuthMode:           authMode,
-			AccountID:          firstNonEmpty(a.AccountID, a.IDTokenChatGPTAccountID),
+			ID:                 snapshot.ID,
+			Type:               string(snapshot.Type),
+			PlanType:           snapshot.PlanType,
+			AuthMode:           snapshot.AuthMode,
+			AccountID:          firstNonEmpty(snapshot.AccountID, snapshot.IDTokenChatGPTAccountID),
 			Email:              claims.Email,
 			Subject:            claims.Subject,
 			ChatGPTUserID:      claims.ChatGPTUserID,
 			WorkspaceID:        workspaceID,
 			SeatKey:            seatKey,
-			FallbackOnly:       isManagedCodexAPIKeyAccount(a),
-			Disabled:           a.Disabled,
-			Dead:               a.Dead,
+			FallbackOnly:       snapshot.FallbackOnly,
+			Disabled:           snapshot.Disabled,
+			Dead:               snapshot.Dead,
 			PrimaryUsed:        primaryUsed * 100,
 			SecondaryUsed:      secondaryUsed * 100,
 			EffectivePrimary:   effectivePrimary * 100,
 			EffectiveSecondary: effectiveSecondary * 100,
 			Routing:            routingRow,
-			Score:              scoreAccountLocked(a, now),
-			Inflight:           a.Inflight,
-			LocalTokens:        a.Totals.TotalBillableTokens,
+			Score:              snapshot.Score,
+			Inflight:           snapshot.Inflight,
+			LocalTokens:        snapshot.Totals.TotalBillableTokens,
 		}
 		if routingRow.RecoveryAt != "" {
 			status.RecoveryAt = routingRow.RecoveryAt
 		}
-		if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(now) {
-			status.PrimaryResetIn = formatDuration(a.Usage.PrimaryResetAt.Sub(now))
-		} else if a.Usage.PrimaryWindowMinutes > 0 {
-			status.PrimaryResetIn = fmt.Sprintf("~%dm", a.Usage.PrimaryWindowMinutes)
+		if !snapshot.Usage.PrimaryResetAt.IsZero() && snapshot.Usage.PrimaryResetAt.After(now) {
+			status.PrimaryResetIn = formatDuration(snapshot.Usage.PrimaryResetAt.Sub(now))
+		} else if snapshot.Usage.PrimaryWindowMinutes > 0 {
+			status.PrimaryResetIn = fmt.Sprintf("~%dm", snapshot.Usage.PrimaryWindowMinutes)
 		}
-		if !a.Usage.SecondaryResetAt.IsZero() && a.Usage.SecondaryResetAt.After(now) {
-			status.SecondaryResetIn = formatDuration(a.Usage.SecondaryResetAt.Sub(now))
-		} else if a.Usage.SecondaryWindowMinutes > 0 {
-			status.SecondaryResetIn = fmt.Sprintf("~%dd", a.Usage.SecondaryWindowMinutes/60/24)
+		if !snapshot.Usage.SecondaryResetAt.IsZero() && snapshot.Usage.SecondaryResetAt.After(now) {
+			status.SecondaryResetIn = formatDuration(snapshot.Usage.SecondaryResetAt.Sub(now))
+		} else if snapshot.Usage.SecondaryWindowMinutes > 0 {
+			status.SecondaryResetIn = fmt.Sprintf("~%dd", snapshot.Usage.SecondaryWindowMinutes/60/24)
 		}
-		if !a.LastRefresh.IsZero() {
-			status.LastRefreshAt = a.LastRefresh.UTC().Format(time.RFC3339)
+		if !snapshot.LastRefresh.IsZero() {
+			status.LastRefreshAt = snapshot.LastRefresh.UTC().Format(time.RFC3339)
 		}
-		if !a.HealthCheckedAt.IsZero() {
-			status.HealthCheckedAt = a.HealthCheckedAt.UTC().Format(time.RFC3339)
+		if !snapshot.HealthCheckedAt.IsZero() {
+			status.HealthCheckedAt = snapshot.HealthCheckedAt.UTC().Format(time.RFC3339)
 		}
-		if !a.LastHealthyAt.IsZero() {
-			status.LastHealthyAt = a.LastHealthyAt.UTC().Format(time.RFC3339)
+		if !snapshot.LastHealthyAt.IsZero() {
+			status.LastHealthyAt = snapshot.LastHealthyAt.UTC().Format(time.RFC3339)
 		}
-		status.HealthStatus = strings.TrimSpace(a.HealthStatus)
-		status.HealthError = sanitizeStatusMessage(a.HealthError)
-		authExpiresAt := a.ExpiresAt
+		status.HealthStatus = strings.TrimSpace(snapshot.HealthStatus)
+		status.HealthError = sanitizeStatusMessage(snapshot.HealthError)
+		authExpiresAt := snapshot.ExpiresAt
 		if authExpiresAt.IsZero() && !claims.ExpiresAt.IsZero() {
 			authExpiresAt = claims.ExpiresAt
 		}
@@ -472,15 +471,33 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 				status.AuthExpiresIn = formatDuration(authExpiresAt.Sub(now))
 			}
 		}
-		if !a.LastUsed.IsZero() {
-			status.LocalLastUsed = formatDuration(now.Sub(a.LastUsed)) + " ago"
+		if !snapshot.LastUsed.IsZero() {
+			status.LocalLastUsed = formatDuration(now.Sub(snapshot.LastUsed)) + " ago"
 		} else {
 			status.LocalLastUsed = "never"
 		}
-		if !a.Usage.RetrievedAt.IsZero() {
-			status.UsageObserved = firstNonEmpty(a.Usage.Source, "usage") + " · " + formatDuration(now.Sub(a.Usage.RetrievedAt)) + " ago"
-		} else if strings.TrimSpace(a.Usage.Source) != "" {
-			status.UsageObserved = strings.TrimSpace(a.Usage.Source)
+		if !snapshot.Usage.RetrievedAt.IsZero() {
+			status.UsageObserved = firstNonEmpty(snapshot.Usage.Source, "usage") + " · " + formatDuration(now.Sub(snapshot.Usage.RetrievedAt)) + " ago"
+		} else if strings.TrimSpace(snapshot.Usage.Source) != "" {
+			status.UsageObserved = strings.TrimSpace(snapshot.Usage.Source)
+		}
+		if snapshot.GitLabClaude {
+			status.GitLabRateLimitName = strings.TrimSpace(snapshot.GitLabRateLimitName)
+			status.GitLabRateLimitLimit = snapshot.GitLabRateLimitLimit
+			status.GitLabRateLimitRemaining = snapshot.GitLabRateLimitRemaining
+			status.GitLabQuotaExceededCount = snapshot.GitLabQuotaExceededCount
+			if !snapshot.GitLabRateLimitResetAt.IsZero() {
+				status.GitLabRateLimitResetAt = snapshot.GitLabRateLimitResetAt.UTC().Format(time.RFC3339)
+				if snapshot.GitLabRateLimitResetAt.After(now) {
+					status.GitLabRateLimitResetIn = formatDuration(snapshot.GitLabRateLimitResetAt.Sub(now))
+				}
+			}
+			if snapshot.GitLabQuotaExceededCount > 0 && !snapshot.RateLimitUntil.IsZero() && snapshot.RateLimitUntil.After(now) {
+				status.GitLabQuotaProbeIn = formatDuration(snapshot.RateLimitUntil.Sub(now))
+			}
+			if status.UsageObserved == "" {
+				status.UsageObserved = "local totals only · GitLab quota hidden"
+			}
 		}
 
 		providerKey := status.Type
@@ -527,7 +544,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		if status.Inflight > 0 {
 			activeSeatCount++
 		}
-		candidate := currentSeatCandidate{status: status, lastUsed: a.LastUsed}
+		candidate := currentSeatCandidate{status: status, lastUsed: snapshot.LastUsed}
 		candidateByID[status.ID] = candidate
 		if status.Inflight > 0 && prefersLiveSeat(candidate, activeSeat) {
 			candidateCopy := candidate
@@ -552,7 +569,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 				}
 			}
 		}
-		if isGitLabClaudeAccount(a) {
+		if snapshot.GitLabClaude {
 			data.GitLabClaudePool.TotalTokens++
 			if status.Dead {
 				data.GitLabClaudePool.DeadTokens++
@@ -569,10 +586,8 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 			}
 		}
 
-		a.mu.Unlock()
 		data.Accounts = append(data.Accounts, status)
 	}
-	h.pool.mu.RUnlock()
 
 	data.PoolUtilization = h.pool.getPoolUtilization()
 	for _, utilization := range data.PoolUtilization {
@@ -1321,7 +1336,9 @@ const statusHTML = `<!DOCTYPE html>
                 {{if .FallbackOnly}}<br><small><span class="tag tag-api">fallback</span></small>{{end}}
                 <br><small class="detail-line">headroom {{printf "%.0f%%" .Routing.PrimaryHeadroomPct}} / {{printf "%.0f%%" .Routing.SecondaryHeadroomPct}}</small>
                 {{if .UsageObserved}}<br><small class="detail-line">usage {{.UsageObserved}}</small>{{end}}
-                {{if .FallbackOnly}}<br><small class="detail-line" title="{{sanitize .HealthError}}">health {{if .HealthStatus}}{{.HealthStatus}}{{else}}unknown{{end}}{{if .HealthError}} · {{clip (sanitize .HealthError) 88}}{{end}}</small>{{end}}
+                {{if .GitLabRateLimitName}}<br><small class="detail-line" title="{{.GitLabRateLimitName}}{{if .GitLabRateLimitResetAt}} · reset {{.GitLabRateLimitResetAt}}{{end}}">gitlab api {{.GitLabRateLimitRemaining}}/{{.GitLabRateLimitLimit}}{{if .GitLabRateLimitResetIn}} · resets in {{.GitLabRateLimitResetIn}}{{end}}</small>{{end}}
+                {{if .GitLabQuotaExceededCount}}<br><small class="detail-line">quota backoff ×{{.GitLabQuotaExceededCount}}{{if .GitLabQuotaProbeIn}} · next probe {{.GitLabQuotaProbeIn}}{{end}}</small>{{end}}
+                {{if or .FallbackOnly (eq .PlanType "gitlab_duo")}}<br><small class="detail-line" title="{{sanitize .HealthError}}">health {{if .HealthStatus}}{{.HealthStatus}}{{else}}unknown{{end}}{{if .HealthError}} · {{clip (sanitize .HealthError) 88}}{{end}}</small>{{end}}
             </td>
             <td class="usage-cell">
                 {{remainingBar .Routing.PrimaryHeadroomPct}}<small>remaining {{pct .Routing.PrimaryHeadroomPct}}</small>

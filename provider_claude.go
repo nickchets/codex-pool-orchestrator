@@ -35,30 +35,30 @@ func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, 
 
 	if strings.TrimSpace(cj.GitLabToken) != "" {
 		acc := &Account{
-			Type:            AccountTypeClaude,
-			ID:              strings.TrimSuffix(name, filepath.Ext(name)),
-			File:            path,
-			AccessToken:     strings.TrimSpace(cj.GitLabGatewayToken),
-			RefreshToken:    strings.TrimSpace(cj.GitLabToken),
-			PlanType:        firstNonEmpty(strings.TrimSpace(cj.PlanType), "gitlab_duo"),
-			AuthMode:        accountAuthModeGitLab,
-			Disabled:        cj.Disabled,
-			Dead:            cj.Dead,
-			HealthStatus:    strings.TrimSpace(cj.HealthStatus),
-			HealthError:     strings.TrimSpace(cj.HealthError),
-			SourceBaseURL:   firstNonEmpty(strings.TrimSpace(cj.GitLabInstanceURL), defaultGitLabInstanceURL),
-			UpstreamBaseURL: firstNonEmpty(strings.TrimSpace(cj.GitLabGatewayBaseURL), defaultGitLabClaudeGatewayURL),
-			ExtraHeaders:    copyStringMap(cj.GitLabGatewayHeaders),
+			Type:                      AccountTypeClaude,
+			ID:                        strings.TrimSuffix(name, filepath.Ext(name)),
+			File:                      path,
+			AccessToken:               strings.TrimSpace(cj.GitLabGatewayToken),
+			RefreshToken:              strings.TrimSpace(cj.GitLabToken),
+			PlanType:                  firstNonEmpty(strings.TrimSpace(cj.PlanType), "gitlab_duo"),
+			AuthMode:                  accountAuthModeGitLab,
+			Disabled:                  cj.Disabled,
+			Dead:                      cj.Dead,
+			HealthStatus:              strings.TrimSpace(cj.HealthStatus),
+			HealthError:               strings.TrimSpace(cj.HealthError),
+			SourceBaseURL:             firstNonEmpty(strings.TrimSpace(cj.GitLabInstanceURL), defaultGitLabInstanceURL),
+			UpstreamBaseURL:           firstNonEmpty(strings.TrimSpace(cj.GitLabGatewayBaseURL), defaultGitLabClaudeGatewayURL),
+			ExtraHeaders:              copyStringMap(cj.GitLabGatewayHeaders),
+			GitLabRateLimitName:       strings.TrimSpace(cj.GitLabRateLimitName),
+			GitLabRateLimitLimit:      cj.GitLabRateLimitLimit,
+			GitLabRateLimitRemaining:  cj.GitLabRateLimitRemaining,
+			GitLabRateLimitResetAt:    cj.GitLabRateLimitResetAt,
+			GitLabQuotaExceededCount:  cj.GitLabQuotaExceededCount,
+			GitLabLastQuotaExceededAt: cj.GitLabLastQuotaExceededAt,
+			RateLimitUntil:            cj.RateLimitUntil,
 		}
-		var root map[string]any
-		if err := json.Unmarshal(data, &root); err == nil {
-			if lr, ok := root["last_refresh"].(string); ok && lr != "" {
-				if t, err := time.Parse(time.RFC3339Nano, lr); err == nil {
-					acc.LastRefresh = t
-				} else if t, err := time.Parse(time.RFC3339, lr); err == nil {
-					acc.LastRefresh = t
-				}
-			}
+		if cj.LastRefresh != nil {
+			acc.LastRefresh = cj.LastRefresh.UTC()
 		}
 		if !cj.GitLabGatewayExpiresAt.IsZero() {
 			acc.ExpiresAt = cj.GitLabGatewayExpiresAt
@@ -68,6 +68,9 @@ func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, 
 		}
 		if cj.LastHealthyAt != nil {
 			acc.LastHealthyAt = *cj.LastHealthyAt
+		}
+		if acc.GitLabQuotaExceededCount == 0 && acc.HealthStatus == "quota_exceeded" && !acc.RateLimitUntil.IsZero() {
+			acc.GitLabQuotaExceededCount = 1
 		}
 		if acc.HealthStatus == "" {
 			acc.HealthStatus = "unknown"

@@ -23,6 +23,20 @@ _(none)_
 
 ### DONE
 
+#### REPO-CPO-REFAC-P1-T16: Harden GitLab Claude persistence and health truth
+1. Collapse `saveGitLabClaudeAccount` to one fail-closed persistence path so managed GitLab Claude files stop relying on dual serialization branches and ad hoc map rewrites.
+2. Shorten dashboard/status lock scope and keep GitLab health/rate-limit state truthful even when refresh or quota probes fail.
+3. Lock the slice with focused GitLab/status tests and a live `/status?format=json` smoke on the restarted service.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestClaudeProviderLoadsGitLabManagedAccount|TestClaudeProviderRefreshGitLabManagedAccount|TestClassifyManagedGitLabClaudeErrorQuotaExceeded|TestBuildPoolDashboardDataShowsGitLabDirectAccessSignals|TestServeStatusPageReturnsJSONForFormatQuery' ./... && go build -o /home/lap/.local/bin/codex-pool . && systemctl --user restart codex-pool.service && curl -fsS http://127.0.0.1:8989/healthz && python3 - <<'PY'\nimport json, urllib.request\npayload = json.load(urllib.request.urlopen('http://127.0.0.1:8989/status?format=json'))\nassert payload['gitlab_claude_pool']['total_tokens'] >= 0\nassert 'accounts' in payload and isinstance(payload['accounts'], list)\nPY`
+
+#### REPO-CPO-UI-P1-T15: Turn the local landing page into a dashboard-first operator surface
+1. Replace the decorative local landing hierarchy with an operator-first dashboard shell that uses `/status?format=json` as the single live data source.
+2. Make the `Codex`, `Claude`, and `Gemini` tabs render provider-specific live summaries, operator actions, and filtered account tables instead of setup-first marketing panels.
+3. Move setup/manual blocks below the live dashboards, remove hero-image-driven presentation from the local landing, and lock the slice with landing HTML tests plus a local visual smoke.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction|TestServeStatusPageReturnsJSONForFormatQuery|TestBuildPoolDashboardDataShowsGitLabDirectAccessSignals' ./... && go build ./... && curl -fsS http://127.0.0.1:8989/ >/tmp/cpo_local_landing_dashboard.html && rg -n 'Codex Dashboard|Claude Dashboard|Gemini Dashboard|Fallback API Pool|GitLab Claude Pool' /tmp/cpo_local_landing_dashboard.html && ! rg -n '/hero.png|hero-art|hero-wrapper' /tmp/cpo_local_landing_dashboard.html`
+
 #### REPO-CPO-BUG-P1-T14: Count non-stream Claude message usage in local totals
 1. Ensure ordinary non-stream Claude `/v1/messages` JSON responses contribute to local usage aggregates instead of only SSE `message_start` / `message_delta` events.
 2. Lock the regression with a focused parser/accounting test that exercises a top-level Anthropic `{"type":"message","usage":...}` payload.

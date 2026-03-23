@@ -719,3 +719,205 @@ func TestApplyPreCopyUpstreamStatusDispositionTransientCodexAuthAddsPenalty(t *t
 		t.Fatalf("penalty = %v", acc.Penalty)
 	}
 }
+
+func TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededPersistsCooldown(t *testing.T) {
+	tmp := t.TempDir()
+	accFile := filepath.Join(tmp, "claude_gitlab_deadbeef.json")
+	if err := os.WriteFile(accFile, []byte(`{
+		"plan_type":"gitlab_duo",
+		"auth_mode":"gitlab_duo",
+		"gitlab_token":"glpat-source",
+		"gitlab_gateway_token":"gateway-token",
+		"gitlab_gateway_headers":{"X-Gitlab-Instance-Id":"inst-1"},
+		"gitlab_gateway_base_url":"https://cloud.gitlab.com/ai/v1/proxy/anthropic",
+		"last_refresh":"2026-03-23T09:00:00Z"
+	}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	acc := &Account{
+		ID:              "claude_gitlab_deadbeef",
+		Type:            AccountTypeClaude,
+		File:            accFile,
+		PlanType:        "gitlab_duo",
+		AuthMode:        accountAuthModeGitLab,
+		RefreshToken:    "glpat-source",
+		AccessToken:     "gateway-token",
+		SourceBaseURL:   "https://gitlab.com",
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders:    map[string]string{"X-Gitlab-Instance-Id": "inst-1"},
+		LastRefresh:     time.Date(2026, 3, 23, 9, 0, 0, 0, time.UTC),
+	}
+	h := &proxyHandler{}
+	resp := &http.Response{
+		StatusCode: http.StatusPaymentRequired,
+		Status:     "402 Payment Required",
+		Header:     http.Header{},
+	}
+
+	err := h.applyPreCopyUpstreamStatusDisposition(
+		"req-test",
+		acc,
+		resp,
+		false,
+		[]byte(`{"error":"insufficient_credits","error_code":"USAGE_QUOTA_EXCEEDED"}`),
+	)
+
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if acc.Dead {
+		t.Fatal("expected gitlab account to remain live")
+	}
+	if acc.HealthStatus != "quota_exceeded" {
+		t.Fatalf("health_status=%q", acc.HealthStatus)
+	}
+	if acc.RateLimitUntil.IsZero() {
+		t.Fatal("expected RateLimitUntil to be set")
+	}
+	if acc.GitLabQuotaExceededCount != 1 {
+		t.Fatalf("gitlab_quota_exceeded_count=%d", acc.GitLabQuotaExceededCount)
+	}
+	saved, err := os.ReadFile(accFile)
+	if err != nil {
+		t.Fatalf("read auth file: %v", err)
+	}
+	if !strings.Contains(string(saved), "\"rate_limit_until\"") {
+		t.Fatalf("expected rate_limit_until in saved file: %s", string(saved))
+	}
+	if !strings.Contains(string(saved), "\"gitlab_quota_exceeded_count\": 1") {
+		t.Fatalf("expected gitlab_quota_exceeded_count in saved file: %s", string(saved))
+	}
+}
+
+func TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededBackoffEscalates(t *testing.T) {
+	acc := &Account{
+		ID:              "claude_gitlab_deadbeef",
+		Type:            AccountTypeClaude,
+		PlanType:        "gitlab_duo",
+		AuthMode:        accountAuthModeGitLab,
+		RefreshToken:    "glpat-source",
+		AccessToken:     "gateway-token",
+		SourceBaseURL:   "https://gitlab.com",
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders:    map[string]string{"X-Gitlab-Instance-Id": "inst-1"},
+	}
+	disposition := classifyManagedGitLabClaudeError(
+		managedGitLabClaudeErrorSourceGatewayRequest,
+		http.StatusPaymentRequired,
+		http.Header{},
+		[]byte(`{"error":"insufficient_credits","error_code":"USAGE_QUOTA_EXCEEDED"}`),
+	)
+
+	now1 := time.Date(2026, 3, 23, 10, 0, 0, 0, time.UTC)
+	applyManagedGitLabClaudeDisposition(acc, disposition, http.Header{}, now1)
+	if got := acc.RateLimitUntil.Sub(now1); got != 30*time.Minute {
+		t.Fatalf("first cooldown=%v", got)
+	}
+
+	now2 := now1.Add(31 * time.Minute)
+	applyManagedGitLabClaudeDisposition(acc, disposition, http.Header{}, now2)
+	if got := acc.RateLimitUntil.Sub(now2); got != time.Hour {
+		t.Fatalf("second cooldown=%v", got)
+	}
+	if acc.GitLabQuotaExceededCount != 2 {
+		t.Fatalf("gitlab_quota_exceeded_count=%d", acc.GitLabQuotaExceededCount)
+	}
+}
+
+func TestRefreshAccountOnceGitLabBypassesPerAccountThrottle(t *testing.T) {
+	baseURL, _ := url.Parse("https://claude.example.com")
+	provider := NewClaudeProvider(baseURL)
+	h := &proxyHandler{
+		registry: &ProviderRegistry{
+			byType: map[AccountType]Provider{
+				AccountTypeClaude: provider,
+			},
+		},
+		refreshTransport: gitlabClaudeRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return gitlabClaudeJSONResponse(http.StatusOK, `{
+				"token": "gateway-token-fresh",
+				"base_url": "https://cloud.gitlab.com/ai/v1/proxy/anthropic",
+				"expires_at": 1911111111,
+				"headers": {
+					"X-Gitlab-Instance-Id": "inst-1",
+					"X-Gitlab-Realm": "saas"
+				}
+			}`), nil
+		}),
+	}
+
+	acc := &Account{
+		ID:            "claude_gitlab_deadbeef",
+		Type:          AccountTypeClaude,
+		File:          filepath.Join(t.TempDir(), "claude_gitlab_deadbeef.json"),
+		PlanType:      "gitlab_duo",
+		AuthMode:      accountAuthModeGitLab,
+		RefreshToken:  "glpat-source",
+		SourceBaseURL: "https://gitlab.example.com",
+		LastRefresh:   time.Now().UTC(),
+	}
+	if err := os.WriteFile(acc.File, []byte(`{"plan_type":"gitlab_duo","auth_mode":"gitlab_duo","gitlab_token":"glpat-source"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	if err := h.refreshAccountOnce(context.Background(), acc); err != nil {
+		t.Fatalf("refreshAccountOnce: %v", err)
+	}
+	if acc.AccessToken != "gateway-token-fresh" {
+		t.Fatalf("access_token=%q", acc.AccessToken)
+	}
+}
+
+func TestFinalizeProxyResponseResetsGitLabQuotaBackoffAfterSuccess(t *testing.T) {
+	accFile := filepath.Join(t.TempDir(), "claude_gitlab_deadbeef.json")
+	if err := os.WriteFile(accFile, []byte(`{
+		"plan_type":"gitlab_duo",
+		"auth_mode":"gitlab_duo",
+		"gitlab_token":"glpat-source",
+		"gitlab_gateway_token":"gateway-token",
+		"gitlab_gateway_headers":{"X-Gitlab-Instance-Id":"inst-1"},
+		"gitlab_gateway_base_url":"https://cloud.gitlab.com/ai/v1/proxy/anthropic",
+		"gitlab_quota_exceeded_count":2,
+		"rate_limit_until":"2026-03-23T12:00:00Z",
+		"health_status":"quota_exceeded",
+		"health_error":"quota"
+	}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	h := &proxyHandler{}
+	acc := &Account{
+		ID:                       "claude_gitlab_deadbeef",
+		Type:                     AccountTypeClaude,
+		File:                     accFile,
+		PlanType:                 "gitlab_duo",
+		AuthMode:                 accountAuthModeGitLab,
+		RefreshToken:             "glpat-source",
+		AccessToken:              "gateway-token",
+		SourceBaseURL:            "https://gitlab.com",
+		UpstreamBaseURL:          defaultGitLabClaudeGatewayURL,
+		ExtraHeaders:             map[string]string{"X-Gitlab-Instance-Id": "inst-1"},
+		GitLabQuotaExceededCount: 2,
+		RateLimitUntil:           time.Date(2026, 3, 23, 12, 0, 0, 0, time.UTC),
+		HealthStatus:             "quota_exceeded",
+		HealthError:              "quota",
+	}
+
+	h.finalizeProxyResponse("req-test", &ClaudeProvider{}, acc, "pool-user", http.StatusOK, false, false, "", 0, 0, []byte(`{"type":"message","usage":{"input_tokens":1,"output_tokens":1}}`))
+
+	if acc.GitLabQuotaExceededCount != 0 {
+		t.Fatalf("gitlab_quota_exceeded_count=%d", acc.GitLabQuotaExceededCount)
+	}
+	if !acc.RateLimitUntil.IsZero() {
+		t.Fatalf("rate_limit_until=%v", acc.RateLimitUntil)
+	}
+	if acc.HealthStatus != "healthy" {
+		t.Fatalf("health_status=%q", acc.HealthStatus)
+	}
+	saved, err := os.ReadFile(accFile)
+	if err != nil {
+		t.Fatalf("read auth file: %v", err)
+	}
+	if strings.Contains(string(saved), "\"gitlab_quota_exceeded_count\"") {
+		t.Fatalf("expected saved file to clear quota count: %s", string(saved))
+	}
+}

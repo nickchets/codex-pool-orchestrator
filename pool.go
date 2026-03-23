@@ -120,6 +120,11 @@ func routingStateLocked(a *Account, now time.Time, accountType AccountType, requ
 		state.BlockReason = "plan_mismatch"
 		return state
 	}
+	if isGitLabClaudeAccount(a) && missingGitLabClaudeGatewayState(a) {
+		state.Eligible = false
+		state.BlockReason = "missing_gateway_state"
+		return state
+	}
 	if (a.Type != AccountTypeCodex || isManagedCodexAPI) && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
 		state.Eligible = false
 		state.BlockReason = "rate_limited"
@@ -165,26 +170,32 @@ type Account struct {
 	AccountID string
 	// IDTokenChatGPTAccountID is the `chatgpt_account_id` claim extracted from the ID token.
 	// We keep it for debugging/fallback but prefer AccountID when present.
-	IDTokenChatGPTAccountID string
-	PlanType                string
-	AuthMode                string
-	Disabled                bool
-	Inflight                int64
-	ExpiresAt               time.Time
-	LastRefresh             time.Time
-	Usage                   UsageSnapshot
-	Penalty                 float64
-	LastPenalty             time.Time
-	Dead                    bool
-	LastUsed                time.Time
-	RateLimitUntil          time.Time
-	HealthStatus            string
-	HealthError             string
-	HealthCheckedAt         time.Time
-	LastHealthyAt           time.Time
-	SourceBaseURL           string
-	UpstreamBaseURL         string
-	ExtraHeaders            map[string]string
+	IDTokenChatGPTAccountID   string
+	PlanType                  string
+	AuthMode                  string
+	Disabled                  bool
+	Inflight                  int64
+	ExpiresAt                 time.Time
+	LastRefresh               time.Time
+	Usage                     UsageSnapshot
+	Penalty                   float64
+	LastPenalty               time.Time
+	Dead                      bool
+	LastUsed                  time.Time
+	RateLimitUntil            time.Time
+	HealthStatus              string
+	HealthError               string
+	HealthCheckedAt           time.Time
+	LastHealthyAt             time.Time
+	SourceBaseURL             string
+	UpstreamBaseURL           string
+	ExtraHeaders              map[string]string
+	GitLabRateLimitName       string
+	GitLabRateLimitLimit      int
+	GitLabRateLimitRemaining  int
+	GitLabRateLimitResetAt    time.Time
+	GitLabQuotaExceededCount  int
+	GitLabLastQuotaExceededAt time.Time
 
 	// Aggregated token counters (in-memory for now; persist later)
 	Totals AccountUsage
@@ -356,18 +367,26 @@ type ClaudeAuthJSON struct {
 	ClaudeAiOauth *ClaudeOAuthData `json:"claudeAiOauth,omitempty"`
 
 	// GitLab-managed Claude format.
-	GitLabToken            string            `json:"gitlab_token,omitempty"`
-	GitLabInstanceURL      string            `json:"gitlab_instance_url,omitempty"`
-	GitLabGatewayToken     string            `json:"gitlab_gateway_token,omitempty"`
-	GitLabGatewayBaseURL   string            `json:"gitlab_gateway_base_url,omitempty"`
-	GitLabGatewayHeaders   map[string]string `json:"gitlab_gateway_headers,omitempty"`
-	GitLabGatewayExpiresAt time.Time         `json:"gitlab_gateway_expires_at,omitempty"`
-	Disabled               bool              `json:"disabled,omitempty"`
-	Dead                   bool              `json:"dead,omitempty"`
-	HealthStatus           string            `json:"health_status,omitempty"`
-	HealthError            string            `json:"health_error,omitempty"`
-	HealthCheckedAt        *time.Time        `json:"health_checked_at,omitempty"`
-	LastHealthyAt          *time.Time        `json:"last_healthy_at,omitempty"`
+	GitLabToken               string            `json:"gitlab_token,omitempty"`
+	GitLabInstanceURL         string            `json:"gitlab_instance_url,omitempty"`
+	GitLabGatewayToken        string            `json:"gitlab_gateway_token,omitempty"`
+	GitLabGatewayBaseURL      string            `json:"gitlab_gateway_base_url,omitempty"`
+	GitLabGatewayHeaders      map[string]string `json:"gitlab_gateway_headers,omitempty"`
+	GitLabGatewayExpiresAt    time.Time         `json:"gitlab_gateway_expires_at,omitempty"`
+	GitLabRateLimitName       string            `json:"gitlab_rate_limit_name,omitempty"`
+	GitLabRateLimitLimit      int               `json:"gitlab_rate_limit_limit,omitempty"`
+	GitLabRateLimitRemaining  int               `json:"gitlab_rate_limit_remaining,omitempty"`
+	GitLabRateLimitResetAt    time.Time         `json:"gitlab_rate_limit_reset_at,omitempty"`
+	GitLabQuotaExceededCount  int               `json:"gitlab_quota_exceeded_count,omitempty"`
+	GitLabLastQuotaExceededAt time.Time         `json:"gitlab_last_quota_exceeded_at,omitempty"`
+	RateLimitUntil            time.Time         `json:"rate_limit_until,omitempty"`
+	LastRefresh               *time.Time        `json:"last_refresh,omitempty"`
+	Disabled                  bool              `json:"disabled,omitempty"`
+	Dead                      bool              `json:"dead,omitempty"`
+	HealthStatus              string            `json:"health_status,omitempty"`
+	HealthError               string            `json:"health_error,omitempty"`
+	HealthCheckedAt           *time.Time        `json:"health_checked_at,omitempty"`
+	LastHealthyAt             *time.Time        `json:"last_healthy_at,omitempty"`
 }
 
 // ClaudeOAuthData is the OAuth token structure from Claude Code.

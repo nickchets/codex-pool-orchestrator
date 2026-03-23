@@ -14,6 +14,9 @@
 - Local status page: `curl -fsS http://127.0.0.1:8989/status`
 - Local health probe: `curl -fsS http://127.0.0.1:8989/healthz`
 - Live proxy smoke: `AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && curl -sS -N http://127.0.0.1:8989/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}'`
+- GitLab Claude direct token truth check: `python3 - <<'PY' ... direct_access -> /v1/messages ... PY`
+- GitLab Claude pool fallback smoke: `POOL_USER_TOKEN=$(jq -r '.[0].token' /home/lap/.root_layer/codex_pool/data/pool_users.json) && CLAUDE_POOL_TOKEN=$(curl -fsS --max-time 15 "http://127.0.0.1:8989/config/claude/${POOL_USER_TOKEN}" | jq -r '.access_token') && curl -sS --max-time 90 -D - -X POST http://127.0.0.1:8989/v1/messages -H "Authorization: Bearer ${CLAUDE_POOL_TOKEN}" -H 'Content-Type: application/json' -H 'anthropic-version: 2023-06-01' --data '{"model":"claude-sonnet-4-20250514","max_tokens":64,"messages":[{"role":"user","content":"Reply with exactly OK"}]}'`
+- Claude CLI wrapper smoke: `timeout 120s fish -lc 'claude --model sonnet -p "Reply with exactly OK."'`
 
 ## Notes
 - Repo-local product debugging happens here; root-only routing/debug policy remains in `/home/lap/DEBUG.md`.

@@ -9,7 +9,16 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
-## [Unreleased] - 0.5.0-dev
+## [0.5.0] - 2026-03-23
+
+### Added
+- GitLab-backed Claude pooling with managed Duo direct-access token minting.
+- Operator-facing GitLab Claude token onboarding and pool visibility in `/status`.
+- Dashboard-first local landing with live `Codex`, `Claude`, and `Gemini` views powered by `/status?format=json`.
+- Additional operator controls for fallback API keys, GitLab Claude tokens, and manual account deletion on the local dashboard surfaces.
+- GitLab-specific status/admin visibility for cooldowns, quota backoff counters, and direct-access rate-limit signals.
+- Repo-local engineering governance files: `ACTION_PLAN.md`, `DEBUG.md`,
+  `EVIDENCE_LOG.md`, and `PROJECT_MANIFEST.md`.
 
 ### Changed
 - Extracted proxy admission logic out of the main request handler.
@@ -17,11 +26,15 @@ The format is loosely based on Keep a Changelog. Versioning rules are defined in
 - Enforced Codex seat cutoff at `>= 90%` usage and added sticky seat reuse.
 - Unified usage ingestion across body, headers, and stream paths.
 - Extracted shared response stream usage recording helpers.
+- Reused shared retry/error/finalization handling across buffered, streamed, and websocket proxy paths.
+- Replaced the old setup-first local landing with a provider-dashboard-first operator surface and removed the decorative hero treatment.
+- Hardened managed GitLab Claude persistence into one canonical fail-closed serializer and shortened status/admin lock scope with snapshot-based rendering.
 
-### Added
-- Admission, request-planning, and usage-ingestion regression tests for the refactor path.
-- Repo-local engineering governance files: `ACTION_PLAN.md`, `DEBUG.md`,
-  `EVIDENCE_LOG.md`, and `PROJECT_MANIFEST.md`.
+### Fixed
+- Ordinary non-stream Claude `/v1/messages` responses now contribute to local usage totals.
+- Streamed and websocket managed-upstream inspection now preserves client-visible error bodies while still classifying retryable failures.
+- GitLab Claude gateway `402/401/403` handling now rotates correctly, persists cooldown state, and avoids falsely killing healthy source tokens.
+- Malformed successful GitLab direct-access refresh responses now become explicit `error` state and clear stale gateway auth material instead of remaining deceptively healthy.
 
 ## [0.4.0] - 2026-03-22
 

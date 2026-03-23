@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"sync/atomic"
 	"time"
 )
 
@@ -23,82 +22,78 @@ func (h *proxyHandler) serveHealth(w http.ResponseWriter) {
 
 func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 	type routingRow struct {
-		Eligible               bool      `json:"eligible"`
-		BlockReason            string    `json:"block_reason,omitempty"`
-		PrimaryUsedPct         float64   `json:"primary_used_pct"`
-		SecondaryUsedPct       float64   `json:"secondary_used_pct"`
-		PrimaryHeadroomPct     float64   `json:"primary_headroom_pct"`
-		SecondaryHeadroomPct   float64   `json:"secondary_headroom_pct"`
-		RecoveryAt             time.Time `json:"recovery_at,omitempty"`
-		CodexRateLimitBypass   bool      `json:"codex_rate_limit_bypass,omitempty"`
-		PreemptiveThresholdPct float64   `json:"preemptive_threshold_pct,omitempty"`
+		Eligible               bool       `json:"eligible"`
+		BlockReason            string     `json:"block_reason,omitempty"`
+		PrimaryUsedPct         float64    `json:"primary_used_pct"`
+		SecondaryUsedPct       float64    `json:"secondary_used_pct"`
+		PrimaryHeadroomPct     float64    `json:"primary_headroom_pct"`
+		SecondaryHeadroomPct   float64    `json:"secondary_headroom_pct"`
+		RecoveryAt             *time.Time `json:"recovery_at,omitempty"`
+		CodexRateLimitBypass   bool       `json:"codex_rate_limit_bypass,omitempty"`
+		PreemptiveThresholdPct float64    `json:"preemptive_threshold_pct,omitempty"`
 	}
 	type row struct {
-		ID                      string      `json:"id"`
-		Type                    AccountType `json:"type"`
-		PlanType                string      `json:"plan_type,omitempty"`
-		AccountID               string      `json:"account_id,omitempty"`
-		IDTokenChatGPTAccountID string      `json:"id_token_chatgpt_account_id,omitempty"`
-		Disabled                bool        `json:"disabled"`
-		Dead                    bool        `json:"dead"`
-		Inflight                int64       `json:"inflight"`
-		ExpiresAt               time.Time   `json:"expires_at,omitempty"`
-		LastRefresh             time.Time   `json:"last_refresh,omitempty"`
-		Penalty                 float64     `json:"penalty"`
-		Score                   float64     `json:"score"`
-		IsPrimary               bool        `json:"is_primary"`
-		Routing                 routingRow  `json:"routing"`
-		Usage                   any         `json:"usage"`
-		Totals                  any         `json:"totals"`
+		ID                        string      `json:"id"`
+		Type                      AccountType `json:"type"`
+		PlanType                  string      `json:"plan_type,omitempty"`
+		AccountID                 string      `json:"account_id,omitempty"`
+		IDTokenChatGPTAccountID   string      `json:"id_token_chatgpt_account_id,omitempty"`
+		HealthStatus              string      `json:"health_status,omitempty"`
+		HealthError               string      `json:"health_error,omitempty"`
+		GitLabQuotaExceededCount  int         `json:"gitlab_quota_exceeded_count,omitempty"`
+		GitLabLastQuotaExceededAt *time.Time  `json:"gitlab_last_quota_exceeded_at,omitempty"`
+		Disabled                  bool        `json:"disabled"`
+		Dead                      bool        `json:"dead"`
+		Inflight                  int64       `json:"inflight"`
+		ExpiresAt                 *time.Time  `json:"expires_at,omitempty"`
+		LastRefresh               *time.Time  `json:"last_refresh,omitempty"`
+		Penalty                   float64     `json:"penalty"`
+		Score                     float64     `json:"score"`
+		IsPrimary                 bool        `json:"is_primary"`
+		Routing                   routingRow  `json:"routing"`
+		Usage                     any         `json:"usage"`
+		Totals                    any         `json:"totals"`
 	}
 	now := time.Now()
 	h.pool.mu.RLock()
-	out := make([]row, 0, len(h.pool.accounts))
-	for _, a := range h.pool.accounts {
-		a.mu.Lock()
-		planType := a.PlanType
-		accountID := a.AccountID
-		idTokID := a.IDTokenChatGPTAccountID
-		disabled := a.Disabled
-		dead := a.Dead
-		expiresAt := a.ExpiresAt
-		lastRefresh := a.LastRefresh
-		penalty := a.Penalty
-		routing := routingStateLocked(a, now, "", "")
-		score := scoreAccountLocked(a, now)
-		usage := a.Usage
-		totals := a.Totals
-		a.mu.Unlock()
+	accounts := append([]*Account(nil), h.pool.accounts...)
+	h.pool.mu.RUnlock()
 
+	out := make([]row, 0, len(accounts))
+	for _, a := range accounts {
+		snapshot := snapshotAccountState(a, now, "", "")
 		out = append(out, row{
-			ID:                      a.ID,
-			Type:                    a.Type,
-			PlanType:                planType,
-			AccountID:               accountID,
-			IDTokenChatGPTAccountID: idTokID,
-			Disabled:                disabled,
-			Dead:                    dead,
-			Inflight:                atomic.LoadInt64(&a.Inflight),
-			ExpiresAt:               expiresAt,
-			LastRefresh:             lastRefresh,
-			Penalty:                 penalty,
-			Score:                   score,
+			ID:                        snapshot.ID,
+			Type:                      snapshot.Type,
+			PlanType:                  snapshot.PlanType,
+			AccountID:                 snapshot.AccountID,
+			IDTokenChatGPTAccountID:   snapshot.IDTokenChatGPTAccountID,
+			HealthStatus:              snapshot.HealthStatus,
+			HealthError:               snapshot.HealthError,
+			GitLabQuotaExceededCount:  snapshot.GitLabQuotaExceededCount,
+			GitLabLastQuotaExceededAt: timePtrUTC(snapshot.GitLabLastQuotaExceededAt),
+			Disabled:                  snapshot.Disabled,
+			Dead:                      snapshot.Dead,
+			Inflight:                  snapshot.Inflight,
+			ExpiresAt:                 timePtrUTC(snapshot.ExpiresAt),
+			LastRefresh:               timePtrUTC(snapshot.LastRefresh),
+			Penalty:                   snapshot.Penalty,
+			Score:                     snapshot.Score,
 			Routing: routingRow{
-				Eligible:               routing.Eligible,
-				BlockReason:            routing.BlockReason,
-				PrimaryUsedPct:         routing.PrimaryUsed * 100,
-				SecondaryUsedPct:       routing.SecondaryUsed * 100,
-				PrimaryHeadroomPct:     routing.PrimaryHeadroom * 100,
-				SecondaryHeadroomPct:   routing.SecondaryHeadroom * 100,
-				RecoveryAt:             routing.RecoveryAt,
-				CodexRateLimitBypass:   routing.CodexRateLimitBypass,
+				Eligible:               snapshot.Routing.Eligible,
+				BlockReason:            snapshot.Routing.BlockReason,
+				PrimaryUsedPct:         snapshot.Routing.PrimaryUsed * 100,
+				SecondaryUsedPct:       snapshot.Routing.SecondaryUsed * 100,
+				PrimaryHeadroomPct:     snapshot.Routing.PrimaryHeadroom * 100,
+				SecondaryHeadroomPct:   snapshot.Routing.SecondaryHeadroom * 100,
+				RecoveryAt:             timePtrUTC(snapshot.Routing.RecoveryAt),
+				CodexRateLimitBypass:   snapshot.Routing.CodexRateLimitBypass,
 				PreemptiveThresholdPct: codexPreemptiveUsedThreshold * 100,
 			},
-			Usage:  usage,
-			Totals: totals,
+			Usage:  snapshot.Usage,
+			Totals: snapshot.Totals,
 		})
 	}
-	h.pool.mu.RUnlock()
 
 	// Mark highest-scoring non-dead account per type as primary
 	highestScore := make(map[AccountType]float64)

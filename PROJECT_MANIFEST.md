@@ -42,3 +42,5 @@ Run `codex-pool-orchestrator` as a repo-local product capsule that provides a mu
 - The next governed bugfix slice on 2026-03-22 hardened Codex seat selection so exact `90%` quota thresholds now block fresh routing, streamed requests retain session affinity when possible, and `/status` previews match the real sticky selector.
 - The next governed refactor wave on 2026-03-22 unified usage ingestion under a shared `UsageDelta` contract so provider parsers and non-SSE body fallback no longer maintain separate token/rate-limit parsing branches.
 - The following refactor slice on 2026-03-22 collapsed duplicated SSE usage interception between buffered and streamed proxy paths without changing retry or routing behavior.
+- The current Claude/GitLab product track is repo-local: GitLab-backed Claude pooling, quota/fallback truth, and operator-facing Claude dashboard behavior belong in this capsule rather than in root control-plane docs.
+- The current operator-surface track is to make `/` a dashboard-first local operator page that reuses the same live `/status?format=json` contract instead of drifting into a separate setup-only landing UI.

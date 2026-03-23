@@ -6,871 +6,1807 @@
     <title>AI Pool</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;0,600;1,400&family=Space+Mono:ital,wght@0,400;0,700;1,400&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-color: #050505;
-            --card-bg: #0e0e0e;
-            --text-main: #e0e0e0;
-            --text-muted: #666;
-            --gold-dim: #8a7039;
-            --gold-bright: #d4af37;
-            --gold-glow: rgba(212, 175, 55, 0.15);
-            --border-outer: #1a1a1a;
-            --border-inner: #252525;
-            --code-bg: #080808;
-            --success-green: #27ae60;
-            --error-red: #c0392b;
-
-            --panel-gradient: linear-gradient(145deg, #111, #0a0a0a);
-            --metallic-gradient: linear-gradient(135deg, #b38b38 0%, #d4af37 50%, #8a7039 100%);
-            --inset-shadow: inset 2px 2px 5px rgba(0,0,0,0.8), inset -1px -1px 1px rgba(255,255,255,0.05);
-            --outset-shadow: 5px 5px 10px rgba(0,0,0,0.5), -1px -1px 1px rgba(255,255,255,0.03);
+            --bg: #06070a;
+            --bg-elevated: #10131a;
+            --panel: rgba(15, 19, 26, 0.92);
+            --panel-strong: #141925;
+            --panel-soft: #0d1118;
+            --border: rgba(180, 190, 210, 0.18);
+            --border-strong: rgba(220, 228, 245, 0.18);
+            --text: #edf1fb;
+            --muted: #98a2b8;
+            --accent: #8ec5ff;
+            --accent-strong: #4ba1ff;
+            --success: #35c38f;
+            --warning: #e7b95a;
+            --danger: #ef6f6c;
+            --shadow: 0 18px 54px rgba(0, 0, 0, 0.38);
+            --radius: 22px;
+            --radius-sm: 14px;
+            --mono: 'IBM Plex Mono', monospace;
+            --sans: 'Space Grotesk', sans-serif;
         }
 
-        * { box-sizing: border-box; }
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            margin: 0;
+            min-height: 100%;
+        }
 
         body {
-            background-color: var(--bg-color);
-            background-image:
-                radial-gradient(circle at 50% 0%, rgba(30,30,30,1) 0%, transparent 60%),
-                url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.05'/%3E%3C/svg%3E");
-            color: var(--text-main);
-            font-family: 'Space Mono', monospace;
+            background:
+                radial-gradient(circle at top left, rgba(75, 161, 255, 0.16), transparent 28%),
+                radial-gradient(circle at top right, rgba(53, 195, 143, 0.1), transparent 24%),
+                linear-gradient(180deg, #080b11 0%, #05070a 100%);
+            color: var(--text);
+            font-family: var(--sans);
+            padding: 28px;
+        }
+
+        a {
+            color: inherit;
+        }
+
+        code,
+        pre,
+        .mono {
+            font-family: var(--mono);
+        }
+
+        .shell {
+            max-width: 1380px;
+            margin: 0 auto;
+        }
+
+        .masthead {
             display: flex;
-            justify-content: center;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 20px;
+            margin-bottom: 24px;
+        }
+
+        .eyebrow {
+            display: inline-flex;
             align-items: center;
-            min-height: 100vh;
-            margin: 0;
-            padding: 20px;
-            -webkit-font-smoothing: antialiased;
-        }
-
-        .container {
-            width: 100%;
-            max-width: 850px;
-            position: relative;
-            padding: 40px;
-            background: var(--card-bg);
-            border-radius: 4px;
-            box-shadow:
-                0 0 0 1px #1a1a1a,
-                0 20px 50px rgba(0,0,0,0.8),
-                0 0 100px rgba(0,0,0,0.5);
-            overflow: hidden;
-            transition: min-height 0.38s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-
-        .container::before {
-            content: "";
-            position: absolute;
-            top: 0; left: 0; right: 0; height: 1px;
-            background: linear-gradient(90deg, transparent, var(--gold-dim), transparent);
-            opacity: 0.3;
-        }
-
-        .texture-overlay {
-            position: absolute;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.03'/%3E%3C/svg%3E");
-            pointer-events: none;
-            z-index: 0;
-        }
-
-        .content-relative {
-            position: relative;
-            z-index: 1;
-        }
-
-        .hero-wrapper {
-            width: 100%;
-            max-width: 220px;
-            margin: 0 auto 20px;
-            position: relative;
-        }
-
-        .hero-wrapper::before {
-            content: "";
-            position: absolute;
-            top: 50%; left: 50%;
-            width: 120px; height: 120px;
-            transform: translate(-50%, -50%);
-            background: radial-gradient(circle, var(--gold-glow) 0%, transparent 70%);
-            filter: blur(20px);
-            z-index: -1;
-        }
-
-        .hero-art {
-            width: 100%;
-            height: auto;
-            display: block;
-            opacity: 0.95;
-            filter: contrast(1.1) drop-shadow(0 10px 20px rgba(0,0,0,0.5));
-        }
-
-        .hero-label {
-            position: absolute;
-            bottom: 10px;
-            left: 50%;
-            transform: translateX(-50%);
-            font-family: 'Space Mono', monospace;
-            font-size: 0.9rem;
+            gap: 8px;
+            padding: 6px 12px;
+            border-radius: 999px;
+            background: rgba(142, 197, 255, 0.12);
+            border: 1px solid rgba(142, 197, 255, 0.2);
+            color: var(--accent);
+            font-size: 0.74rem;
             font-weight: 700;
+            letter-spacing: 0.08em;
             text-transform: uppercase;
-            letter-spacing: 0.3em;
-            color: var(--gold-bright);
-            text-shadow: 0 2px 8px rgba(0,0,0,0.9), 0 0 20px rgba(0,0,0,0.8);
+        }
+
+        .masthead h1 {
+            margin: 14px 0 10px;
+            font-size: clamp(2rem, 3vw, 3rem);
+            line-height: 1;
+        }
+
+        .masthead p {
+            max-width: 760px;
+            margin: 0;
+            color: var(--muted);
+            line-height: 1.6;
+        }
+
+        .head-meta {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            align-items: flex-end;
         }
 
         .status-badge {
-            display: inline-block;
-            padding: 6px 16px;
-            border-radius: 20px;
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            background: rgba(39, 174, 96, 0.15);
-            color: var(--success-green);
-            border: 1px solid rgba(39, 174, 96, 0.3);
-            margin-bottom: 30px;
-        }
-
-        .header {
-            text-align: center;
-        }
-
-        /* Main Tabs */
-        .tabs {
-            display: flex;
-            justify-content: center;
-            gap: 6px;
-            margin-bottom: 40px;
-            background: #080808;
-            padding: 6px;
-            border-radius: 50px;
-            box-shadow: var(--inset-shadow);
-            max-width: 580px;
-            margin-left: auto;
-            margin-right: auto;
-        }
-
-        .tab {
-            cursor: pointer;
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            color: #555;
-            padding: 8px 14px;
-            border-radius: 40px;
-            transition: all 0.3s ease;
-            display: flex;
+            display: inline-flex;
             align-items: center;
-            gap: 6px;
+            justify-content: center;
+            min-width: 126px;
+            padding: 10px 16px;
+            border-radius: 999px;
+            border: 1px solid rgba(53, 195, 143, 0.24);
+            background: rgba(53, 195, 143, 0.12);
+            color: var(--success);
+            font-size: 0.82rem;
             font-weight: 700;
-            letter-spacing: 0.5px;
-        }
-
-        .tab svg { width: 16px; height: 16px; fill: currentColor; opacity: 0.7; }
-
-        .tab.active {
-            color: #000;
-            background: var(--metallic-gradient);
-            box-shadow:
-                0 2px 10px rgba(0,0,0,0.5),
-                inset 0 1px 0 rgba(255,255,255,0.4);
-            text-shadow: none;
-        }
-
-        .tab:hover:not(.active) {
-            color: #999;
-        }
-
-        .tab-content {
-            display: block;
-            opacity: 0;
-            visibility: hidden;
-            max-height: 0;
-            overflow: hidden;
-            transform: translateY(10px);
-            pointer-events: none;
-            transition: opacity 0.24s ease, transform 0.24s ease, max-height 0.34s ease;
-        }
-        .tab-content.active {
-            opacity: 1;
-            visibility: visible;
-            max-height: 5000px;
-            transform: translateY(0);
-            pointer-events: auto;
-            animation: slideUp 0.32s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-
-        @keyframes slideUp {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-
-        /* Sub Tabs */
-        .sub-tabs {
-            display: flex;
-            justify-content: center;
-            gap: 10px;
-            margin-bottom: 25px;
-        }
-
-        .sub-tab {
-            font-size: 0.75rem;
-            text-transform: uppercase;
-            color: #555;
-            padding: 6px 14px;
-            border: 1px solid #222;
-            cursor: pointer;
-            transition: all 0.2s;
-            border-radius: 2px;
-            background: linear-gradient(180deg, #151515, #101010);
-        }
-
-        .sub-tab:hover { color: #888; border-color: #333; }
-        .sub-tab.active {
-            border-color: var(--gold-dim);
-            color: var(--gold-bright);
-            background: rgba(212, 175, 55, 0.05);
-            box-shadow: 0 0 10px rgba(0,0,0,0.5);
-        }
-
-        .sub-tab-content {
-            display: block;
-            opacity: 0;
-            visibility: hidden;
-            max-height: 0;
-            overflow: hidden;
-            transform: translateY(8px);
-            pointer-events: none;
-            transition: opacity 0.2s ease, transform 0.2s ease, max-height 0.28s ease;
-        }
-        .sub-tab-content.active {
-            opacity: 1;
-            visibility: visible;
-            max-height: 2400px;
-            transform: translateY(0);
-            pointer-events: auto;
-            animation: fadeIn 0.26s ease;
-        }
-
-        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
-
-        /* Installation Section & Code */
-        .install-section {
-            margin-bottom: 2.5rem;
-            padding: 25px;
-            background: #0a0a0a;
-            border: 1px solid #1a1a1a;
-            border-radius: 8px;
-            box-shadow: inset 0 0 20px rgba(0,0,0,0.5);
-        }
-
-        .section-header {
-            font-family: 'Cormorant Garamond', serif;
-            font-size: 1.3rem;
-            color: var(--text-main);
-            margin-bottom: 1.2rem;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            border-bottom: 1px solid #1a1a1a;
-            padding-bottom: 10px;
-        }
-
-        .section-header svg { width: 20px; height: 20px; fill: var(--gold-bright); }
-
-        .step-label {
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            color: var(--gold-dim);
-            margin: 1.5rem 0 0.8rem;
-            display: flex;
-            align-items: center;
-            letter-spacing: 1.5px;
-        }
-
-        .step-label::before {
-            content: "";
-            display: inline-block;
-            width: 8px; height: 8px;
-            background: var(--gold-dim);
-            margin-right: 10px;
-            border-radius: 50%;
-            box-shadow: 0 0 5px var(--gold-dim);
-        }
-
-        /* Code Blocks */
-        .code-wrapper {
-            position: relative;
-            background: #050505;
-            border: 1px solid #1a1a1a;
-            border-radius: 4px;
-            margin-bottom: 1.5rem;
-            box-shadow: var(--inset-shadow);
-        }
-
-        .code-block {
-            padding: 20px;
-            font-size: 0.85rem;
-            line-height: 1.6;
-            color: #aaa;
-            overflow-x: auto;
-            font-family: 'Space Mono', monospace;
-        }
-
-        pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
-        code { color: #d4d4d4; }
-        .highlight { color: var(--gold-bright); }
-
-        .copy-btn {
-            position: absolute;
-            top: 8px; right: 8px;
-            background: #111;
-            border: 1px solid #333;
-            color: #555;
-            font-family: 'Space Mono', monospace;
-            font-size: 0.6rem;
-            padding: 4px 10px;
-            cursor: pointer;
-            text-transform: uppercase;
-            transition: all 0.2s;
-            width: auto;
-            margin: 0;
-            border-radius: 2px;
-            box-shadow: none;
-        }
-
-        .copy-btn:hover {
-            border-color: var(--gold-dim);
-            color: var(--gold-bright);
-            box-shadow: 0 0 8px rgba(212, 175, 55, 0.2);
-            transform: none;
-        }
-        .copy-btn.copied { border-color: var(--success-green); color: var(--success-green); }
-
-        .action-btn {
-            width: 100%;
-            border: 1px solid var(--gold-dim);
-            background: linear-gradient(180deg, rgba(212, 175, 55, 0.16), rgba(138, 112, 57, 0.12));
-            color: var(--gold-bright);
-            font-family: 'Space Mono', monospace;
-            font-size: 0.78rem;
             letter-spacing: 0.08em;
             text-transform: uppercase;
-            padding: 14px 16px;
-            border-radius: 4px;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            box-shadow: 0 10px 24px rgba(0,0,0,0.25);
         }
 
-        .action-btn:hover {
-            border-color: var(--gold-bright);
-            box-shadow: 0 0 12px rgba(212, 175, 55, 0.18);
+        .status-badge.is-error {
+            color: var(--danger);
+            border-color: rgba(239, 111, 108, 0.24);
+            background: rgba(239, 111, 108, 0.12);
+        }
+
+        .status-badge.is-warn {
+            color: var(--warning);
+            border-color: rgba(231, 185, 90, 0.24);
+            background: rgba(231, 185, 90, 0.12);
+        }
+
+        .head-links {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
+
+        .head-links a {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            padding: 10px 14px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.02);
+            text-decoration: none;
+            color: var(--muted);
+            font-size: 0.78rem;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+        }
+
+        .head-links a:hover {
+            border-color: rgba(142, 197, 255, 0.34);
+            color: var(--text);
+        }
+
+        .overview-grid,
+        .summary-grid,
+        .card-grid {
+            display: grid;
+            gap: 14px;
+        }
+
+        .overview-grid {
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            margin-bottom: 16px;
+        }
+
+        .summary-grid {
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            margin-bottom: 18px;
+        }
+
+        .card-grid {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .stat-card,
+        .metric-card,
+        .surface,
+        .details-card {
+            border: 1px solid var(--border);
+            background: var(--panel);
+            backdrop-filter: blur(18px);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+        }
+
+        .stat-card,
+        .metric-card {
+            padding: 18px 20px;
+        }
+
+        .stat-label,
+        .metric-label {
+            color: var(--muted);
+            font-size: 0.78rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .stat-value,
+        .metric-value {
+            margin-top: 12px;
+            font-size: clamp(1.4rem, 2vw, 2rem);
+            font-weight: 700;
+            letter-spacing: -0.03em;
+        }
+
+        .stat-detail,
+        .metric-detail {
+            margin-top: 8px;
+            color: var(--muted);
+            font-size: 0.92rem;
+            line-height: 1.45;
+        }
+
+        .metric-card.tone-success {
+            border-color: rgba(53, 195, 143, 0.28);
+        }
+
+        .metric-card.tone-warning {
+            border-color: rgba(231, 185, 90, 0.28);
+        }
+
+        .metric-card.tone-danger {
+            border-color: rgba(239, 111, 108, 0.28);
+        }
+
+        .provider-pills {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 22px;
+        }
+
+        .provider-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 14px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.02);
+            color: var(--muted);
+            font-size: 0.82rem;
+            font-weight: 600;
+        }
+
+        .provider-pill strong {
+            color: var(--text);
+            font-weight: 700;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 18px;
+            padding: 8px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: rgba(8, 10, 14, 0.72);
+        }
+
+        .tab-btn {
+            appearance: none;
+            border: 0;
+            background: transparent;
+            color: var(--muted);
+            font-family: var(--sans);
+            font-size: 0.92rem;
+            font-weight: 700;
+            padding: 12px 18px;
+            border-radius: 999px;
+            cursor: pointer;
+            transition: background 0.2s ease, color 0.2s ease;
+        }
+
+        .tab-btn[aria-selected="true"] {
+            color: #07111d;
+            background: linear-gradient(135deg, #8ec5ff 0%, #b5d8ff 50%, #7bb3f1 100%);
+        }
+
+        .tab-btn:hover:not([aria-selected="true"]) {
+            color: var(--text);
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .provider-panel {
+            display: none;
+        }
+
+        .provider-panel.active {
+            display: block;
+        }
+
+        .provider-header {
+            margin-bottom: 18px;
+        }
+
+        .provider-header h2 {
+            margin: 0 0 8px;
+            font-size: 1.55rem;
+            line-height: 1.1;
+        }
+
+        .provider-header p {
+            margin: 0;
+            color: var(--muted);
+            line-height: 1.6;
+            max-width: 880px;
+        }
+
+        .content-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1.35fr) minmax(340px, 0.95fr);
+            gap: 18px;
+            margin-bottom: 18px;
+        }
+
+        .surface {
+            padding: 22px;
+            margin-bottom: 18px;
+        }
+
+        .surface:last-child {
+            margin-bottom: 0;
+        }
+
+        .surface-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 14px;
+            margin-bottom: 16px;
+        }
+
+        .surface-header h3 {
+            margin: 0;
+            font-size: 1.05rem;
+            line-height: 1.2;
+        }
+
+        .surface-header p {
+            margin: 6px 0 0;
+            color: var(--muted);
+            line-height: 1.55;
+        }
+
+        .surface-header .meta {
+            color: var(--muted);
+            font-size: 0.82rem;
+            white-space: nowrap;
+        }
+
+        .action-stack {
+            display: grid;
+            gap: 16px;
+        }
+
+        .action-card {
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 16px;
+            background: var(--panel-soft);
+        }
+
+        .action-card p {
+            margin: 0 0 14px;
+            color: var(--muted);
+            line-height: 1.6;
+        }
+
+        .input-row {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .input-row input {
+            flex: 1 1 220px;
+            min-width: 0;
+            appearance: none;
+            border: 1px solid var(--border);
+            background: rgba(255, 255, 255, 0.03);
+            color: var(--text);
+            padding: 12px 14px;
+            border-radius: 12px;
+            font: inherit;
+        }
+
+        .input-row input:focus {
+            outline: 0;
+            border-color: rgba(142, 197, 255, 0.4);
+            box-shadow: 0 0 0 4px rgba(142, 197, 255, 0.08);
+        }
+
+        .action-btn,
+        .inline-btn,
+        .copy-btn {
+            appearance: none;
+            border: 1px solid transparent;
+            cursor: pointer;
+            font: inherit;
+            transition: transform 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+        }
+
+        .action-btn,
+        .inline-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 12px 14px;
+            border-radius: 12px;
+            background: linear-gradient(135deg, rgba(75, 161, 255, 0.18), rgba(75, 161, 255, 0.08));
+            border-color: rgba(75, 161, 255, 0.22);
+            color: var(--text);
+            font-weight: 700;
+        }
+
+        .action-btn:hover,
+        .inline-btn:hover,
+        .copy-btn:hover {
             transform: translateY(-1px);
         }
 
-        .action-btn:disabled {
+        .action-btn:disabled,
+        .inline-btn:disabled {
+            opacity: 0.62;
             cursor: wait;
-            opacity: 0.7;
             transform: none;
-            box-shadow: none;
         }
 
-        /* Stats Styling */
-        .stat-card {
-            background: linear-gradient(145deg, #111, #0c0c0c);
-            border: 1px solid #1a1a1a;
-            padding: 20px;
-            text-align: center;
-            border-radius: 6px;
-            box-shadow: 5px 5px 15px rgba(0,0,0,0.3), -5px -5px 15px rgba(255,255,255,0.01);
+        .inline-btn.is-danger {
+            background: rgba(239, 111, 108, 0.08);
+            border-color: rgba(239, 111, 108, 0.24);
+            color: #ffd7d5;
+        }
+
+        .status-line {
+            margin-top: 12px;
+            min-height: 1.3em;
+            color: var(--muted);
+            font-size: 0.88rem;
+            line-height: 1.5;
+        }
+
+        .code-shell {
             position: relative;
+            margin-top: 12px;
+            border-radius: 16px;
+            border: 1px solid var(--border);
+            background: #07090d;
             overflow: hidden;
         }
 
-        .stat-card::after {
-            content: "";
+        .copy-btn {
             position: absolute;
-            top: 0; left: 0; width: 100%; height: 2px;
-            background: linear-gradient(90deg, transparent, var(--gold-dim), transparent);
-            opacity: 0.5;
-        }
-
-        .stat-value {
-            color: var(--text-main);
-            font-size: 2.2rem;
-            font-family: 'Cormorant Garamond', serif;
-            font-weight: 400;
-            margin-bottom: 5px;
-            text-shadow: 0 2px 5px rgba(0,0,0,0.8);
-        }
-
-        .stat-label {
-            color: var(--text-muted);
-            font-size: 0.7rem;
+            top: 10px;
+            right: 10px;
+            padding: 8px 10px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.04);
+            border-color: var(--border);
+            color: var(--muted);
+            font-size: 0.74rem;
+            font-weight: 700;
+            letter-spacing: 0.06em;
             text-transform: uppercase;
-            letter-spacing: 1px;
         }
 
-        .progress-track {
-            flex: 1;
-            background: #050505;
-            height: 12px;
-            border-radius: 6px;
-            box-shadow: inset 1px 1px 3px rgba(0,0,0,0.8), inset -1px -1px 1px rgba(255,255,255,0.05);
-            overflow: hidden;
-            border: 1px solid #1a1a1a;
+        .copy-btn.copied {
+            color: var(--success);
+            border-color: rgba(53, 195, 143, 0.32);
         }
 
-        .progress-bar {
-            height: 100%;
-            background: linear-gradient(90deg, var(--gold-dim), var(--gold-bright));
-            width: 0%;
-            transition: width 0.8s cubic-bezier(0.2, 0.8, 0.2, 1);
-            box-shadow: 0 0 10px var(--gold-dim);
+        .code-shell pre {
+            margin: 0;
+            padding: 20px;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+            color: #d8def0;
+            font-size: 0.86rem;
+            line-height: 1.62;
         }
 
-        .table-container {
-            border: 1px solid #1a1a1a;
-            border-radius: 6px;
-            overflow: hidden;
-            background: #0a0a0a;
-            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        .summary-note {
+            color: var(--muted);
+            font-size: 0.84rem;
+            margin-top: 10px;
+            line-height: 1.55;
         }
 
-        table { width: 100%; border-collapse: collapse; }
+        .table-shell {
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            overflow: auto;
+            background: rgba(8, 10, 14, 0.6);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 760px;
+        }
+
+        th,
+        td {
+            padding: 13px 14px;
+            text-align: left;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            vertical-align: top;
+        }
 
         th {
-            background: #111;
-            padding: 15px;
-            text-align: left;
-            font-size: 0.65rem;
+            color: var(--muted);
+            font-size: 0.76rem;
+            letter-spacing: 0.08em;
             text-transform: uppercase;
-            letter-spacing: 1px;
-            color: #888;
-            border-bottom: 1px solid #222;
+            background: rgba(255, 255, 255, 0.02);
         }
 
         td {
-            padding: 15px;
-            font-size: 0.8rem;
-            border-bottom: 1px solid #151515;
-            color: #ccc;
+            font-size: 0.9rem;
+            line-height: 1.45;
         }
 
-        tr:last-child td { border-bottom: none; }
+        tr:last-child td {
+            border-bottom: 0;
+        }
+
+        .table-title {
+            font-weight: 700;
+        }
+
+        .table-meta {
+            margin-top: 4px;
+            color: var(--muted);
+            font-size: 0.8rem;
+            line-height: 1.45;
+        }
+
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            font-size: 0.74rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            border: 1px solid transparent;
+        }
+
+        .badge.tone-success {
+            color: var(--success);
+            background: rgba(53, 195, 143, 0.12);
+            border-color: rgba(53, 195, 143, 0.24);
+        }
+
+        .badge.tone-warning {
+            color: var(--warning);
+            background: rgba(231, 185, 90, 0.12);
+            border-color: rgba(231, 185, 90, 0.24);
+        }
+
+        .badge.tone-danger {
+            color: var(--danger);
+            background: rgba(239, 111, 108, 0.12);
+            border-color: rgba(239, 111, 108, 0.24);
+        }
+
+        .badge.tone-neutral {
+            color: var(--muted);
+            background: rgba(255, 255, 255, 0.04);
+            border-color: var(--border);
+        }
+
+        .empty-state {
+            padding: 18px 0 4px;
+            color: var(--muted);
+            line-height: 1.6;
+        }
+
+        .details-card {
+            padding: 0;
+            overflow: hidden;
+        }
+
+        .details-card summary {
+            list-style: none;
+            cursor: pointer;
+            padding: 18px 22px;
+            font-weight: 700;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .details-card summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .details-card summary::after {
+            content: '+';
+            color: var(--accent);
+            font-size: 1.2rem;
+            line-height: 1;
+        }
+
+        .details-card[open] summary::after {
+            content: '−';
+        }
+
+        .details-body {
+            padding: 0 22px 22px;
+            border-top: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .details-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 18px;
+            margin-top: 18px;
+        }
+
+        .detail-block h4 {
+            margin: 0 0 10px;
+            font-size: 0.92rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            color: var(--muted);
+        }
+
+        .detail-block p {
+            margin: 0 0 12px;
+            color: var(--muted);
+            line-height: 1.6;
+        }
 
         .footer {
+            margin-top: 22px;
             text-align: center;
-            margin-top: 30px;
-            padding-top: 20px;
-            border-top: 1px solid #1a1a1a;
+            color: var(--muted);
+            font-size: 0.84rem;
         }
 
         .footer a {
-            color: var(--text-muted);
             text-decoration: none;
-            font-size: 0.75rem;
-            text-transform: uppercase;
-            letter-spacing: 0.1em;
-            padding: 0 15px;
-            transition: color 0.2s;
+            margin: 0 8px;
         }
 
-        .footer a:hover { color: var(--gold-bright); }
+        .footer a:hover {
+            color: var(--text);
+        }
 
-        /* Responsive */
-        @media (max-width: 600px) {
-            .container { padding: 25px 20px; }
-            .hero-wrapper { max-width: 140px; }
+        @media (max-width: 1180px) {
+            .overview-grid,
+            .summary-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .card-grid,
+            .details-grid,
+            .content-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 760px) {
+            body {
+                padding: 18px;
+            }
+
+            .masthead {
+                flex-direction: column;
+            }
+
+            .head-meta {
+                width: 100%;
+                align-items: stretch;
+            }
+
+            .head-links {
+                justify-content: stretch;
+            }
+
+            .head-links a {
+                flex: 1 1 140px;
+            }
+
+            .overview-grid,
+            .summary-grid {
+                grid-template-columns: 1fr;
+            }
+
             .tabs {
                 flex-wrap: wrap;
-                gap: 8px;
-                border-radius: 12px;
-                padding: 10px;
-                max-width: 100%;
+                border-radius: 22px;
             }
-            .tab {
-                flex: 1 1 45%;
-                justify-content: center;
-                padding: 10px 12px;
+
+            .tab-btn {
+                flex: 1 1 calc(50% - 10px);
             }
         }
 
         @media (prefers-reduced-motion: reduce) {
-            .container,
-            .tab,
-            .sub-tab,
-            .tab-content,
-            .sub-tab-content,
-            .copy-btn,
-            .action-btn {
-                animation: none !important;
+            * {
+                scroll-behavior: auto !important;
                 transition: none !important;
+                animation: none !important;
             }
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <div class="texture-overlay"></div>
-        <div class="content-relative">
-            <div class="header">
-                <div class="hero-wrapper">
-                    <img src="/hero.png" alt="AI Pool" class="hero-art">
-                    <div class="hero-label">AI Pool</div>
-                </div>
-                <span class="status-badge" id="status-badge">Connecting...</span>
+    <div class="shell">
+        <header class="masthead">
+            <div>
+                <div class="eyebrow">Local Operator Dashboard</div>
+                <h1>AI Pool</h1>
+                <p>
+                    Dashboard-first local operator surface. Every live metric, table, and routing hint below is sourced
+                    from <code>/status?format=json</code> so the landing page does not drift away from the real pool state.
+                </p>
             </div>
-
-            <div class="tabs">
-                <div class="tab active" data-tab="codex">
-                    <svg viewBox="0 0 24 24"><path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.0462 6.0462 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944z"/></svg>
-                    Codex
-                </div>
-                <div class="tab" data-tab="claude">
-                    <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93z" fill="currentColor"/></svg>
-                    Claude
-                </div>
-                <div class="tab" data-tab="gemini">
-                    <svg viewBox="0 0 24 24"><path d="M12,2 L14.5,9.5 L22,12 L14.5,14.5 L12,22 L9.5,14.5 L2,12 L9.5,9.5 L12,2" fill="currentColor"/></svg>
-                    Gemini
-                </div>
-                <div class="tab" data-tab="stats">
-                    <svg viewBox="0 0 24 24"><path d="M3 3v18h18v-2H5V3H3zm4 12h2v4H7v-4zm4-6h2v10h-2V9zm4-4h2v14h-2V5zm4 8h2v6h-2v-6z" fill="currentColor"/></svg>
-                    Status
+            <div class="head-meta">
+                <div class="status-badge" id="status-badge">Connecting...</div>
+                <div class="head-links">
+                    <a href="/status">Full Status</a>
+                    <a href="/status?format=json">Status JSON</a>
                 </div>
             </div>
+        </header>
 
-            <!-- CODEX -->
-            <div id="tab-codex" class="tab-content active">
-                <div class="install-section">
-                    <div class="section-header">
-                        <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z" fill="currentColor"/></svg>
-                        One-Line Setup
-                    </div>
-                    <div class="step-label">Run this command</div>
-                    <div class="code-wrapper">
-                        <button class="copy-btn" onclick="copyToClipboard('codex-one-liner', this)">Copy</button>
-                        <div class="code-block">
-                            <pre id="codex-one-liner"></pre>
+        <section class="overview-grid">
+            <div class="stat-card">
+                <div class="stat-label">Accounts</div>
+                <div class="stat-value" id="overview-total">-</div>
+                <div class="stat-detail">Total tracked pool accounts across all providers.</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Eligible</div>
+                <div class="stat-value" id="overview-eligible">-</div>
+                <div class="stat-detail">Accounts currently eligible for fresh routing.</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Workspaces</div>
+                <div class="stat-value" id="overview-workspaces">-</div>
+                <div class="stat-detail">Distinct workspace groups represented in the pool.</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Next Recovery</div>
+                <div class="stat-value" id="overview-recovery">-</div>
+                <div class="stat-detail">Earliest blocked account recovery observed right now.</div>
+            </div>
+        </section>
+
+        <div class="provider-pills" id="provider-pills"></div>
+
+        <nav class="tabs" aria-label="Provider dashboards">
+            <button class="tab-btn" type="button" data-provider="codex" aria-selected="true">Codex</button>
+            <button class="tab-btn" type="button" data-provider="claude" aria-selected="false">Claude</button>
+            <button class="tab-btn" type="button" data-provider="gemini" aria-selected="false">Gemini</button>
+        </nav>
+
+        <section id="panel-codex" class="provider-panel active">
+            <div class="provider-header">
+                <h2>Codex Dashboard</h2>
+                <p>
+                    Seats stay primary. The Fallback API Pool only matters when the regular Codex seat pool is exhausted
+                    or blocked, and its keys are shown separately so local operator actions stay readable.
+                </p>
+            </div>
+
+            <div id="codex-summary-cards" class="summary-grid"></div>
+
+            <div class="content-grid">
+                <section class="surface">
+                    <div class="surface-header">
+                        <div>
+                            <h3>Routing Focus</h3>
+                            <p>Current seat, last used seat, and fallback readiness from the live selector state.</p>
                         </div>
                     </div>
-                    <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
-                        Downloads credentials and configures your Codex CLI automatically.
-                    </p>
-                </div>
+                    <div id="codex-routing-cards" class="card-grid"></div>
+                </section>
 
-                <div class="sub-tabs">
-                    <div class="sub-tab active" onclick="switchSubTab('codex', 'auto')">Automatic</div>
-                    <div class="sub-tab" onclick="switchSubTab('codex', 'manual')">Manual Setup</div>
-                </div>
+                <section class="surface">
+                    <div class="surface-header">
+                        <div>
+                            <h3>Operator Actions</h3>
+                            <p>Local loopback actions for adding seats and fallback API credentials.</p>
+                        </div>
+                    </div>
 
-                <div id="codex-auto" class="sub-tab-content active">
-                    <div class="step-label">Install CLI First</div>
-                    <div class="code-wrapper">
-                        <button class="copy-btn" onclick="copyToClipboard('codex-install', this)">Copy</button>
-                        <div class="code-block">
-                            <pre id="codex-install"># Using NPM
+                    <div class="action-stack">
+                        <div class="action-card">
+                            <p>
+                                Starts the same flow as the operator <code>codex-oauth-start</code> command, keeps the popup opener attached, and refreshes this page automatically when pool seat state changes.
+                            </p>
+                            <button id="codex-oauth-start-btn" class="action-btn" onclick="startCodexOAuthFromWeb()">Start Codex OAuth</button>
+                            <div id="codex-oauth-start-status" class="status-line"></div>
+                            <div id="codex-oauth-start-result" style="display: none; margin-top: 16px;">
+                                <div class="code-shell">
+                                    <button class="copy-btn" onclick="copyToClipboard('codex-oauth-start-url', this)">Copy</button>
+                                    <pre id="codex-oauth-start-url"></pre>
+                                </div>
+                                <div id="codex-oauth-start-outcome" class="status-line"></div>
+                                <a id="codex-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px; color: var(--accent); font-weight: 700; text-decoration: none;">Open OAuth Page</a>
+                            </div>
+                        </div>
+
+                        <div class="action-card">
+                            <p>Add an OpenAI API key to the fallback API pool. The key is health-probed immediately after save.</p>
+                            <form onsubmit="event.preventDefault(); addOpenAIApiKeyFromStatus();">
+                                <div class="input-row">
+                                    <input id="openai-api-key-input" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false">
+                                    <button id="openai-api-key-add-btn" class="action-btn" type="submit">Add API Key</button>
+                                </div>
+                            </form>
+                            <div id="openai-api-key-add-status" class="status-line"></div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <section class="surface">
+                <div class="surface-header">
+                    <div>
+                        <h3>Workspace Groups</h3>
+                        <p>Seat grouping by workspace, mirroring the pool dashboard view.</p>
+                    </div>
+                </div>
+                <div class="table-shell">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Workspace</th>
+                                <th>Seats</th>
+                                <th>Eligible</th>
+                                <th>Blocked</th>
+                                <th>Next Recovery</th>
+                            </tr>
+                        </thead>
+                        <tbody id="codex-workspace-body"></tbody>
+                    </table>
+                </div>
+                <div id="codex-workspace-empty" class="empty-state"></div>
+            </section>
+
+            <section class="surface">
+                <div class="surface-header">
+                    <div>
+                        <h3>Accounts</h3>
+                        <p>IDs are clipped for readability. Full values stay in row tooltips.</p>
+                    </div>
+                </div>
+                <div class="table-shell">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Account</th>
+                                <th>Plan</th>
+                                <th>Routing</th>
+                                <th>Headroom</th>
+                                <th>Health</th>
+                                <th>Last Used</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="codex-accounts-body"></tbody>
+                    </table>
+                </div>
+                <div id="codex-accounts-empty" class="empty-state"></div>
+                <div id="codex-account-action-status" class="status-line"></div>
+            </section>
+
+            <details class="details-card">
+                <summary>Codex CLI Setup</summary>
+                <div class="details-body">
+                    <div class="details-grid">
+                        <div class="detail-block">
+                            <h4>Install CLI</h4>
+                            <div class="code-shell">
+                                <button class="copy-btn" onclick="copyToClipboard('codex-install', this)">Copy</button>
+                                <pre id="codex-install"># Using NPM
 npm install -g @openai/codex
 
 # Or Homebrew (macOS)
 brew install codex</pre>
-                        </div>
-                    </div>
-                </div>
-
-                <div id="codex-manual" class="sub-tab-content">
-                    <div class="step-label">Config (~/.codex/config.toml)</div>
-                    <div class="code-wrapper">
-                        <button class="copy-btn" onclick="copyToClipboard('codex-config', this)">Copy</button>
-                        <div class="code-block">
-                            <pre id="codex-config"></pre>
-                        </div>
-                    </div>
-
-                    <div class="step-label">Auth (~/.codex/auth.json)</div>
-                    <div class="code-wrapper">
-                        <button class="copy-btn" onclick="copyToClipboard('codex-auth', this)">Copy</button>
-                        <div class="code-block">
-                            <pre id="codex-auth"># Copy any account from your pool folder
-cp pool/ACCOUNT_NAME.json ~/.codex/auth.json</pre>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="step-label">Operator Action</div>
-                <div class="code-wrapper" style="padding: 20px;">
-                    <p style="color: #666; font-size: 0.75rem; margin: 0 0 16px; line-height: 1.6;">
-                        Starts the same flow as the operator <code>codex-oauth-start</code> command, keeps the popup opener attached, and refreshes this page automatically when pool seat state changes.
-                    </p>
-                    <button id="codex-oauth-start-btn" class="action-btn" onclick="startCodexOAuthFromWeb()">Start Codex OAuth</button>
-                    <div id="codex-oauth-start-status" style="margin-top: 14px; color: #666; font-size: 0.8rem;"></div>
-                    <div id="codex-oauth-start-result" style="display: none; margin-top: 18px;">
-                        <div class="step-label" style="margin-top: 0;">OAuth URL</div>
-                        <div class="code-wrapper" style="margin-bottom: 0;">
-                            <button class="copy-btn" onclick="copyToClipboard('codex-oauth-start-url', this)">Copy</button>
-                            <div class="code-block">
-                                <pre id="codex-oauth-start-url"></pre>
                             </div>
                         </div>
-                        <div id="codex-oauth-start-outcome" style="margin-top: 12px; color: var(--text-muted); font-size: 0.78rem; line-height: 1.6;"></div>
-                        <a id="codex-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 12px; color: var(--gold-bright); text-transform: uppercase; letter-spacing: 0.08em; font-size: 0.72rem;">
-                            Open OAuth Page
-                        </a>
-                    </div>
-                </div>
-            </div>
 
-            <!-- CLAUDE -->
-            <div id="tab-claude" class="tab-content">
-                <div class="install-section">
-                    <div class="section-header">
-                        <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z" fill="currentColor"/></svg>
-                        One-Line Setup
-                    </div>
-                    <div class="step-label">Run this command</div>
-                    <div class="code-wrapper">
-                        <button class="copy-btn" onclick="copyToClipboard('claude-one-liner', this)">Copy</button>
-                        <div class="code-block">
-                            <pre id="claude-one-liner"></pre>
+                        <div class="detail-block">
+                            <h4>One-Line Setup</h4>
+                            <p>Downloads credentials and configures your Codex CLI automatically.</p>
+                            <div class="code-shell">
+                                <button class="copy-btn" onclick="copyToClipboard('codex-one-liner', this)">Copy</button>
+                                <pre id="codex-one-liner"></pre>
+                            </div>
+                        </div>
+
+                        <div class="detail-block">
+                            <h4>Manual Config</h4>
+                            <div class="code-shell">
+                                <button class="copy-btn" onclick="copyToClipboard('codex-config', this)">Copy</button>
+                                <pre id="codex-config"></pre>
+                            </div>
+                        </div>
+
+                        <div class="detail-block">
+                            <h4>Manual Auth</h4>
+                            <div class="code-shell">
+                                <button class="copy-btn" onclick="copyToClipboard('codex-auth', this)">Copy</button>
+                                <pre id="codex-auth"># Copy any account from your pool folder
+cp pool/ACCOUNT_NAME.json ~/.codex/auth.json</pre>
+                            </div>
                         </div>
                     </div>
-                    <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
-                        Adds ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY to your shell profile.
-                    </p>
                 </div>
+            </details>
+        </section>
 
-                <div class="sub-tabs">
-                    <div class="sub-tab active" onclick="switchSubTab('claude', 'auto')">Automatic</div>
-                    <div class="sub-tab" onclick="switchSubTab('claude', 'manual')">Manual Setup</div>
+        <section id="panel-claude" class="provider-panel">
+            <div class="provider-header">
+                <h2>Claude Dashboard</h2>
+                <p>
+                    GitLab-backed Claude tokens live in their own pool. This view keeps token health, quota cooldown,
+                    and direct-access rotation visible without dropping back to the full status page.
+                </p>
+            </div>
+
+            <div id="claude-summary-cards" class="summary-grid"></div>
+
+            <div class="content-grid">
+                <section class="surface">
+                    <div class="surface-header">
+                        <div>
+                            <h3>Routing Focus</h3>
+                            <p>Live Claude seat visibility plus the current GitLab Claude Pool rotation target.</p>
+                        </div>
+                    </div>
+                    <div id="claude-routing-cards" class="card-grid"></div>
+                </section>
+
+                <section class="surface">
+                    <div class="surface-header">
+                        <div>
+                            <h3>Operator Actions</h3>
+                            <p>Add GitLab source tokens and immediately mint Duo direct-access credentials.</p>
+                        </div>
+                    </div>
+
+                    <div class="action-stack">
+                        <div class="action-card">
+                            <p>Stores a GitLab token, fetches direct-access gateway credentials, and reloads the Claude pool state.</p>
+                            <form onsubmit="event.preventDefault(); addGitLabClaudeTokenFromStatus();">
+                                <div class="input-row">
+                                    <input id="gitlab-claude-token-input" type="password" placeholder="glpat-..." autocomplete="off" spellcheck="false">
+                                </div>
+                                <div class="input-row" style="margin-top: 10px;">
+                                    <input id="gitlab-claude-instance-input" type="url" value="https://gitlab.com" placeholder="https://gitlab.com" autocomplete="off" spellcheck="false">
+                                    <button id="gitlab-claude-token-add-btn" class="action-btn" type="submit">Add GitLab Token</button>
+                                </div>
+                            </form>
+                            <div id="gitlab-claude-token-add-status" class="status-line"></div>
+                        </div>
+                    </div>
+                </section>
+            </div>
+
+            <section class="surface">
+                <div class="surface-header">
+                    <div>
+                        <h3>Workspace Groups</h3>
+                        <p>GitLab-backed Claude tokens are grouped here exactly as exposed by the live dashboard payload.</p>
+                    </div>
                 </div>
+                <div class="table-shell">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Workspace</th>
+                                <th>Seats</th>
+                                <th>Eligible</th>
+                                <th>Blocked</th>
+                                <th>Next Recovery</th>
+                            </tr>
+                        </thead>
+                        <tbody id="claude-workspace-body"></tbody>
+                    </table>
+                </div>
+                <div id="claude-workspace-empty" class="empty-state"></div>
+            </section>
 
-                <div id="claude-auto" class="sub-tab-content active">
-                    <div class="step-label">Install CLI First</div>
-                    <div class="code-wrapper">
-                        <button class="copy-btn" onclick="copyToClipboard('claude-install', this)">Copy</button>
-                        <div class="code-block">
-                            <pre id="claude-install"># Using NPM
+            <section class="surface">
+                <div class="surface-header">
+                    <div>
+                        <h3>Accounts</h3>
+                        <p>Quota-exceeded and rate-limited GitLab tokens stay visible here with clipped identifiers.</p>
+                    </div>
+                </div>
+                <div class="table-shell">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Account</th>
+                                <th>Plan</th>
+                                <th>Routing</th>
+                                <th>Headroom</th>
+                                <th>Health</th>
+                                <th>Last Used</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="claude-accounts-body"></tbody>
+                    </table>
+                </div>
+                <div id="claude-accounts-empty" class="empty-state"></div>
+                <div id="claude-account-action-status" class="status-line"></div>
+            </section>
+
+            <details class="details-card">
+                <summary>Claude Code Setup</summary>
+                <div class="details-body">
+                    <div class="details-grid">
+                        <div class="detail-block">
+                            <h4>Install CLI</h4>
+                            <div class="code-shell">
+                                <button class="copy-btn" onclick="copyToClipboard('claude-install', this)">Copy</button>
+                                <pre id="claude-install"># Using NPM
 npm install -g @anthropic-ai/claude-code
 
 # Or Homebrew (macOS)
 brew install claude-code</pre>
+                            </div>
                         </div>
-                    </div>
-                </div>
 
-                <div id="claude-manual" class="sub-tab-content">
-                    <div class="step-label">Environment Variables</div>
-                    <div class="code-wrapper">
-                        <button class="copy-btn" onclick="copyToClipboard('claude-env', this)">Copy</button>
-                        <div class="code-block">
-                            <pre id="claude-env"></pre>
+                        <div class="detail-block">
+                            <h4>One-Line Setup</h4>
+                            <p>Adds ANTHROPIC_BASE_URL and ANTHROPIC_API_KEY to your shell profile.</p>
+                            <div class="code-shell">
+                                <button class="copy-btn" onclick="copyToClipboard('claude-one-liner', this)">Copy</button>
+                                <pre id="claude-one-liner"></pre>
+                            </div>
+                        </div>
+
+                        <div class="detail-block">
+                            <h4>Environment Variables</h4>
+                            <div class="code-shell">
+                                <button class="copy-btn" onclick="copyToClipboard('claude-env', this)">Copy</button>
+                                <pre id="claude-env"></pre>
+                            </div>
                         </div>
                     </div>
                 </div>
+            </details>
+        </section>
+
+        <section id="panel-gemini" class="provider-panel">
+            <div class="provider-header">
+                <h2>Gemini Dashboard</h2>
+                <p>
+                    Gemini now gets the same operator dashboard treatment on the landing page: live provider metrics,
+                    workspace grouping, and account visibility first, setup second.
+                </p>
             </div>
 
-            <!-- GEMINI -->
-            <div id="tab-gemini" class="tab-content">
-                <div class="install-section">
-                    <div class="section-header">
-                        <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5z" fill="currentColor"/></svg>
-                        One-Line Setup
-                    </div>
-                    <div class="step-label">Run this command</div>
-                    <div class="code-wrapper">
-                        <button class="copy-btn" onclick="copyToClipboard('gemini-one-liner', this)">Copy</button>
-                        <div class="code-block">
-                            <pre id="gemini-one-liner"></pre>
+            <div id="gemini-summary-cards" class="summary-grid"></div>
+
+            <div class="content-grid">
+                <section class="surface">
+                    <div class="surface-header">
+                        <div>
+                            <h3>Routing Focus</h3>
+                            <p>Current and recent Gemini routing state, if Gemini seats are present in the pool.</p>
                         </div>
                     </div>
-                    <p style="color: #666; font-size: 0.75rem; margin-top: 10px; font-style: italic;">
-                        Downloads credentials and configures Gemini CLI endpoint.
-                    </p>
-                </div>
+                    <div id="gemini-routing-cards" class="card-grid"></div>
+                </section>
 
-                <div class="sub-tabs">
-                    <div class="sub-tab active" onclick="switchSubTab('gemini', 'auto')">Automatic</div>
-                    <div class="sub-tab" onclick="switchSubTab('gemini', 'manual')">Manual Setup</div>
-                </div>
+                <section class="surface">
+                    <div class="surface-header">
+                        <div>
+                            <h3>Operator Notes</h3>
+                            <p>This landing does not invent a separate Gemini control plane. It simply renders the same live pool truth as the status dashboard.</p>
+                        </div>
+                    </div>
+                    <div class="action-card">
+                        <p>
+                            Use this tab for live Gemini pool visibility and CLI setup. If Gemini-specific operator add flows
+                            are introduced later, they should reuse the same local-operator endpoint pattern already used by Codex and Claude.
+                        </p>
+                    </div>
+                </section>
+            </div>
 
-                <div id="gemini-auto" class="sub-tab-content active">
-                    <div class="step-label">Install CLI First</div>
-                    <div class="code-wrapper">
-                        <button class="copy-btn" onclick="copyToClipboard('gemini-install', this)">Copy</button>
-                        <div class="code-block">
-                            <pre id="gemini-install"># Using NPM
+            <section class="surface">
+                <div class="surface-header">
+                    <div>
+                        <h3>Workspace Groups</h3>
+                        <p>Grouped Gemini seats and workspaces from the shared dashboard payload.</p>
+                    </div>
+                </div>
+                <div class="table-shell">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Workspace</th>
+                                <th>Seats</th>
+                                <th>Eligible</th>
+                                <th>Blocked</th>
+                                <th>Next Recovery</th>
+                            </tr>
+                        </thead>
+                        <tbody id="gemini-workspace-body"></tbody>
+                    </table>
+                </div>
+                <div id="gemini-workspace-empty" class="empty-state"></div>
+            </section>
+
+            <section class="surface">
+                <div class="surface-header">
+                    <div>
+                        <h3>Accounts</h3>
+                        <p>Account visibility stays aligned with the same live payload used everywhere else.</p>
+                    </div>
+                </div>
+                <div class="table-shell">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Account</th>
+                                <th>Plan</th>
+                                <th>Routing</th>
+                                <th>Headroom</th>
+                                <th>Health</th>
+                                <th>Last Used</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody id="gemini-accounts-body"></tbody>
+                    </table>
+                </div>
+                <div id="gemini-accounts-empty" class="empty-state"></div>
+                <div id="gemini-account-action-status" class="status-line"></div>
+            </section>
+
+            <details class="details-card">
+                <summary>Gemini CLI Setup</summary>
+                <div class="details-body">
+                    <div class="details-grid">
+                        <div class="detail-block">
+                            <h4>Install CLI</h4>
+                            <div class="code-shell">
+                                <button class="copy-btn" onclick="copyToClipboard('gemini-install', this)">Copy</button>
+                                <pre id="gemini-install"># Using NPM
 npm install -g @google/gemini-cli
 
 # Or Homebrew (macOS)
 brew install gemini-cli</pre>
+                            </div>
                         </div>
-                    </div>
-                </div>
 
-                <div id="gemini-manual" class="sub-tab-content">
-                    <div class="step-label">Config (~/.gemini/settings.json)</div>
-                    <div class="code-wrapper">
-                        <button class="copy-btn" onclick="copyToClipboard('gemini-config', this)">Copy</button>
-                        <div class="code-block">
-                            <pre id="gemini-config"></pre>
+                        <div class="detail-block">
+                            <h4>One-Line Setup</h4>
+                            <p>Downloads credentials and configures Gemini CLI endpoint.</p>
+                            <div class="code-shell">
+                                <button class="copy-btn" onclick="copyToClipboard('gemini-one-liner', this)">Copy</button>
+                                <pre id="gemini-one-liner"></pre>
+                            </div>
                         </div>
-                    </div>
 
-                    <div class="step-label">Auth (~/.gemini/oauth_creds.json)</div>
-                    <div class="code-wrapper">
-                        <button class="copy-btn" onclick="copyToClipboard('gemini-auth', this)">Copy</button>
-                        <div class="code-block">
-                            <pre id="gemini-auth"># Copy Gemini account from your pool folder
+                        <div class="detail-block">
+                            <h4>Manual Config</h4>
+                            <div class="code-shell">
+                                <button class="copy-btn" onclick="copyToClipboard('gemini-config', this)">Copy</button>
+                                <pre id="gemini-config"></pre>
+                            </div>
+                        </div>
+
+                        <div class="detail-block">
+                            <h4>Manual Auth</h4>
+                            <div class="code-shell">
+                                <button class="copy-btn" onclick="copyToClipboard('gemini-auth', this)">Copy</button>
+                                <pre id="gemini-auth"># Copy Gemini account from your pool folder
 cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json</pre>
+                            </div>
                         </div>
                     </div>
                 </div>
-            </div>
+            </details>
+        </section>
 
-            <!-- STATS -->
-            <div id="tab-stats" class="tab-content">
-                <div class="section-header">
-                    <svg viewBox="0 0 24 24"><path d="M3 3v18h18v-2H5V3H3zm4 12h2v4H7v-4zm4-6h2v10h-2V9zm4-4h2v14h-2V5zm4 8h2v6h-2v-6z" fill="currentColor"/></svg>
-                    Pool Status
-                </div>
-
-                <div id="stats-loading" style="text-align: center; color: var(--text-muted); padding: 40px; font-style: italic;">
-                    Loading...
-                </div>
-
-                <div id="stats-content" style="display: none;">
-                    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin-bottom: 30px;">
-                        <div class="stat-card">
-                            <div class="stat-value" id="stat-codex">-</div>
-                            <div class="stat-label">Codex</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-value" id="stat-claude">-</div>
-                            <div class="stat-label">Claude</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-value" id="stat-gemini">-</div>
-                            <div class="stat-label">Gemini</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-value" style="color: var(--success-green);" id="stat-healthy">-</div>
-                            <div class="stat-label">Eligible</div>
-                        </div>
-                    </div>
-
-                    <div class="step-label">Accounts</div>
-                    <div class="table-container">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>ID</th>
-                                    <th>Type</th>
-                                    <th>Plan</th>
-                                    <th>Status</th>
-                                    <th style="text-align: right;">Score</th>
-                                </tr>
-                            </thead>
-                            <tbody id="accounts-tbody"></tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-            <div class="footer">
-                <a href="/status">Full Status</a>
-                <a href="/status?format=json">Status JSON</a>
-            </div>
+        <div class="footer">
+            <a href="/status">Full Status</a>
+            <a href="/status?format=json">Status JSON</a>
         </div>
     </div>
 
     <script>
         const BASE_URL = '{{.BaseURL}}';
-        const PANEL_SHELL = document.querySelector('.container');
-        const PANEL_CONTENT = document.querySelector('.content-relative');
-        let panelResizeTimer = null;
+        const codexOAuthStatusKey = 'codex-oauth-status-snapshot';
+        let codexOAuthPopup = null;
+        let codexOAuthWatcher = null;
+        let latestDashboardData = null;
 
-        function withSmoothPanelResize(mutator) {
-            if (!PANEL_SHELL || !PANEL_CONTENT || typeof mutator !== 'function') {
-                if (typeof mutator === 'function') {
-                    mutator();
+        function clipMiddle(value, head = 8, tail = 6) {
+            const text = String(value || '').trim();
+            if (!text) {
+                return '-';
+            }
+            if (text.length <= head + tail + 1) {
+                return text;
+            }
+            return text.slice(0, head) + '...' + text.slice(-tail);
+        }
+
+        function clipOpaque(value) {
+            return clipMiddle(value, 10, 5);
+        }
+
+        function formatPct(value) {
+            const num = Number(value);
+            if (!Number.isFinite(num)) {
+                return '-';
+            }
+            return Math.round(num) + '%';
+        }
+
+        function formatNumber(value) {
+            const num = Number(value);
+            if (!Number.isFinite(num)) {
+                return '-';
+            }
+            return String(num);
+        }
+
+        function formatDateTime(value) {
+            if (!value) {
+                return '-';
+            }
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) {
+                return String(value);
+            }
+            return date.toLocaleString();
+        }
+
+        function providerNextRecovery(provider, data) {
+            const accounts = providerAccounts(provider, data).filter((acc) => acc && acc.recovery_at);
+            if (accounts.length === 0) {
+                return '';
+            }
+            accounts.sort((left, right) => String(left.recovery_at).localeCompare(String(right.recovery_at)));
+            return String(accounts[0].recovery_at || '');
+        }
+
+        function accountsByID(data) {
+            const map = new Map();
+            (Array.isArray(data && data.accounts) ? data.accounts : []).forEach((acc) => {
+                if (acc && acc.id) {
+                    map.set(String(acc.id), acc);
                 }
+            });
+            return map;
+        }
+
+        function seatProvider(seat, data) {
+            if (!seat || !seat.id) {
+                return '';
+            }
+            const acc = accountsByID(data).get(String(seat.id));
+            if (acc && acc.type) {
+                return String(acc.type);
+            }
+            if (String(seat.id).startsWith('claude_gitlab_')) {
+                return 'claude';
+            }
+            if (String(seat.id).startsWith('openai_api_')) {
+                return 'codex';
+            }
+            return '';
+        }
+
+        function seatForProvider(seat, provider, data) {
+            return seatProvider(seat, data) === provider ? seat : null;
+        }
+
+        function providerAccounts(provider, data) {
+            return (Array.isArray(data && data.accounts) ? data.accounts : []).filter((acc) => acc && acc.type === provider);
+        }
+
+        function providerWorkspaces(provider, data) {
+            return (Array.isArray(data && data.workspace_groups) ? data.workspace_groups : []).filter((group) => group && group.provider === provider);
+        }
+
+        function providerSummary(provider, data) {
+            const root = data && data.pool_summary && data.pool_summary.providers;
+            if (!root || typeof root !== 'object') {
+                return {};
+            }
+            return root[provider] || {};
+        }
+
+        function escapeHTML(value) {
+            return String(value == null ? '' : value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function classifyAccountStatus(acc) {
+            if (!acc) {
+                return { label: 'unknown', tone: 'neutral', detail: '' };
+            }
+            if (acc.dead) {
+                return { label: 'dead', tone: 'danger', detail: acc.health_error || 'Marked dead.' };
+            }
+            if (acc.disabled) {
+                return { label: 'disabled', tone: 'warning', detail: 'Disabled locally.' };
+            }
+            if (acc.routing && acc.routing.eligible) {
+                return { label: 'eligible', tone: 'success', detail: 'Available for fresh routing.' };
+            }
+            const reason = String(acc.routing && acc.routing.block_reason || '').trim();
+            if (reason) {
+                return { label: reason.replace(/_/g, ' '), tone: 'warning', detail: reason };
+            }
+            return { label: 'blocked', tone: 'warning', detail: 'Not eligible right now.' };
+        }
+
+        function healthSummary(acc) {
+            if (!acc) {
+                return { main: '-', detail: '' };
+            }
+            const main = String(acc.health_status || '').trim() || 'local only';
+            const details = [];
+            const errorText = String(acc.health_error || '').trim();
+            if (errorText) {
+                details.push(errorText);
+            }
+            if (acc.gitlab_rate_limit_name) {
+                details.push(String(acc.gitlab_rate_limit_name) + ': ' + formatNumber(acc.gitlab_rate_limit_remaining));
+            }
+            if (acc.gitlab_rate_limit_reset_in) {
+                details.push('reset ' + String(acc.gitlab_rate_limit_reset_in));
+            }
+            if (acc.gitlab_quota_probe_in) {
+                details.push('probe ' + String(acc.gitlab_quota_probe_in));
+            }
+            return { main: main, detail: details.join(' | ') };
+        }
+
+        function metricCardHTML(card) {
+            return `
+                <div class="metric-card tone-${escapeHTML(card.tone || 'neutral')}">
+                    <div class="metric-label">${escapeHTML(card.label || '')}</div>
+                    <div class="metric-value">${escapeHTML(card.value || '-')}</div>
+                    <div class="metric-detail">${escapeHTML(card.detail || '')}</div>
+                </div>
+            `;
+        }
+
+        function seatCardData(title, seat, fallbackDetail) {
+            if (!seat) {
+                return {
+                    label: title,
+                    value: 'none',
+                    detail: fallbackDetail || 'No matching live seat for this provider right now.',
+                    tone: 'neutral',
+                };
+            }
+            const statusTone = String(seat.routing_status || '') === 'eligible' ? 'success' : 'warning';
+            const headroom = formatPct(seat.primary_headroom_pct) + ' 5h | ' + formatPct(seat.secondary_headroom_pct) + ' 7d';
+            const label = String(seat.email || '').trim() || clipOpaque(seat.id);
+            const detailParts = [headroom];
+            if (seat.local_last_used) {
+                detailParts.push(String(seat.local_last_used));
+            }
+            if (seat.basis) {
+                detailParts.push(String(seat.basis));
+            }
+            return {
+                label: title,
+                value: label,
+                detail: detailParts.join(' | '),
+                tone: statusTone,
+            };
+        }
+
+        function renderMetricCards(targetID, cards) {
+            const target = document.getElementById(targetID);
+            if (!target) {
+                return;
+            }
+            target.innerHTML = cards.map(metricCardHTML).join('');
+        }
+
+        function renderProviderPills(data) {
+            const target = document.getElementById('provider-pills');
+            if (!target) {
+                return;
+            }
+            const providers = ['codex', 'claude', 'gemini'];
+            target.innerHTML = providers.map((provider) => {
+                const summary = providerSummary(provider, data);
+                return `
+                    <div class="provider-pill">
+                        <strong>${escapeHTML(provider)}</strong>
+                        <span>${escapeHTML(formatNumber(summary.eligible_accounts || 0))} eligible</span>
+                        <span>/</span>
+                        <span>${escapeHTML(formatNumber(summary.total_accounts || 0))} total</span>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function renderOverview(data) {
+            const total = data && data.pool_summary ? data.pool_summary.total_accounts : 0;
+            const eligible = data && data.pool_summary ? data.pool_summary.eligible_accounts : 0;
+            const workspaces = data && data.pool_summary ? data.pool_summary.workspace_count : 0;
+            const nextRecovery = data && data.pool_summary ? data.pool_summary.next_recovery_at : '';
+
+            document.getElementById('overview-total').textContent = formatNumber(total);
+            document.getElementById('overview-eligible').textContent = formatNumber(eligible);
+            document.getElementById('overview-workspaces').textContent = formatNumber(workspaces);
+            document.getElementById('overview-recovery').textContent = nextRecovery ? formatDateTime(nextRecovery) : 'none';
+
+            renderProviderPills(data);
+        }
+
+        function renderSummary(provider, data) {
+            const summary = providerSummary(provider, data);
+            const accounts = providerAccounts(provider, data);
+            const workspaces = providerWorkspaces(provider, data);
+
+            if (provider === 'codex') {
+                const seats = accounts.filter((acc) => !acc.fallback_only);
+                const apiKeys = accounts.filter((acc) => acc.fallback_only);
+                const apiPool = data && data.openai_api_pool ? data.openai_api_pool : {};
+                renderMetricCards('codex-summary-cards', [
+                    {
+                        label: 'Seats',
+                        value: formatNumber(seats.length),
+                        detail: 'Eligible seat-capable accounts: ' + formatNumber(seats.filter((acc) => acc.routing && acc.routing.eligible).length) + ' of ' + formatNumber(seats.length) + '.',
+                        tone: 'neutral',
+                    },
+                    {
+                        label: 'Fallback API Pool',
+                        value: formatNumber(apiPool.eligible_keys || 0) + ' / ' + formatNumber(apiPool.total_keys || 0),
+                        detail: 'Healthy ' + formatNumber(apiPool.healthy_keys || 0) + ', dead ' + formatNumber(apiPool.dead_keys || 0) + ', local rows ' + formatNumber(apiKeys.length) + '.',
+                        tone: (apiPool.eligible_keys || 0) > 0 ? 'success' : 'warning',
+                    },
+                    {
+                        label: 'Primary Load',
+                        value: formatPct(summary.time_weighted_primary_pct || 0),
+                        detail: 'Time-weighted 5h usage across Codex seats.',
+                        tone: (summary.time_weighted_primary_pct || 0) >= 90 ? 'warning' : 'neutral',
+                    },
+                    {
+                        label: 'Secondary Load',
+                        value: formatPct(summary.time_weighted_secondary_pct || 0),
+                        detail: 'Time-weighted 7d usage across Codex seats and fallback.',
+                        tone: (summary.time_weighted_secondary_pct || 0) >= 90 ? 'warning' : 'neutral',
+                    },
+                ]);
                 return;
             }
 
-            const shellHeight = PANEL_SHELL.offsetHeight;
-            const chromeHeight = shellHeight - PANEL_CONTENT.offsetHeight;
-
-            PANEL_SHELL.style.minHeight = shellHeight + 'px';
-            mutator();
-
-            window.requestAnimationFrame(() => {
-                const nextHeight = PANEL_CONTENT.offsetHeight + chromeHeight;
-                PANEL_SHELL.style.minHeight = nextHeight + 'px';
-            });
-
-            window.clearTimeout(panelResizeTimer);
-            panelResizeTimer = window.setTimeout(() => {
-                PANEL_SHELL.style.minHeight = '';
-            }, 420);
-        }
-
-        // Tab switching
-        document.querySelectorAll('.tab').forEach(tab => {
-            tab.addEventListener('click', () => {
-                if (tab.classList.contains('active')) {
-                    return;
-                }
-                withSmoothPanelResize(() => {
-                    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-                    document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-                    tab.classList.add('active');
-                    document.getElementById('tab-' + tab.dataset.tab).classList.add('active');
-                });
-            });
-        });
-
-        // Sub-Tab switching
-        function switchSubTab(tool, mode) {
-            const container = document.getElementById('tab-' + tool);
-            const nextPanel = document.getElementById(tool + '-' + mode);
-
-            if (!container || !nextPanel || nextPanel.classList.contains('active')) {
+            if (provider === 'claude') {
+                const claudePool = data && data.gitlab_claude_pool ? data.gitlab_claude_pool : {};
+                const nextRecovery = providerNextRecovery('claude', data);
+                renderMetricCards('claude-summary-cards', [
+                    {
+                        label: 'GitLab Claude Pool',
+                        value: formatNumber(claudePool.eligible_tokens || 0) + ' / ' + formatNumber(claudePool.total_tokens || 0),
+                        detail: 'Healthy ' + formatNumber(claudePool.healthy_tokens || 0) + ', dead ' + formatNumber(claudePool.dead_tokens || 0) + '.',
+                        tone: (claudePool.eligible_tokens || 0) > 0 ? 'success' : 'warning',
+                    },
+                    {
+                        label: 'Accounts',
+                        value: formatNumber(accounts.length),
+                        detail: 'Eligible ' + formatNumber(summary.eligible_accounts || 0) + ' Claude accounts right now.',
+                        tone: 'neutral',
+                    },
+                    {
+                        label: 'Next Token',
+                        value: claudePool.next_token_id ? clipOpaque(claudePool.next_token_id) : 'none',
+                        detail: claudePool.next_token_id ? 'Current next eligible GitLab-backed Claude token.' : 'No eligible GitLab Claude token right now.',
+                        tone: claudePool.next_token_id ? 'success' : 'warning',
+                    },
+                    {
+                        label: 'Recovery',
+                        value: nextRecovery ? formatDateTime(nextRecovery) : 'none',
+                        detail: workspaces.length > 0 ? 'Earliest Claude-side recovery window.' : 'No Claude workspace groups are currently present.',
+                        tone: nextRecovery ? 'warning' : 'neutral',
+                    },
+                ]);
                 return;
             }
 
-            withSmoothPanelResize(() => {
-                const tabs = container.querySelectorAll('.sub-tab');
-                tabs.forEach(t => {
-                    if (t.innerText.toLowerCase().includes(mode)) t.classList.add('active');
-                    else t.classList.remove('active');
+            renderMetricCards('gemini-summary-cards', [
+                {
+                    label: 'Accounts',
+                    value: formatNumber(accounts.length),
+                    detail: 'Eligible ' + formatNumber(summary.eligible_accounts || 0) + ' Gemini accounts.',
+                    tone: 'neutral',
+                },
+                {
+                    label: 'Workspaces',
+                    value: formatNumber(workspaces.length),
+                    detail: 'Distinct Gemini workspace groups detected.',
+                    tone: workspaces.length > 0 ? 'success' : 'neutral',
+                },
+                {
+                    label: 'Primary Load',
+                    value: formatPct(summary.time_weighted_primary_pct || 0),
+                    detail: 'Time-weighted 5h usage across Gemini seats.',
+                    tone: (summary.time_weighted_primary_pct || 0) >= 90 ? 'warning' : 'neutral',
+                },
+                {
+                    label: 'Secondary Load',
+                    value: formatPct(summary.time_weighted_secondary_pct || 0),
+                    detail: 'Time-weighted 7d usage across Gemini seats.',
+                    tone: (summary.time_weighted_secondary_pct || 0) >= 90 ? 'warning' : 'neutral',
+                },
+            ]);
+        }
+
+        function renderRouting(provider, data) {
+            const active = seatForProvider(data && data.active_seat, provider, data);
+            const current = seatForProvider(data && data.current_seat, provider, data);
+            const lastUsed = seatForProvider(data && data.last_used_seat, provider, data);
+            const nextEligible = seatForProvider(data && data.best_eligible_seat, provider, data);
+
+            if (provider === 'codex') {
+                const apiPool = data && data.openai_api_pool ? data.openai_api_pool : {};
+                renderMetricCards('codex-routing-cards', [
+                    seatCardData('Current Seat', active, 'No Codex seat is actively serving requests right now.'),
+                    seatCardData('Last Used', lastUsed, 'No Codex seat has a recent local-use signal.'),
+                    {
+                        label: 'Fallback API Pool',
+                        value: apiPool.next_key_id ? clipOpaque(apiPool.next_key_id) : 'none',
+                        detail: apiPool.next_key_id
+                            ? 'Next fallback API key if the Codex seat pool runs dry.'
+                            : 'No eligible fallback API key right now.',
+                        tone: apiPool.next_key_id ? 'success' : 'warning',
+                    },
+                ]);
+                return;
+            }
+
+            if (provider === 'claude') {
+                const claudePool = data && data.gitlab_claude_pool ? data.gitlab_claude_pool : {};
+                renderMetricCards('claude-routing-cards', [
+                    seatCardData('Current Seat', active, 'Claude is not currently the live routed provider.'),
+                    seatCardData('Best Eligible', nextEligible, 'No Claude seat is currently preferred for fresh routing.'),
+                    {
+                        label: 'GitLab Claude Pool',
+                        value: claudePool.next_token_id ? clipOpaque(claudePool.next_token_id) : 'none',
+                        detail: claudePool.next_token_id
+                            ? 'Next GitLab-backed Claude token scheduled by pool eligibility.'
+                            : 'No eligible GitLab-backed Claude token right now.',
+                        tone: claudePool.next_token_id ? 'success' : 'warning',
+                    },
+                ]);
+                return;
+            }
+
+            renderMetricCards('gemini-routing-cards', [
+                seatCardData('Current Seat', active, 'Gemini is not currently the live routed provider.'),
+                seatCardData('Last Used', lastUsed, 'No Gemini seat has a recent local-use signal.'),
+                seatCardData('Best Eligible', nextEligible || current, 'No Gemini seat is currently preferred for fresh routing.'),
+            ]);
+        }
+
+        function renderWorkspaceTable(provider, data) {
+            const body = document.getElementById(provider + '-workspace-body');
+            const empty = document.getElementById(provider + '-workspace-empty');
+            if (!body || !empty) {
+                return;
+            }
+            const groups = providerWorkspaces(provider, data);
+            if (groups.length === 0) {
+                body.innerHTML = '';
+                empty.textContent = 'No ' + provider + ' workspace groups are currently exposed by /status?format=json.';
+                return;
+            }
+            empty.textContent = '';
+            body.innerHTML = groups.map((group) => `
+                <tr>
+                    <td>
+                        <div class="table-title">${escapeHTML(group.workspace_id || (provider === 'claude' ? 'shared' : 'unassigned'))}</div>
+                        <div class="table-meta mono">${escapeHTML(clipMiddle((group.seat_keys || []).join(', '), 16, 8))}</div>
+                    </td>
+                    <td>${escapeHTML(formatNumber(group.seat_count || 0))}</td>
+                    <td>${escapeHTML(formatNumber(group.eligible_seat_count || 0))}</td>
+                    <td>${escapeHTML(formatNumber(group.blocked_seat_count || 0))}</td>
+                    <td>${escapeHTML(group.next_recovery_at ? formatDateTime(group.next_recovery_at) : 'none')}</td>
+                </tr>
+            `).join('');
+        }
+
+        function accountKind(acc) {
+            if (acc && acc.fallback_only) {
+                return 'API key';
+            }
+            if (acc && acc.type === 'claude' && acc.plan_type === 'gitlab_duo') {
+                return 'GitLab token';
+            }
+            return 'account';
+        }
+
+        function accountDisplayName(acc) {
+            if (!acc) {
+                return '-';
+            }
+            if (acc.email) {
+                return String(acc.email);
+            }
+            return clipOpaque(acc.id);
+        }
+
+        function accountPlanLabel(acc) {
+            if (!acc) {
+                return '-';
+            }
+            if (acc.fallback_only) {
+                return 'api fallback';
+            }
+            const plan = String(acc.plan_type || '').trim();
+            const auth = String(acc.auth_mode || '').trim();
+            if (plan && auth) {
+                return plan + ' | ' + auth;
+            }
+            return plan || auth || '-';
+        }
+
+        function renderAccountsTable(provider, data) {
+            const body = document.getElementById(provider + '-accounts-body');
+            const empty = document.getElementById(provider + '-accounts-empty');
+            if (!body || !empty) {
+                return;
+            }
+            const accounts = providerAccounts(provider, data);
+            if (accounts.length === 0) {
+                body.innerHTML = '';
+                empty.textContent = 'No ' + provider + ' accounts are currently present in the pool.';
+                return;
+            }
+            empty.textContent = '';
+            body.innerHTML = accounts.map((acc) => {
+                const routing = classifyAccountStatus(acc);
+                const health = healthSummary(acc);
+                const plan = accountPlanLabel(acc);
+                const accountLabel = accountDisplayName(acc);
+                const statusID = provider + '-account-action-status';
+                const meta = [];
+                if (acc.id) {
+                    meta.push(clipOpaque(acc.id));
+                }
+                if (acc.workspace_id) {
+                    meta.push('workspace ' + clipMiddle(acc.workspace_id, 10, 6));
+                }
+                if (acc.seat_key && acc.seat_key !== acc.id) {
+                    meta.push('seat ' + clipMiddle(acc.seat_key, 10, 6));
+                }
+                return `
+                    <tr>
+                        <td title="${escapeHTML(acc.id || '')}">
+                            <div class="table-title">${escapeHTML(accountLabel)}</div>
+                            <div class="table-meta mono">${escapeHTML(meta.join(' | '))}</div>
+                        </td>
+                        <td>
+                            <div class="table-title">${escapeHTML(plan)}</div>
+                            <div class="table-meta">${escapeHTML(String(acc.type || '').toUpperCase())}</div>
+                        </td>
+                        <td title="${escapeHTML(routing.detail || '')}">
+                            <span class="badge tone-${escapeHTML(routing.tone)}">${escapeHTML(routing.label)}</span>
+                            <div class="table-meta">${escapeHTML(routing.detail || '')}</div>
+                        </td>
+                        <td>
+                            <div class="table-title mono">${escapeHTML(formatPct(acc.routing && acc.routing.primary_headroom_pct))} | ${escapeHTML(formatPct(acc.routing && acc.routing.secondary_headroom_pct))}</div>
+                            <div class="table-meta">5h | 7d</div>
+                        </td>
+                        <td title="${escapeHTML(health.detail || '')}">
+                            <div class="table-title">${escapeHTML(health.main)}</div>
+                            <div class="table-meta">${escapeHTML(health.detail || '')}</div>
+                        </td>
+                        <td>
+                            <div class="table-title">${escapeHTML(String(acc.local_last_used || 'never'))}</div>
+                            <div class="table-meta">${escapeHTML(String(acc.usage_observed || ''))}</div>
+                        </td>
+                        <td>
+                            <button
+                                class="inline-btn is-danger"
+                                type="button"
+                                onclick="deleteAccountFromStatus(this)"
+                                data-account-id="${escapeHTML(acc.id || '')}"
+                                data-account-label="${escapeHTML(accountLabel)}"
+                                data-account-kind="${escapeHTML(accountKind(acc))}"
+                                data-status-id="${escapeHTML(statusID)}"
+                            >
+                                Delete
+                            </button>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        function setStatusBadge(text, tone) {
+            const badge = document.getElementById('status-badge');
+            if (!badge) {
+                return;
+            }
+            badge.textContent = text;
+            badge.classList.remove('is-error', 'is-warn');
+            if (tone === 'error') {
+                badge.classList.add('is-error');
+            } else if (tone === 'warn') {
+                badge.classList.add('is-warn');
+            }
+        }
+
+        function renderDashboard(data) {
+            latestDashboardData = data;
+            renderOverview(data);
+            ['codex', 'claude', 'gemini'].forEach((provider) => {
+                renderSummary(provider, data);
+                renderRouting(provider, data);
+                renderWorkspaceTable(provider, data);
+                renderAccountsTable(provider, data);
+            });
+        }
+
+        async function loadDashboard() {
+            try {
+                const res = await fetch('/status?format=json', {
+                    headers: { 'Accept': 'application/json' }
                 });
-                container.querySelectorAll('.sub-tab-content').forEach(c => c.classList.remove('active'));
-                nextPanel.classList.add('active');
+                if (!res.ok) {
+                    throw new Error(await res.text());
+                }
+                const data = await res.json();
+                renderDashboard(data);
+                const eligible = Number(data && data.pool_summary && data.pool_summary.eligible_accounts || 0);
+                const total = Number(data && data.pool_summary && data.pool_summary.total_accounts || 0);
+                setStatusBadge(eligible > 0 ? 'Online' : 'No Eligible', eligible > 0 ? 'ok' : 'warn');
+                if (eligible === 0 && total > 0) {
+                    setStatusBadge('All Blocked', 'warn');
+                }
+            } catch (error) {
+                setStatusBadge('Error', 'error');
+                document.getElementById('provider-pills').innerHTML = '<div class="provider-pill"><strong>status</strong><span>failed to load /status?format=json</span></div>';
+            }
+        }
+
+        function switchProvider(provider) {
+            document.querySelectorAll('.tab-btn').forEach((button) => {
+                button.setAttribute('aria-selected', String(button.dataset.provider === provider));
+            });
+            document.querySelectorAll('.provider-panel').forEach((panel) => {
+                panel.classList.toggle('active', panel.id === 'panel-' + provider);
             });
         }
 
-        // Copy functionality
-        function copyToClipboard(elementId, btn) {
-            const text = document.getElementById(elementId).textContent;
-            navigator.clipboard.writeText(text).then(() => {
-                const originalText = btn.textContent;
-                btn.textContent = 'COPIED';
-                btn.classList.add('copied');
-                setTimeout(() => {
-                    btn.textContent = originalText;
-                    btn.classList.remove('copied');
-                }, 2000);
+        function bindTabs() {
+            document.querySelectorAll('.tab-btn').forEach((button) => {
+                button.addEventListener('click', () => switchProvider(button.dataset.provider));
             });
         }
 
-        // Populate config on load
-        document.addEventListener('DOMContentLoaded', function() {
-            // Codex one-liner (local mode uses pool folder directly)
+        function copyToClipboard(elementId, button) {
+            const node = document.getElementById(elementId);
+            if (!node) {
+                return;
+            }
+            navigator.clipboard.writeText(node.textContent).then(() => {
+                const previous = button.textContent;
+                button.textContent = 'Copied';
+                button.classList.add('copied');
+                window.setTimeout(() => {
+                    button.textContent = previous;
+                    button.classList.remove('copied');
+                }, 1400);
+            });
+        }
+
+        function populateSetupSnippets() {
             document.getElementById('codex-one-liner').textContent =
 `mkdir -p ~/.codex && cat > ~/.codex/config.toml << 'EOF'
 model_provider = "codex-pool"
@@ -903,7 +1839,6 @@ supports_websockets = true
 [model_providers.codex-pool.features]
 responses_websockets_v2 = true`;
 
-            // Claude
             document.getElementById('claude-one-liner').textContent =
 `# Add to your shell profile
 echo 'export ANTHROPIC_BASE_URL="${BASE_URL}"' >> ~/.bashrc
@@ -914,7 +1849,6 @@ source ~/.bashrc`;
 `export ANTHROPIC_BASE_URL="${BASE_URL}"
 export ANTHROPIC_API_KEY="local-pool"`;
 
-            // Gemini
             document.getElementById('gemini-one-liner').textContent =
 `mkdir -p ~/.gemini && echo '{"codeAssistEndpoint": "${BASE_URL}"}' > ~/.gemini/settings.json
 echo "Config written! Copy oauth_creds.json from your pool folder:"
@@ -924,68 +1858,7 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
 `{
   "codeAssistEndpoint": "${BASE_URL}"
 }`;
-
-            loadStats();
-        });
-
-        function classifyAccountStatus(acc) {
-            if (acc.dead) {
-                return { label: 'dead', color: '#c0392b' };
-            }
-            if (acc.disabled) {
-                return { label: 'disabled', color: '#f39c12' };
-            }
-            if (acc.routing && acc.routing.eligible) {
-                return { label: 'healthy', color: '#27ae60' };
-            }
-            return { label: 'blocked', color: '#f39c12' };
         }
-
-        async function loadStats() {
-            try {
-                const res = await fetch('/status?format=json', {
-                    headers: { 'Accept': 'application/json' }
-                });
-                if (!res.ok) throw new Error('Failed to load');
-                const data = await res.json();
-
-                document.getElementById('status-badge').textContent = 'Online';
-                document.getElementById('stats-loading').style.display = 'none';
-                document.getElementById('stats-content').style.display = 'block';
-
-                const tbody = document.getElementById('accounts-tbody');
-                tbody.innerHTML = '';
-
-                data.accounts.forEach(acc => {
-                    const status = classifyAccountStatus(acc);
-
-                    const row = document.createElement('tr');
-                    row.innerHTML = `
-                        <td style="font-family: monospace; color: #888;">${acc.id.substring(0, 12)}</td>
-                        <td style="text-transform: uppercase;">${acc.type}</td>
-                        <td style="text-transform: uppercase; color: #aaa;">${acc.plan_type || '-'}</td>
-                        <td title="${(acc.routing && acc.routing.block_reason) || ''}" style="color: ${status.color}; text-transform: uppercase; font-weight: bold; font-size: 0.7rem;">${status.label}</td>
-                        <td style="text-align: right; font-family: monospace;">${acc.score?.toFixed(2) || '-'}</td>
-                    `;
-                    tbody.appendChild(row);
-                });
-
-                document.getElementById('stat-codex').textContent = data.codex_count ?? '-';
-                document.getElementById('stat-claude').textContent = data.claude_count ?? '-';
-                document.getElementById('stat-gemini').textContent = data.gemini_count ?? '-';
-                document.getElementById('stat-healthy').textContent = data.pool_summary?.eligible_accounts ?? '-';
-            } catch (e) {
-                document.getElementById('stats-loading').textContent = 'Status unavailable';
-                document.getElementById('status-badge').textContent = 'Error';
-                document.getElementById('status-badge').style.color = 'var(--error-red)';
-                document.getElementById('status-badge').style.borderColor = 'rgba(192, 57, 43, 0.3)';
-                document.getElementById('status-badge').style.background = 'rgba(192, 57, 43, 0.15)';
-            }
-        }
-
-        const codexOAuthStatusKey = 'codex-oauth-status-snapshot';
-        let codexOAuthPopup = null;
-        let codexOAuthWatcher = null;
 
         function codexOAuthSnapshot(accounts) {
             const rows = Array.isArray(accounts) ? accounts : [];
@@ -1079,7 +1952,7 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
                 const afterSnapshot = codexOAuthSnapshot((await codexOAuthFetchStatusSnapshot()).accounts);
                 const message = codexOAuthDescribeOutcome(beforeSnapshot, afterSnapshot, backendMode);
                 if (status) {
-                    status.style.color = 'var(--success-green)';
+                    status.style.color = 'var(--success)';
                     status.textContent = message;
                 }
                 codexOAuthSetOutcome(message);
@@ -1098,7 +1971,7 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
                     button.disabled = false;
                 }
                 if (status) {
-                    status.style.color = 'var(--error-red)';
+                    status.style.color = 'var(--danger)';
                     status.textContent = 'OAuth completed, but status refresh failed: ' + (error && error.message ? error.message : error);
                 }
                 codexOAuthSetOutcome('Refresh failed. Use the Open OAuth Page link or retry after clearing the popup blocker.');
@@ -1124,36 +1997,38 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
                     const afterSnapshot = codexOAuthSnapshot((await codexOAuthFetchStatusSnapshot()).accounts);
                     if (!codexOAuthSnapshotsEqual(beforeSnapshot, afterSnapshot)) {
                         if (status) {
-                            status.style.color = 'var(--success-green)';
+                            status.style.color = 'var(--success)';
                             status.textContent = 'OAuth callback applied. Refreshing status now.';
                         }
                         void codexOAuthFinalize(beforeSnapshot, backendMode);
                         return;
                     }
                     if (status) {
-                        status.style.color = '#666';
+                        status.style.color = 'var(--muted)';
                         status.textContent = 'Waiting for pool seat state to change...';
                     }
                 } catch (error) {
                     if (status) {
-                        status.style.color = '#666';
+                        status.style.color = 'var(--muted)';
                         status.textContent = 'Waiting for pool seat state to change...';
                     }
                 }
                 if (attempts >= maxAttempts) {
                     codexOAuthStopWatcher();
                     if (status) {
-                        status.style.color = 'var(--error-red)';
+                        status.style.color = 'var(--danger)';
                         status.textContent = 'Timed out waiting for pool seat state to change. Use the Open OAuth Page link to retry.';
                     }
                     codexOAuthSetOutcome('No pool seat state change was detected.');
-                    button.disabled = false;
+                    if (button) {
+                        button.disabled = false;
+                    }
                     return;
                 }
                 codexOAuthWatcher = window.setTimeout(tick, 2000);
             };
             if (status) {
-                status.style.color = '#666';
+                status.style.color = 'var(--muted)';
                 status.textContent = 'Waiting for pool seat state to change...';
             }
             codexOAuthWatcher = window.setTimeout(tick, 2000);
@@ -1171,7 +2046,7 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
                 return;
             }
             button.disabled = true;
-            status.style.color = '#666';
+            status.style.color = 'var(--muted)';
             status.textContent = 'Starting OAuth session...';
             result.style.display = 'none';
             urlNode.textContent = '';
@@ -1183,7 +2058,7 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
             codexOAuthPopup = window.open('', 'codex-oauth-popup');
             if (!codexOAuthPopup) {
                 button.disabled = false;
-                status.style.color = 'var(--error-red)';
+                status.style.color = 'var(--danger)';
                 status.textContent = 'Failed to start OAuth: popup blocked by the browser';
                 if (outcome) {
                     outcome.textContent = 'Open the OAuth URL manually from the link below.';
@@ -1192,7 +2067,7 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
             }
             try {
                 codexOAuthPopup.document.open();
-                codexOAuthPopup.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Preparing Codex OAuth</title></head><body style="font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 24px;"><div style="max-width: 640px; margin: 64px auto; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 24px;">Opening OAuth session...</div></body></html>');
+                codexOAuthPopup.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Preparing Codex OAuth</title></head><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 24px;"><div style="max-width: 640px; margin: 64px auto; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 24px;">Opening OAuth session...</div></body></html>`);
                 codexOAuthPopup.document.close();
                 codexOAuthPopup.focus();
             } catch (error) {
@@ -1219,7 +2094,7 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
                 urlNode.textContent = data.oauth_url;
                 openLink.href = data.oauth_url;
                 result.style.display = 'block';
-                status.style.color = 'var(--success-green)';
+                status.style.color = 'var(--success)';
                 status.textContent = 'OAuth URL generated. Complete sign-in in the popup; this page will refresh when pool seat state changes.';
                 if (outcome) {
                     outcome.textContent = 'Waiting for pool seat state to change.';
@@ -1243,7 +2118,7 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
                         // Ignore close failures.
                     }
                 }
-                status.style.color = 'var(--error-red)';
+                status.style.color = 'var(--danger)';
                 status.textContent = 'Failed to start OAuth: ' + (error && error.message ? error.message : error);
                 if (outcome) {
                     outcome.textContent = 'Use the Open OAuth Page link or retry after clearing the popup blocker.';
@@ -1253,6 +2128,177 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
                 if (!codexOAuthPopup) {
                     button.disabled = false;
                 }
+            }
+        }
+
+        async function addOpenAIApiKeyFromStatus() {
+            const input = document.getElementById('openai-api-key-input');
+            const button = document.getElementById('openai-api-key-add-btn');
+            const status = document.getElementById('openai-api-key-add-status');
+            if (!input || !button || !status) {
+                return;
+            }
+
+            const apiKey = String(input.value || '').trim();
+            if (!apiKey) {
+                status.style.color = 'var(--danger)';
+                status.textContent = 'Enter an OpenAI API key first.';
+                return;
+            }
+
+            button.disabled = true;
+            status.style.color = 'var(--muted)';
+            status.textContent = 'Saving API key and running health probe...';
+
+            try {
+                const response = await fetch('/operator/codex/api-key-add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ api_key: apiKey })
+                });
+                const text = await response.text();
+                let data = null;
+                try {
+                    data = text ? JSON.parse(text) : null;
+                } catch (parseError) {
+                    data = null;
+                }
+                if (!response.ok) {
+                    throw new Error((data && data.error) || text || 'Failed to add API key');
+                }
+
+                input.value = '';
+                const accountID = String((data && data.account_id) || 'openai_api');
+                const healthStatus = String((data && data.health_status) || 'unknown');
+                const healthError = String((data && data.health_error) || '').trim();
+                if (data && data.dead) {
+                    status.style.color = 'var(--warning)';
+                    status.textContent = 'Stored ' + accountID + ', but it is currently marked dead' + (healthError ? ': ' + healthError : '.');
+                } else {
+                    status.style.color = 'var(--success)';
+                    status.textContent = 'Stored ' + accountID + '. Health: ' + healthStatus + (healthError ? ' (' + healthError + ')' : '') + '. Reloading status...';
+                }
+                window.setTimeout(() => window.location.reload(), 900);
+            } catch (error) {
+                status.style.color = 'var(--danger)';
+                status.textContent = 'Failed to add API key: ' + (error && error.message ? error.message : error);
+            } finally {
+                button.disabled = false;
+            }
+        }
+
+        async function addGitLabClaudeTokenFromStatus() {
+            const tokenInput = document.getElementById('gitlab-claude-token-input');
+            const instanceInput = document.getElementById('gitlab-claude-instance-input');
+            const button = document.getElementById('gitlab-claude-token-add-btn');
+            const status = document.getElementById('gitlab-claude-token-add-status');
+            if (!tokenInput || !instanceInput || !button || !status) {
+                return;
+            }
+
+            const token = String(tokenInput.value || '').trim();
+            const instanceURL = String(instanceInput.value || '').trim() || 'https://gitlab.com';
+            if (!token) {
+                status.style.color = 'var(--danger)';
+                status.textContent = 'Enter a GitLab token first.';
+                return;
+            }
+
+            button.disabled = true;
+            status.style.color = 'var(--muted)';
+            status.textContent = 'Saving GitLab token and fetching Duo direct-access credentials...';
+
+            try {
+                const response = await fetch('/operator/claude/gitlab-token-add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token: token, instance_url: instanceURL })
+                });
+                const text = await response.text();
+                let data = null;
+                try {
+                    data = text ? JSON.parse(text) : null;
+                } catch (parseError) {
+                    data = null;
+                }
+                if (!response.ok) {
+                    throw new Error((data && data.error) || text || 'Failed to add GitLab token');
+                }
+
+                tokenInput.value = '';
+                const accountID = String((data && data.account_id) || 'claude_gitlab');
+                const healthStatus = String((data && data.health_status) || 'unknown');
+                const healthError = String((data && data.health_error) || '').trim();
+                if (data && data.dead) {
+                    status.style.color = 'var(--warning)';
+                    status.textContent = 'Stored ' + accountID + ', but it is currently marked dead' + (healthError ? ': ' + healthError : '.');
+                } else {
+                    status.style.color = 'var(--success)';
+                    status.textContent = 'Stored ' + accountID + '. Health: ' + healthStatus + (healthError ? ' (' + healthError + ')' : '') + '. Reloading status...';
+                }
+                window.setTimeout(() => window.location.reload(), 900);
+            } catch (error) {
+                status.style.color = 'var(--danger)';
+                status.textContent = 'Failed to add GitLab token: ' + (error && error.message ? error.message : error);
+            } finally {
+                button.disabled = false;
+            }
+        }
+
+        async function deleteAccountFromStatus(button) {
+            if (!button) {
+                return;
+            }
+
+            const accountID = String(button.getAttribute('data-account-id') || '').trim();
+            const label = String(button.getAttribute('data-account-label') || accountID).trim();
+            const kind = String(button.getAttribute('data-account-kind') || 'account').trim();
+            const statusID = String(button.getAttribute('data-status-id') || '').trim();
+            const status = statusID ? document.getElementById(statusID) : null;
+            if (!accountID) {
+                return;
+            }
+
+            if (!window.confirm('Delete ' + kind + ' ' + label + '? This removes the local file from the pool.')) {
+                return;
+            }
+
+            button.disabled = true;
+            if (status) {
+                status.style.color = 'var(--muted)';
+                status.textContent = 'Deleting ' + kind + ' ' + label + '...';
+            }
+
+            try {
+                const response = await fetch('/operator/account-delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ account_id: accountID })
+                });
+                const text = await response.text();
+                let data = null;
+                try {
+                    data = text ? JSON.parse(text) : null;
+                } catch (parseError) {
+                    data = null;
+                }
+                if (!response.ok) {
+                    throw new Error((data && data.error) || text || 'Failed to delete account');
+                }
+
+                if (status) {
+                    status.style.color = 'var(--success)';
+                    status.textContent = (data && data.already_removed)
+                        ? kind + ' ' + label + ' was already gone. Reloading status...'
+                        : 'Deleted ' + kind + ' ' + label + '. Reloading status...';
+                }
+                window.setTimeout(() => window.location.reload(), 700);
+            } catch (error) {
+                if (status) {
+                    status.style.color = 'var(--danger)';
+                    status.textContent = 'Failed to delete ' + kind + ': ' + (error && error.message ? error.message : error);
+                }
+                button.disabled = false;
             }
         }
 
@@ -1286,12 +2332,18 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
                 button.disabled = false;
             }
             if (status) {
-                status.style.color = 'var(--error-red)';
+                status.style.color = 'var(--danger)';
                 status.textContent = 'OAuth callback failed: ' + String((data && data.detail) || 'Unknown error');
             }
             codexOAuthSetOutcome(String((data && data.detail) || (data && data.title) || 'OAuth callback failed.'));
         }
+
         window.addEventListener('message', codexOAuthHandleMessage);
+        document.addEventListener('DOMContentLoaded', () => {
+            bindTabs();
+            populateSetupSnippets();
+            loadDashboard();
+        });
     </script>
 </body>
 </html>
