@@ -164,7 +164,8 @@ func (p *ClaudeProvider) ParseUsage(obj map[string]any) *RequestUsage {
 		return parseAnthropicMessageStartUsage(obj)
 	}
 
-	return nil
+	// Non-stream Anthropic responses include a top-level usage object rather than SSE events.
+	return parseOpenAIUsagePayload(obj)
 }
 
 func (p *ClaudeProvider) ParseUsageHeaders(acc *Account, headers http.Header) {

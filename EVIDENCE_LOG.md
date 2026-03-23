@@ -287,6 +287,26 @@
 - Notes
   - This slice intentionally stopped at pre-copy websocket status handling; a follow-up blind audit still flags one residual risk: gzip retryable inspection remains sensitive to pathological short first reads at the transport layer, so the next truthful successor is hardening that chunking edge before returning to lower-priority websocket success-state refactors.
 
+### 2026-03-23T06:49:28Z | REPO-CPO-BUG-P1-T14
+- Commands
+  - `go test -count=1 -run 'TestClaudeProviderParseUsageSupportsNonStreamMessagePayload|TestUpdateUsageFromBodyRecordsClaudeNonStreamMessage|TestClaudeProviderLoadsGitLabManagedAccount|TestClaudeProviderSetAuthHeadersForGitLabManagedAccount|TestClaudeProviderRefreshGitLabManagedAccount|TestProviderUpstreamURLForGitLabClaudeAccount|TestNeedsRefreshWhenGitLabClaudeGatewayStateMissing|TestClassifyManagedGitLabClaudeErrorQuotaExceeded' ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `POOL_USER_TOKEN=$(jq -r '.[0].token' /home/lap/.root_layer/codex_pool/data/pool_users.json) && CLAUDE_POOL_TOKEN=$(curl -fsS --max-time 15 "http://127.0.0.1:8989/config/claude/${POOL_USER_TOKEN}" | jq -r '.access_token') && curl -sS --max-time 90 -X POST http://127.0.0.1:8989/v1/messages -H "Authorization: Bearer ${CLAUDE_POOL_TOKEN}" -H 'Content-Type: application/json' -H 'anthropic-version: 2023-06-01' --data '{"model":"claude-sonnet-4-20250514","max_tokens":64,"messages":[{"role":"user","content":"Reply with exactly OK"}]}'`
+  - `python3 /home/lap/tools/codex_pool_manager.py status | jq '.admin_accounts[] | select(.type=="claude" and .plan_type=="gitlab_duo") | {id, totals, dead, disabled, last_refresh, expires_at}'`
+- Result
+  - PASS
+  - Live GitLab Claude smoke had already proven the new lane returned a real `200 OK` non-stream Anthropic message response, but local totals for the `gitlab_duo` account stayed at zero afterward.
+  - Root cause: `finalizeProxyResponse` already feeds non-SSE response bodies into `updateUsageFromBody`, but `ClaudeProvider.ParseUsage` only recognized SSE event payloads (`message_start`, `message_delta`) and returned `nil` for ordinary top-level Anthropic `{"type":"message","usage":...}` JSON bodies.
+  - Fix: `ClaudeProvider.ParseUsage` now falls through to the existing generic top-level `usage` parser for non-stream Anthropic message payloads, and focused regression coverage now exercises both the parser and the `updateUsageFromBody` accounting path.
+  - After deploy and restart, a repeated live `POST /v1/messages` smoke through the pool again returned `200 OK` with assistant text `OK`; the managed account `claude_gitlab_457e812b181e` then showed `request_count=1`, `total_input_tokens=11`, `total_output_tokens=4`, and `total_billable_tokens=15`, confirming local accounting now tracks real non-stream Claude/GitLab traffic.
+- Artifacts
+  - live smoke body captured in terminal output only
+- Notes
+  - This fix closes the Claude/GitLab non-stream local-accounting gap without changing routing, token minting, or refresh policy.
+  - `python3 /home/lap/tools/codex_pool_manager.py status --strict` still reports the pre-existing unrelated failure `pool_dashboard_account_count_mismatch`; that mismatch did not block the live Claude/GitLab smoke and was left untouched in this slice.
+
 ### 2026-03-22T18:17:07Z | REPO-CPO-BUG-P1-T10
 - Commands
   - `go test -count=1 -timeout 90s -run "TestProxyStreamedRequestClaude|TestProxyStreamedManagedAPI5xxPreservesFullErrorBody|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestBuild.*RequestShape|TestParse|TestFinalizeProxyResponse|TestFinalizeCopiedProxyResponse|TestApplyPreCopyUpstreamStatusDisposition" ./...`

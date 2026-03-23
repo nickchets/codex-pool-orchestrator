@@ -23,6 +23,13 @@ _(none)_
 
 ### DONE
 
+#### REPO-CPO-BUG-P1-T14: Count non-stream Claude message usage in local totals
+1. Ensure ordinary non-stream Claude `/v1/messages` JSON responses contribute to local usage aggregates instead of only SSE `message_start` / `message_delta` events.
+2. Lock the regression with a focused parser/accounting test that exercises a top-level Anthropic `{"type":"message","usage":...}` payload.
+3. Verify on the live user service with a real GitLab Claude smoke request and confirm the managed `gitlab_duo` account increments `request_count` and token totals.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestClaudeProviderParseUsageSupportsNonStreamMessagePayload|TestUpdateUsageFromBodyRecordsClaudeNonStreamMessage|TestClaudeProviderLoadsGitLabManagedAccount|TestClaudeProviderSetAuthHeadersForGitLabManagedAccount|TestClaudeProviderRefreshGitLabManagedAccount|TestProviderUpstreamURLForGitLabClaudeAccount|TestNeedsRefreshWhenGitLabClaudeGatewayStateMissing|TestClassifyManagedGitLabClaudeErrorQuotaExceeded' ./... && go build -o /home/lap/.local/bin/codex-pool . && systemctl --user restart codex-pool.service && curl -fsS http://127.0.0.1:8989/healthz && POOL_USER_TOKEN=$(jq -r '.[0].token' /home/lap/.root_layer/codex_pool/data/pool_users.json) && CLAUDE_POOL_TOKEN=$(curl -fsS "http://127.0.0.1:8989/config/claude/${POOL_USER_TOKEN}" | jq -r '.access_token') && curl -sS -X POST http://127.0.0.1:8989/v1/messages -H "Authorization: Bearer ${CLAUDE_POOL_TOKEN}" -H 'Content-Type: application/json' -H 'anthropic-version: 2023-06-01' --data '{"model":"claude-sonnet-4-20250514","max_tokens":64,"messages":[{"role":"user","content":"Reply with exactly OK"}]}' && python3 /home/lap/tools/codex_pool_manager.py status | jq '.admin_accounts[] | select(.type=="claude" and .plan_type=="gitlab_duo") | .totals'`
+
 #### REPO-CPO-FEAT-P1-T13: Add GitLab-backed Claude pool lane
 1. Add a managed GitLab Claude account mode that stores GitLab source tokens, mints short-lived Duo direct-access credentials, and routes `/v1/messages` traffic through GitLab's Anthropic-compatible gateway without forking a second Claude path.
 2. Expose local-operator status UI + endpoint for adding GitLab tokens and surface pool counts/eligibility in `/status`.

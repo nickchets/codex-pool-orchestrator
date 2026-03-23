@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"net/url"
+	"testing"
+)
 
 func TestParseCodexUsageDeltaTokenCountCapturesUsageAndSnapshot(t *testing.T) {
 	delta := parseCodexUsageDelta(map[string]any{
@@ -99,5 +102,53 @@ func TestParseUsageEventObjectAcceptsJSONArrayEnvelope(t *testing.T) {
 	}
 	if _, ok := obj["usageMetadata"].(map[string]any); !ok {
 		t.Fatalf("obj=%+v", obj)
+	}
+}
+
+func TestClaudeProviderParseUsageSupportsNonStreamMessagePayload(t *testing.T) {
+	baseURL, _ := url.Parse("https://claude.example.com")
+	provider := NewClaudeProvider(baseURL)
+
+	ru := provider.ParseUsage(map[string]any{
+		"type":  "message",
+		"model": "claude-sonnet-4-20250514",
+		"usage": map[string]any{
+			"input_tokens":            11.0,
+			"cache_read_input_tokens": 2.0,
+			"output_tokens":           4.0,
+		},
+	})
+
+	if ru == nil {
+		t.Fatal("expected usage")
+	}
+	if ru.InputTokens != 11 || ru.CachedInputTokens != 2 || ru.OutputTokens != 4 {
+		t.Fatalf("usage=%+v", ru)
+	}
+	if ru.BillableTokens != 13 {
+		t.Fatalf("billable=%d", ru.BillableTokens)
+	}
+}
+
+func TestUpdateUsageFromBodyRecordsClaudeNonStreamMessage(t *testing.T) {
+	baseURL, _ := url.Parse("https://claude.example.com")
+	provider := NewClaudeProvider(baseURL)
+	h := &proxyHandler{}
+	acc := &Account{
+		ID:       "claude_gitlab_test",
+		Type:     AccountTypeClaude,
+		PlanType: "gitlab_duo",
+	}
+
+	h.updateUsageFromBody(provider, acc, "pool-user-1", 0, 0, []byte(`{"type":"message","model":"claude-sonnet-4-20250514","usage":{"input_tokens":11,"cache_read_input_tokens":2,"output_tokens":4}}`))
+
+	if acc.Totals.RequestCount != 1 {
+		t.Fatalf("request_count=%d", acc.Totals.RequestCount)
+	}
+	if acc.Totals.TotalInputTokens != 11 || acc.Totals.TotalCachedTokens != 2 || acc.Totals.TotalOutputTokens != 4 {
+		t.Fatalf("totals=%+v", acc.Totals)
+	}
+	if acc.Totals.TotalBillableTokens != 13 {
+		t.Fatalf("billable=%d", acc.Totals.TotalBillableTokens)
 	}
 }
