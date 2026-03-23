@@ -2,6 +2,227 @@
 
 > Repo-local evidence for root harness proof execution.
 
+### 2026-03-23T17:45:16Z | REPO-CPO-REFAC-P1-T30
+- Commands
+  - `go test -count=1 -timeout 120s -run 'TestFinalizeWebSocketSuccessState.*|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketPoolAcceptsAuthFromSubprotocol|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat|TestProxyWebSocketPassthroughPreservesAuthorization' ./...`
+- Result
+  - PASS
+  - `proxyRequestWebSocket` now delegates the pooled websocket reverse-proxy execution shell to `servePooledWebSocketProxy`, so rewrite/error/status capture wiring no longer lives as one large inline literal in the main pooled handler.
+  - Pooled websocket semantics stayed fixed: auth overwrite, subprotocol bearer replacement, response status capture, error handling, metrics accounting, and debug logs all remained green under focused websocket coverage.
+  - This slice shrank the last large pooled websocket shell without merging pooled and passthrough behavior yet.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - No service restart was needed for this slice: the change is bounded to repo-local websocket reverse-proxy refactoring.
+  - The next truthful successor is `REPO-CPO-REFAC-P1-T31`, which can share the remaining common websocket execution shell between pooled and passthrough lanes.
+
+### 2026-03-23T17:42:38Z | REPO-CPO-REFAC-P1-T29
+- Commands
+  - `go test -count=1 -timeout 120s -run 'TestInspectResponseBodyForClassification|TestFinalizeWebSocketSuccessState.*|TestApplyPreCopyUpstreamStatusDisposition|TestProxyStreamedManagedAPI(5xxPreservesFullErrorBody|5xxDoesNotWaitForFullLargeBody|Compressed429ClassifiesQuotaAndPreservesBody|Compressed429ClassifiesQuotaAfterShortFirstReads)$|TestProxyWebSocket(PoolRewritesAuthAndPinsSession|ManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|ManagedAPICompressed429ClassifiesQuotaAndPreservesBody|MarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat)$' ./...`
+- Result
+  - PASS
+  - Streamed and websocket pre-copy response handling now share `applyPreCopyUpstreamStatusHandling`, so retryable-status inspection, raw-body replay, and status disposition no longer sit half-inline in both call sites.
+  - Path-specific behavior stayed explicit: websocket still treats `101 Switching Protocols` as a no-op for pre-copy disposition, while streamed still owns the extra non-managed `401/403` diagnostic log and still passes `needStatusBody` into copied-response delivery for early flush behavior.
+  - Focused streamed + websocket parity coverage stayed green after the extraction, including gzip short-read classification and full error-body replay on both lanes.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - No service restart was needed for this slice: the change is bounded to repo-local pre-copy response refactoring.
+  - The next truthful successor is `REPO-CPO-REFAC-P1-T30`, which can shrink the remaining large pooled websocket reverse-proxy shell without reopening transport semantics.
+
+### 2026-03-23T17:40:30Z | REPO-CPO-REFAC-P1-T28
+- Commands
+  - `go test -count=1 -timeout 120s -run 'TestFinalizeWebSocketSuccessState.*|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat|TestApplyPreCopyUpstreamStatusDisposition' ./...`
+- Result
+  - PASS
+  - `proxyRequestWebSocket` now hands the remaining response-side `ModifyResponse` contour to `modifyWebSocketProxyResponse`, so usage-header parsing, pre-copy status handling, and websocket success finalization no longer live inline inside the reverse-proxy literal.
+  - Websocket semantics stayed fixed: failed handshakes still do not pin sessions or update `LastUsed`, `101` success still pins the request conversation, and raw error-body replay still survives managed fallback paths.
+  - This keeps websocket on its own lane while removing the last large inline response contour before broader reverse-proxy cleanup.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - No service restart was needed for this slice: the change is bounded to repo-local websocket response refactoring.
+  - The next truthful successor is `REPO-CPO-REFAC-P1-T29`, which can share the still-duplicated pre-copy status handling between streamed and websocket paths.
+
+### 2026-03-23T17:37:00Z | REPO-CPO-REFAC-P1-T27
+- Commands
+  - `go test -count=1 -timeout 120s -run 'TestFinalizeProxyResponse|TestFinalizeWebSocketSuccessState.*|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat' ./...`
+- Result
+  - PASS
+  - `finalizeProxyResponse` and `finalizeWebSocketSuccessState` now share `applySuccessfulAccountStateLocked`, so managed API recovery, `LastUsed`, and penalty decay no longer live in two parallel success-state blocks.
+  - Path-specific behavior stayed explicit: copied-response finalization still owns body-derived conversation pinning and GitLab Claude persistence/reset semantics, while websocket finalization still only pins the request conversation and never picks up the GitLab persistence side effects.
+  - Focused finalizer plus websocket parity coverage stayed green after the extraction, so the shared success-state helper did not reopen the earlier websocket failure/pinning guarantees.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - No service restart was needed for this slice: the change is bounded to repo-local success-state refactoring.
+  - The next truthful successor is `REPO-CPO-REFAC-P1-T28`, which can extract the remaining inline websocket `ModifyResponse` contour now that both status disposition and success recovery are explicit seams.
+
+### 2026-03-23T17:35:04Z | REPO-CPO-REFAC-P1-T26
+- Commands
+  - `go test -count=1 -timeout 120s -run 'TestFinalizeWebSocketSuccessStateRecoversManagedAPIAccountOnNonSwitching2xx|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat|TestApplyPreCopyUpstreamStatusDisposition' ./...`
+  - `go test -count=1 -timeout 120s -run 'TestFinalizeWebSocketSuccessStateRecoversManagedAPIAccountOnNonSwitching2xx|TestProxyWebSocket.*' ./...`
+- Result
+  - PASS
+  - `proxyRequestWebSocket` now hands the remaining success-side mutation to `finalizeWebSocketSuccessState`, so session pinning, managed API recovery, `LastUsed`, and penalty decay no longer live inline inside `ModifyResponse` after the pre-copy status disposition seam.
+  - Websocket semantics stayed fixed: failed handshakes still do not pin sessions or update `LastUsed`, `101` success still pins the request conversation, and non-`101` `2xx` success remains treated as recovery for managed API accounts.
+  - Added a focused unit lock for the previously untested non-`101` `2xx` recovery branch, so the refactor now proves websocket success recovery without leaning only on the raw-handshake integration tests.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - No service restart was needed for this slice: the change is bounded to repo-local websocket success-state refactoring.
+  - The next truthful successor is `REPO-CPO-REFAC-P1-T27`, which can extract the still-duplicated managed-account success recovery shared by `finalizeProxyResponse` and `finalizeWebSocketSuccessState`.
+
+### 2026-03-23T17:29:39Z | REPO-CPO-REFAC-P1-T25
+- Commands
+  - `go test -count=20 -timeout 120s -run 'TestProxyBuffered.*|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback' ./...`
+  - `go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyBuffered.*|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+  - `go test -race -count=1 -timeout 120s -run 'TestProxyBufferedManagedAPI429RetriesNextSeatAfterQuotaFallback|TestProxyBufferedRetryable5xxRetriesNextSeat|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback' ./...`
+- Result
+  - PASS
+  - Buffered and streamed success-delivery helpers now share one copied-response transport core, so header copy, usage-header replacement, SSE writer setup, idle-timeout wiring, body copy, and `finalizeCopiedProxyResponse` entry no longer live in two nearly identical helpers.
+  - The shared helper still preserves the deliberate mode differences explicitly through options: buffered keeps `sampleBuf` reuse, `conversationID`, and explicit `resp.Body.Close()`, while streamed keeps tee sampling, empty pin input, and the early non-SSE flush after inspected status bodies.
+  - Mixed buffered/streamed repeat coverage, the canonical shared verify hook, and a focused race pass all stayed green after the unification, so the shared transport core did not reopen the prior buffered retry or streamed gzip work.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - No service restart was needed for this slice: the change is bounded to repo-local copied-response delivery refactoring.
+  - The next truthful successor is `REPO-CPO-REFAC-P1-T26`, which can extract the remaining websocket success-state finalizer now that buffered/streamed delivery has a shared core.
+
+### 2026-03-23T17:25:57Z | REPO-CPO-REFAC-P1-T24
+- Commands
+  - `go test -count=20 -timeout 120s -run 'TestProxyBuffered.*|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback' ./...`
+  - `go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyBuffered.*|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+  - `go test -race -count=1 -timeout 120s -run 'TestProxyBufferedManagedAPI429RetriesNextSeatAfterQuotaFallback|TestProxyBufferedRetryable5xxRetriesNextSeat|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback' ./...`
+- Result
+  - PASS
+  - The streamed success-delivery tail now lives behind `deliverStreamedProxyResponse`, so `proxyRequestStreamed` no longer keeps response header copy, early non-SSE flush, tee/sample wiring, SSE interception, idle-timeout wrapping, and `finalizeCopiedProxyResponse` entry inline after the pre-copy disposition seam.
+  - Behavior stayed fixed: the helper still parses usage headers before snapshotting account usage, still preserves the streamed-only early flush for inspected non-SSE status bodies, still uses streamed tee sampling instead of buffered `sampleBuf` reuse, and still calls `finalizeCopiedProxyResponse` with the original streamed arguments, including empty conversation pin input and debug label `streamed done`.
+  - A 20x mixed buffered/streamed repeat run, the canonical shared verify hook, and a focused race pass all stayed green after the extraction, so the streamed tail split did not reopen the recent buffered or gzip short-read work.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - No service restart was needed for this slice: the change is bounded to repo-local streamed proxy refactoring.
+  - The next truthful successor is `REPO-CPO-REFAC-P1-T25`, which can unify the buffered and streamed copied-response delivery core now that both tails are explicit helpers.
+
+### 2026-03-23T17:23:04Z | REPO-CPO-REFAC-P1-T23
+- Commands
+  - `go test -count=20 -timeout 120s -run 'TestProxyBuffered.*' ./...`
+  - `go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyBuffered.*|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+  - `go test -race -count=1 -timeout 120s -run 'TestProxyBufferedManagedAPI429RetriesNextSeatAfterQuotaFallback|TestProxyBufferedRetryable5xxRetriesNextSeat|TestProxyBufferedGitLabClaude402QuotaExceededRetriesNextSeat|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody' ./...`
+- Result
+  - PASS
+  - The buffered success-delivery tail now lives behind `deliverBufferedAttemptSuccess`, so `proxyRequest` no longer keeps header copy, SSE writer setup, idle-timeout wiring, body copy, and `finalizeCopiedProxyResponse` entry inline after `runBufferedAttemptContour`.
+  - Behavior stayed fixed: the helper still uses `sampleBuf` from `tryOnce`, still snapshots usage headers before delivery, still replaces outgoing usage headers, still gates flush/SSE interception/idle-timeout on the same `provider.DetectsSSE(r.URL.Path, respContentType)` check, and still calls `finalizeCopiedProxyResponse` with the original `conversationID` and debug label `done`.
+  - Buffered repeat coverage, the canonical shared verify hook, and a focused race run all passed after the extraction, so the helper split did not reopen the buffered retry or Claude/GitLab parity work.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - No service restart was needed for this slice: the change is bounded to repo-local buffered proxy refactoring.
+  - The next truthful successor is `REPO-CPO-REFAC-P1-T24`, which can extract the analogous streamed success-delivery tail before a later shared copied-response transport slice.
+
+### 2026-03-23T17:02:00Z | REPO-CPO-REFAC-P1-T22
+- Commands
+  - `go test -count=1 -timeout 120s -run 'TestApplyPreCopyUpstreamStatusDisposition|TestInspectBufferedRetryBody|TestProxyBuffered.*' ./...`
+  - `go test -count=1 -timeout 120s -run 'TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback' ./...`
+  - `go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyBuffered.*|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+  - `go test -count=20 -timeout 120s -run 'TestProxyBuffered.*' ./...`
+- Result
+  - PASS
+  - `proxyRequest` now hands the non-stream retry loop to one explicit buffered attempt contour: `runBufferedAttemptContour` owns attempt count, candidate selection, exclusion, inflight bookkeeping, retry continuation, and final failure shaping instead of keeping those branches inline.
+  - Retryable buffered status handling now sits behind `applyBufferedRetryDisposition`, which preserves the existing split semantics exactly: ordinary Codex `429` still forwards after penalty/backoff, managed API `429/402` still falls through to fallback/dead-state handling, GitLab Claude `402/401/403` still uses the managed disposition path, and ordinary `401/403/5xx` retries still synthesize the same buffered errors/recent entries.
+  - Focused buffered tests, focused streamed/websocket parity checks, the canonical shared verify hook, and a 20x buffered repeat run all passed after the extraction, so the contour shrink did not reopen the earlier scheduler-sensitive buffered suite.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - No service restart was needed for this slice: the change is bounded to repo-local buffered proxy refactoring.
+  - The next truthful successor is `REPO-CPO-REFAC-P1-T23`, which can extract the remaining buffered success-delivery tail now that attempt selection/retry handling is isolated.
+
+### 2026-03-23T16:40:42Z | REPO-CPO-TEST-P1-T21
+- Commands
+  - `go test -count=1 -timeout 120s -run 'TestProxyBufferedGitLabClaude402QuotaExceededRetriesNextSeat|TestProxyBufferedGitLabClaude403GatewayRejectedRetriesNextSeat|TestProxyBufferedGitLabClaude401RefreshInvalidGrantMarksDead|TestProxyBufferedGitLabClaude403DirectAccessForbiddenMarksDead|TestApplyPreCopyUpstreamStatusDispositionPreservesDeadGitLabAccount|TestApplyUpstreamAuthFailureDispositionPreservesDeadGitLabAccount' ./...`
+  - `go test -count=100 -timeout 120s -run 'TestProxyBufferedRetryable5xxRetriesNextSeat' ./...`
+  - `go test -count=20 -shuffle=on -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyBuffered.*|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+  - `go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyBuffered.*|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+- Result
+  - PASS
+  - Added direct buffered GitLab Claude retry coverage for non-stream `402 quota_exceeded`, gateway `403` rejection, refresh-invalid `401`, and direct-access-forbidden `403`, closing the last provider-specific buffered retry gap left after `T20`.
+  - Hardened GitLab dead-state handling so refresh/direct-access fatal failures are not overwritten by later gateway auth disposition passes; new guardrail tests lock that behavior explicitly.
+  - Root-caused the old `TestProxyBufferedRetryable5xxRetriesNextSeat` failure as a test-order/scheduler race around post-copy `LastUsed` updates in `finalizeProxyResponse`, not a buffered routing regression. Stabilized buffered integration assertions with a short eventual wait on successful-account state and then verified the formerly flaky `5xx` test 100x plus the wider shuffled hook 20x.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - No service restart was needed for this slice: the change is bounded to retry disposition logic and targeted proxy tests. The next repo-local successor is `REPO-CPO-REFAC-P1-T22`, which can extract the remaining buffered retry attempt contour now that parity is locked.
+
+### 2026-03-23T16:45:00Z | REPO-CPO-TEST-P1-T20
+- Commands
+  - `go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyBuffered.*|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+- Result
+  - PASS
+  - Added direct buffered proxy integration coverage for the non-stream retry loop instead of relying only on helper-level assertions: managed API `429 insufficient_quota` fallback, managed API `402 billing_hard_limit_reached` fallback, ordinary codex `402 deactivated_workspace` failover, transient auth `403` failover, and ordinary `502` failover.
+  - The new tests confirm the intended buffered semantics after `T18/T19`: retry branches consume bounded semantic snapshots, move to the next eligible seat when appropriate, mark permanent failures dead, and preserve error/recent bookkeeping without any replay-specific assumptions.
+  - Streamed/websocket verification stayed green in the same run, so the new buffered coverage did not reopen the split inspection work.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - The main remaining buffered coverage gap is provider-specific Claude/GitLab retry behavior under non-stream `402/401/403` responses. Follow-on card `REPO-CPO-TEST-P1-T21` is hydrated for that surface.
+
+### 2026-03-23T16:32:00Z | REPO-CPO-REFAC-P1-T19
+- Commands
+  - `go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+- Result
+  - PASS
+  - The non-stream retry loop now takes at most one buffered semantic snapshot per relevant response via `inspectBufferedRetryStatus`, instead of re-reading or reconstructing status bodies independently inside each `402` / managed `429` / generic retryable branch.
+  - Shared formatting and gating helpers (`needsBufferedRetryInspection`, `formatBufferedRetryStatusError`) now keep buffered retry branching focused on disposition logic, while streamed/websocket paths stay on the separate `preCopyInspection` + raw replay contract.
+  - The refactor stays bounded: no change to streamed/websocket replay behavior, no change to the T12 gzip short-read fix, and no new publish/deploy side effects.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - Remaining risk is coverage depth, not logic shape: helper-level tests are in place, but direct buffered retry integration tests still lag behind streamed/websocket parity. Follow-on card `REPO-CPO-TEST-P1-T20` is hydrated for that gap.
+
+### 2026-03-23T16:18:00Z | REPO-CPO-REFAC-P1-T18
+- Commands
+  - `go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+- Result
+  - PASS
+  - Removed the dead `inspectAndReplayResponseBody` compatibility shim and replaced the buffered retry loop's inline `ReadAll + bodyForInspection` pattern with one explicit `inspectBufferedRetryBody` helper, so the buffered path now declares its own contract instead of looking like a partial consumer of the streamed/websocket replay API.
+  - Streamed and websocket non-`101` paths still use `preCopyInspection` with explicit raw replay; buffered retries now document the opposite choice clearly: they only need a bounded semantic snapshot because the upstream body is never rewound back to the client in that loop.
+  - Focused unit coverage now locks both sides of the split: `inspectResponseBodyForClassification` for replay-sensitive paths and `inspectBufferedRetryBody` for the fully buffered retry path.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - Residual simplification remains in the buffered retry branch structure itself: status-specific handling is still spread across several `402/429/retryable` cases even though they now share one explicit inspection primitive. Follow-on card `REPO-CPO-REFAC-P1-T19` is hydrated for that cleanup.
+
+### 2026-03-23T15:30:00Z | REPO-CPO-REFAC-P1-T17
+- Commands
+  - `go build ./...`
+  - `go test -count=1 -timeout 120s -run "TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectAndReplayResponseBody" ./...`
+- Result
+  - PASS
+  - Replaced the coupled `inspectResponseBodyPrefix(resp, limit) []byte` with a two-return-value `inspectResponseBodyForClassification(resp, limit) preCopyInspection` that separates semantic error classification (`Inspected` — always decoded plaintext) from transport body replay (`RawPrefix` — always raw wire bytes). Callers now explicitly replay via `replayResponseBody(rawPrefix, resp.Body)` instead of the function silently mutating `resp.Body` as a side effect.
+  - Both the streamed (`proxyRequestStreamed`) and websocket (`proxyRequestWebSocket` `ModifyResponse`) non-`101` paths now use the split API: they inspect the decoded body for classification/logging and then replay the raw prefix for exact client-visible body preservation.
+  - The T12 gzip short-read fix is preserved: `inspectGzipResponseBodyPrefix` still uses the bounded progressive raw-prefix read loop, and the new split just wraps it cleanly.
+  - Added `inspectAndReplayResponseBody` convenience wrapper that preserves the old one-call-does-both behavior for any paths that don't need the split.
+  - New focused tests lock the separation contract: plaintext inspection returns identical `Inspected` and `RawPrefix`, gzip inspection returns decoded `Inspected` and raw gzip `RawPrefix`, and `inspectResponseBodyForClassification` does not automatically replay into `resp.Body`.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - The `inspectAndReplayResponseBody` wrapper is currently unused but kept as a stable convenience for the buffered path or future callers. The buffered retry loop in `proxyRequest` still uses its own inline `bodyForInspection` path and was not touched in this bounded refactor.
+
+### 2026-03-23T14:36:27Z | REPO-CPO-BUG-P1-T12
+- Commands
+  - `go test -count=1 -timeout 120s -run 'TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429DoesNotWaitForFullLargeBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback' ./...`
+  - `go test -count=1 -timeout 120s -run 'TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429DoesNotWaitForFullLargeBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestApplyPreCopyUpstreamStatusDisposition' ./...`
+- Result
+  - PASS
+  - `inspectGzipResponseBodyPrefix` now uses a bounded progressive raw-prefix read loop instead of trusting a single first `Read`, so managed API quota/auth markers remain classifiable when gzip headers or early deflate bytes arrive across multiple short transport reads.
+  - The helper still stops early as soon as it has enough decoded prefix or a classifier-relevant signal, so the existing “do not wait for the delayed second half of a large gzip body” behavior remains intact.
+  - Shared streamed + websocket non-`101` coverage is now explicit: new regression tests lock short-first-read streamed `429 insufficient_quota` handling and gzip-backed websocket fallback parity while preserving client-visible bodies.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - Residual architectural debt remains real: pre-copy status inspection still couples semantic classification and transport replay through one helper contract. Follow-on card `REPO-CPO-REFAC-P1-T17` is hydrated to separate those responsibilities without reopening the fixed gzip regression.
+
 ### 2026-03-23T13:36:00Z | REPO-CPO-REFAC-P1-T16
 - Commands
   - `go test -count=1 -run 'TestClaudeProviderLoadsGitLabManagedAccount|TestClaudeProviderRefreshGitLabManagedAccount|TestClassifyManagedGitLabClaudeErrorQuotaExceeded|TestBuildPoolDashboardDataShowsGitLabDirectAccessSignals|TestBuildPoolDashboardDataBlocksGitLabTokensMissingGatewayState|TestServeStatusPageReturnsJSONForFormatQuery|TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededPersistsCooldown|TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededBackoffEscalates|TestFinalizeProxyResponseResetsGitLabQuotaBackoffAfterSuccess|TestRefreshAccountOnceGitLabBypassesPerAccountThrottle|TestSaveGitLabClaudeAccountFailsClosedOnMalformedJSON|TestSaveGitLabClaudeAccountRoundTripsGitLabFields|TestRefreshGitLabClaudeAccessMalformed2xxMarksErrorAndClearsGatewayState' ./...`

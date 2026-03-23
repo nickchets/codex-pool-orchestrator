@@ -288,14 +288,15 @@ func TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody(t *
 	if calls != 2 {
 		t.Fatalf("upstream calls = %d, want 2", calls)
 	}
-	if !acc.Dead {
+	accState := snapshotProxyTestAccount(acc)
+	if !accState.Dead {
 		t.Fatalf("expected managed api key to be marked dead on insufficient quota")
 	}
-	if acc.HealthStatus != "dead" {
-		t.Fatalf("health status = %q", acc.HealthStatus)
+	if accState.HealthStatus != "dead" {
+		t.Fatalf("health status = %q", accState.HealthStatus)
 	}
-	if !strings.Contains(acc.HealthError, "insufficient_quota") {
-		t.Fatalf("health error = %q", acc.HealthError)
+	if !strings.Contains(accState.HealthError, "insufficient_quota") {
+		t.Fatalf("health error = %q", accState.HealthError)
 	}
 	recent := h.recent.snapshot()
 	if len(recent) != 1 || !strings.Contains(recent[0], "managed api fallback 429 Too Many Requests") {
@@ -405,8 +406,140 @@ func TestProxyStreamedManagedAPICompressed429DoesNotWaitForFullLargeBody(t *test
 	if calls != 2 {
 		t.Fatalf("upstream calls = %d, want 2", calls)
 	}
-	if !acc.Dead {
+	accState := snapshotProxyTestAccount(acc)
+	if !accState.Dead {
 		t.Fatalf("expected managed api key to be marked dead before full body arrives")
+	}
+}
+
+func TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	expectedJSON := []byte(fmt.Sprintf(
+		`{"error":{"message":"%s","code":"insufficient_quota"}}`,
+		strings.Repeat("prefix-", 32)+"insufficient_quota",
+	))
+	var gzippedBody bytes.Buffer
+	gz := gzip.NewWriter(&gzippedBody)
+	if _, err := gz.Write(expectedJSON); err != nil {
+		t.Fatalf("write gzip body: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip body: %v", err)
+	}
+
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"probe","status":"completed"}`))
+			return
+		}
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write(gzippedBody.Bytes()[:1])
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(50 * time.Millisecond)
+		_, _ = w.Write(gzippedBody.Bytes()[1:8])
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(50 * time.Millisecond)
+		_, _ = w.Write(gzippedBody.Bytes()[8:])
+	}))
+	defer upstream.Close()
+
+	baseURL, _ := url.Parse(upstream.URL)
+	codex := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	claude := NewClaudeProvider(baseURL)
+	gemini := NewGeminiProvider(baseURL, baseURL)
+	registry := NewProviderRegistry(codex, claude, gemini)
+
+	tmp := t.TempDir()
+	accFile := filepath.Join(tmp, "openai_api_deadbeef.json")
+	if err := os.WriteFile(accFile, []byte(`{"OPENAI_API_KEY":"sk-proj-test","auth_mode":"api_key","plan_type":"api"}`), 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+
+	acc := &Account{
+		ID:          "openai_api_deadbeef",
+		Type:        AccountTypeCodex,
+		File:        accFile,
+		AccessToken: "sk-proj-test",
+		PlanType:    "api",
+		AuthMode:    accountAuthModeAPIKey,
+	}
+	pool := newPoolState([]*Account{acc}, false)
+
+	h := &proxyHandler{
+		cfg: config{
+			requestTimeout:       5 * time.Second,
+			streamTimeout:        5 * time.Second,
+			maxInMemoryBodyBytes: 10,
+		},
+		transport: http.DefaultTransport,
+		pool:      pool,
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+	}
+
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	reqBody := []byte(`{"model":"gpt-4.1-mini","input":"` + strings.Repeat("a", 128) + `"}`)
+	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/responses", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken(getPoolJWTSecret(), "streamed-managed-api-gzip-short-user"))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept-Encoding", "gzip")
+
+	client := &http.Client{Timeout: time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	gotCompressedBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read compressed body: %v", err)
+	}
+	gotGzip, err := gzip.NewReader(bytes.NewReader(gotCompressedBody))
+	if err != nil {
+		t.Fatalf("new gzip reader: %v", err)
+	}
+	defer gotGzip.Close()
+
+	gotBody, err := io.ReadAll(gotGzip)
+	if err != nil {
+		t.Fatalf("read decompressed body: %v", err)
+	}
+	if !bytes.Equal(gotBody, expectedJSON) {
+		t.Fatalf("body = %q want %q", string(gotBody), string(expectedJSON))
+	}
+	if calls != 2 {
+		t.Fatalf("upstream calls = %d, want 2", calls)
+	}
+	accState := snapshotProxyTestAccount(acc)
+	if !accState.Dead {
+		t.Fatalf("expected managed api key to be marked dead after short gzip prefix reads")
+	}
+	if accState.HealthStatus != "dead" {
+		t.Fatalf("health status = %q", accState.HealthStatus)
+	}
+	if !strings.Contains(accState.HealthError, "insufficient_quota") {
+		t.Fatalf("health error = %q", accState.HealthError)
 	}
 }
 

@@ -480,6 +480,15 @@ func markAccountDead(reqID string, acc *Account, reason string) {
 	}
 }
 
+func accountIsDead(acc *Account) bool {
+	if acc == nil {
+		return false
+	}
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
+	return acc.Dead
+}
+
 func isManagedCodexAPIKeyRetryableStatus(statusCode int) bool {
 	return statusCode == http.StatusTooManyRequests ||
 		statusCode == http.StatusPaymentRequired ||
@@ -491,6 +500,9 @@ func (h *proxyHandler) applyUpstreamAuthFailureDisposition(reqID string, acc *Ac
 		return
 	}
 	if isGitLabClaudeAccount(acc) {
+		if accountIsDead(acc) {
+			return
+		}
 		disposition := classifyManagedGitLabClaudeError(managedGitLabClaudeErrorSourceGatewayRequest, resp.StatusCode, resp.Header, inspectedBody)
 		applyManagedGitLabClaudeDisposition(acc, disposition, resp.Header, time.Now())
 		if err := saveAccount(acc); err != nil {
@@ -525,6 +537,9 @@ func (h *proxyHandler) applyPreCopyUpstreamStatusDisposition(reqID string, acc *
 		return nil
 	}
 	if isGitLabClaudeAccount(acc) && (resp.StatusCode == http.StatusPaymentRequired || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		if accountIsDead(acc) {
+			return nil
+		}
 		disposition := classifyManagedGitLabClaudeError(managedGitLabClaudeErrorSourceGatewayRequest, resp.StatusCode, resp.Header, inspectedBody)
 		applyManagedGitLabClaudeDisposition(acc, disposition, resp.Header, time.Now())
 		if err := saveAccount(acc); err != nil {
@@ -562,6 +577,33 @@ func (h *proxyHandler) applyPreCopyUpstreamStatusDisposition(reqID string, acc *
 		acc.mu.Unlock()
 	}
 	return nil
+}
+
+type preCopyUpstreamStatusHandlingResult struct {
+	NeedStatusBody bool
+	InspectedBody  []byte
+}
+
+func (h *proxyHandler) applyPreCopyUpstreamStatusHandling(reqID string, acc *Account, resp *http.Response, refreshFailed bool, skipSwitchingProtocols bool) preCopyUpstreamStatusHandlingResult {
+	result := preCopyUpstreamStatusHandlingResult{}
+	if resp == nil {
+		return result
+	}
+
+	result.NeedStatusBody = (isManagedCodexAPIKeyAccount(acc) && isManagedCodexAPIKeyRetryableStatus(resp.StatusCode)) ||
+		resp.StatusCode == http.StatusUnauthorized ||
+		resp.StatusCode == http.StatusForbidden
+	if result.NeedStatusBody {
+		inspection := inspectResponseBodyForClassification(resp, preCopyStatusInspectionLimit)
+		result.InspectedBody = inspection.Inspected
+		if len(inspection.RawPrefix) > 0 {
+			resp.Body = replayResponseBody(inspection.RawPrefix, resp.Body)
+		}
+	}
+	if !(skipSwitchingProtocols && resp.StatusCode == http.StatusSwitchingProtocols) {
+		_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, result.InspectedBody)
+	}
+	return result
 }
 
 func extractConversationIDFromHeaders(headers http.Header) string {
@@ -761,6 +803,7 @@ func bodyForInspection(r *http.Request, body []byte) []byte {
 const preCopyStatusInspectionLimit int64 = 2048
 const gzipPreCopyStatusInspectionLimit int64 = 2048
 const gzipPreCopyStatusRawReadLimit int64 = 16384
+const gzipPreCopyStatusReadChunkSize int64 = 4096
 
 func responseBodyLooksGzip(resp *http.Response, prefix []byte) bool {
 	if resp != nil && strings.Contains(strings.ToLower(resp.Header.Get("Content-Encoding")), "gzip") {
@@ -779,6 +822,72 @@ func replayResponseBody(prefix []byte, body io.ReadCloser) io.ReadCloser {
 	}
 }
 
+func preCopyStatusPrefixCouldStillBeGzip(prefix []byte) bool {
+	if len(prefix) == 0 {
+		return true
+	}
+	if len(prefix) == 1 {
+		return prefix[0] == 0x1f
+	}
+	return prefix[0] == 0x1f && prefix[1] == 0x8b
+}
+
+func containsPreCopyStatusInspectionSignal(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	signals := [...]string{
+		"invalid_api_key",
+		"incorrect api key",
+		"incorrect_api_key",
+		"organization_deactivated",
+		"account_deactivated",
+		"insufficient_quota",
+		"billing_hard_limit_reached",
+		"credits exhausted",
+		"credit balance",
+		"quota exceeded",
+		"rate_limit",
+		"rate limited",
+		"too many requests",
+	}
+	for _, signal := range signals {
+		if strings.Contains(text, signal) {
+			return true
+		}
+	}
+	return false
+}
+
+func decodeGzipPreCopyStatusPrefix(rawPrefix []byte, limit int64) ([]byte, bool, bool) {
+	if len(rawPrefix) == 0 {
+		return nil, true, false
+	}
+
+	gz, err := gzip.NewReader(bytes.NewReader(rawPrefix))
+	if err != nil {
+		if preCopyStatusPrefixCouldStillBeGzip(rawPrefix) {
+			return nil, true, false
+		}
+		return rawPrefix, false, false
+	}
+	defer gz.Close()
+
+	inspected, readErr := io.ReadAll(io.LimitReader(gz, limit))
+	if int64(len(inspected)) >= limit || containsPreCopyStatusInspectionSignal(inspected) {
+		return inspected, false, true
+	}
+	switch {
+	case readErr == nil || errors.Is(readErr, io.EOF):
+		return inspected, false, true
+	case errors.Is(readErr, io.ErrUnexpectedEOF):
+		return inspected, true, true
+	default:
+		return inspected, false, true
+	}
+}
+
 func inspectGzipResponseBodyPrefix(body io.ReadCloser, limit int64) ([]byte, []byte) {
 	if body == nil || limit <= 0 {
 		return nil, nil
@@ -791,26 +900,58 @@ func inspectGzipResponseBodyPrefix(body io.ReadCloser, limit int64) ([]byte, []b
 	if rawLimit < limit {
 		rawLimit = limit
 	}
-	rawPrefix := make([]byte, rawLimit)
-	n, err := body.Read(rawPrefix)
-	rawPrefix = rawPrefix[:n]
-	if n == 0 {
-		return nil, nil
+	chunkSize := gzipPreCopyStatusReadChunkSize
+	if chunkSize > rawLimit {
+		chunkSize = rawLimit
+	}
+	rawPrefix := make([]byte, 0, rawLimit)
+	scratch := make([]byte, chunkSize)
+
+	// Keep reading only while the accumulated prefix is still insufficient to
+	// decode enough semantic body for disposition/logging decisions.
+	for int64(len(rawPrefix)) < rawLimit {
+		remaining := int(rawLimit) - len(rawPrefix)
+		readSize := len(scratch)
+		if remaining < readSize {
+			readSize = remaining
+		}
+		n, readErr := body.Read(scratch[:readSize])
+		if n > 0 {
+			rawPrefix = append(rawPrefix, scratch[:n]...)
+		}
+		if len(rawPrefix) == 0 {
+			if readErr != nil || n == 0 {
+				return nil, nil
+			}
+			continue
+		}
+
+		inspected, needMore, decoded := decodeGzipPreCopyStatusPrefix(rawPrefix, limit)
+		if !needMore || readErr != nil || int64(len(rawPrefix)) >= rawLimit || n == 0 {
+			if decoded {
+				return inspected, rawPrefix
+			}
+			return rawPrefix, rawPrefix
+		}
 	}
 
-	gz, err := gzip.NewReader(bytes.NewReader(rawPrefix))
-	if err != nil {
-		return rawPrefix, rawPrefix
+	inspected, _, decoded := decodeGzipPreCopyStatusPrefix(rawPrefix, limit)
+	if decoded {
+		return inspected, rawPrefix
 	}
-	defer gz.Close()
-
-	inspected, _ := io.ReadAll(io.LimitReader(gz, limit))
-	return inspected, rawPrefix
+	return rawPrefix, rawPrefix
 }
 
-func inspectResponseBodyPrefix(resp *http.Response, limit int64) []byte {
+type preCopyInspection struct {
+	Inspected []byte
+	RawPrefix []byte
+}
+
+// Streamed and websocket pre-copy paths must preserve the original wire body for
+// the client, so they split semantic inspection from raw replay explicitly.
+func inspectResponseBodyForClassification(resp *http.Response, limit int64) preCopyInspection {
 	if resp == nil || resp.Body == nil || limit <= 0 {
-		return nil
+		return preCopyInspection{}
 	}
 
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Encoding")), "gzip") {
@@ -818,8 +959,7 @@ func inspectResponseBodyPrefix(resp *http.Response, limit int64) []byte {
 		if len(inspected) > int(limit) {
 			inspected = inspected[:limit]
 		}
-		resp.Body = replayResponseBody(rawPrefix, resp.Body)
-		return inspected
+		return preCopyInspection{Inspected: inspected, RawPrefix: rawPrefix}
 	}
 
 	prefix, _ := io.ReadAll(io.LimitReader(resp.Body, limit))
@@ -829,16 +969,408 @@ func inspectResponseBodyPrefix(resp *http.Response, limit int64) []byte {
 		if len(inspected) > int(limit) {
 			inspected = inspected[:limit]
 		}
-		resp.Body = replayResponseBody(rawPrefix, resp.Body)
-		return inspected
+		return preCopyInspection{Inspected: inspected, RawPrefix: rawPrefix}
 	}
 
 	inspected := bodyForInspection(nil, prefix)
 	if len(inspected) > int(limit) {
 		inspected = inspected[:limit]
 	}
-	resp.Body = replayResponseBody(prefix, resp.Body)
-	return inspected
+	return preCopyInspection{Inspected: inspected, RawPrefix: prefix}
+}
+
+// Buffered retry paths do not replay upstream error bodies to the client: they
+// either retry another account or synthesize a local error response, so a
+// limited fully buffered semantic snapshot is enough here.
+func inspectBufferedRetryBody(body io.ReadCloser, limit int64) []byte {
+	if body == nil || limit <= 0 {
+		return nil
+	}
+	defer body.Close()
+
+	inspected, _ := io.ReadAll(io.LimitReader(body, limit))
+	return bodyForInspection(nil, inspected)
+}
+
+type bufferedRetryInspection struct {
+	Body []byte
+	Text string
+}
+
+func needsBufferedRetryInspection(acc *Account, statusCode int) bool {
+	return statusCode == http.StatusPaymentRequired ||
+		(isManagedCodexAPIKeyAccount(acc) && statusCode == http.StatusTooManyRequests) ||
+		isRetryableStatus(statusCode)
+}
+
+func inspectBufferedRetryStatus(resp *http.Response, limit int64) bufferedRetryInspection {
+	body := inspectBufferedRetryBody(resp.Body, limit)
+	return bufferedRetryInspection{
+		Body: body,
+		Text: string(body),
+	}
+}
+
+func formatBufferedRetryStatusError(resp *http.Response, bodyText string) error {
+	if resp == nil {
+		return nil
+	}
+	if strings.TrimSpace(bodyText) != "" {
+		return fmt.Errorf("upstream %s: %s", resp.Status, bodyText)
+	}
+	return fmt.Errorf("upstream %s", resp.Status)
+}
+
+type bufferedAttemptSuccess struct {
+	acc       *Account
+	resp      *http.Response
+	sampleBuf *bytes.Buffer
+}
+
+type copiedProxyResponseDeliveryOptions struct {
+	requestPath           string
+	initialConversationID string
+	debugLabel            string
+	flushAfterWrite       bool
+	logResponseDebug      bool
+	closeBodyAfterCopy    bool
+	captureResponseSample bool
+	existingSample        *bytes.Buffer
+}
+
+func writeBufferedUnavailableAccountError(w http.ResponseWriter, lastErr error, accountType AccountType, requiredPlan, requestedModel string) {
+	if lastErr != nil {
+		http.Error(w, lastErr.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if requiredPlan != "" {
+		http.Error(w, fmt.Sprintf("no live %s %s accounts for model %s", accountType, requiredPlan, requestedModel), http.StatusServiceUnavailable)
+		return
+	}
+	http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
+}
+
+func writeBufferedAttemptFailure(w http.ResponseWriter, lastStatus int, lastErr error) {
+	status := http.StatusBadGateway
+	if lastStatus == http.StatusTooManyRequests {
+		status = http.StatusTooManyRequests
+	}
+	if lastErr == nil {
+		lastErr = errors.New("all attempts failed")
+	}
+	http.Error(w, lastErr.Error(), status)
+}
+
+func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, acc *Account, resp *http.Response, refreshFailed bool, attempt, attempts int) (bool, error) {
+	var retryInspection bufferedRetryInspection
+	if needsBufferedRetryInspection(acc, resp.StatusCode) {
+		// Buffered retries never replay upstream bodies to the client, so one
+		// bounded semantic snapshot is enough for all status-specific branches.
+		retryInspection = inspectBufferedRetryStatus(resp, preCopyStatusInspectionLimit)
+	}
+
+	if resp.StatusCode == http.StatusTooManyRequests && !isManagedCodexAPIKeyAccount(acc) {
+		_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, nil)
+	}
+
+	if isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired) {
+		return true, h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body)
+	}
+
+	// Handle 402 Payment Required - often means deactivated workspace/subscription.
+	if resp.StatusCode == http.StatusPaymentRequired {
+		if isGitLabClaudeAccount(acc) {
+			_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body)
+			err := formatBufferedRetryStatusError(resp, retryInspection.Text)
+			h.recent.add(err.Error())
+			return true, err
+		}
+		// Check for deactivated_workspace or similar permanent failures.
+		if strings.Contains(retryInspection.Text, "deactivated_workspace") || strings.Contains(retryInspection.Text, "subscription") {
+			acc.mu.Lock()
+			acc.Dead = true
+			acc.Penalty += 100.0
+			acc.mu.Unlock()
+			log.Printf("[%s] marking account %s as DEAD: %s", reqID, acc.ID, retryInspection.Text)
+			if err := saveAccount(acc); err != nil {
+				log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
+			}
+			err := fmt.Errorf("account deactivated: %s", retryInspection.Text)
+			h.recent.add(err.Error())
+			return true, err
+		}
+	}
+
+	if isRetryableStatus(resp.StatusCode) {
+		if isManagedCodexAPIKeyAccount(acc) {
+			err := h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body)
+			if h.cfg.debug {
+				log.Printf("[%s] attempt %d/%d account=%s retryable status=%d refreshFailed=%v", reqID, attempt, attempts, acc.ID, resp.StatusCode, refreshFailed)
+			}
+			return true, err
+		}
+
+		_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body)
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			if refreshFailed && acc.Type != AccountTypeCodex {
+				log.Printf("[%s] account %s DEAD: 401/403 refresh failed, body=%s", reqID, acc.ID, retryInspection.Text)
+			} else if !isPermanentCodexAuthFailure(resp, retryInspection.Body) {
+				// Always log 401/403 with error body and response headers for debugging.
+				var respHdrs []string
+				for k, v := range resp.Header {
+					respHdrs = append(respHdrs, fmt.Sprintf("%s=%s", k, v[0]))
+				}
+				acc.mu.Lock()
+				penalty := acc.Penalty
+				acc.mu.Unlock()
+				log.Printf("[%s] account %s got %d, penalty now %.0f, body=%s, resp_headers=%v", reqID, acc.ID, resp.StatusCode, penalty, retryInspection.Text, respHdrs)
+			}
+		}
+		err := formatBufferedRetryStatusError(resp, retryInspection.Text)
+		h.recent.add(err.Error())
+		if h.cfg.debug {
+			log.Printf("[%s] attempt %d/%d account=%s retryable status=%d refreshFailed=%v", reqID, attempt, attempts, acc.ID, resp.StatusCode, refreshFailed)
+		}
+		return true, err
+	}
+
+	return false, nil
+}
+
+func (h *proxyHandler) runBufferedAttemptContour(
+	ctx context.Context,
+	w http.ResponseWriter,
+	r *http.Request,
+	bodyBytes []byte,
+	reqID string,
+	routePlan RoutePlan,
+) (*bufferedAttemptSuccess, bool) {
+	attempts := h.cfg.maxAttempts
+	if attempts <= 0 {
+		attempts = 1
+	}
+	// Try at least all accounts of this type, up to configured max.
+	if n := h.pool.countByType(routePlan.AccountType); n > attempts {
+		attempts = n
+	}
+	// But don't exceed total pool size.
+	if n := h.pool.count(); n > 0 && attempts > n {
+		attempts = n
+	}
+
+	exclude := map[string]bool{}
+	var lastErr error
+	var lastStatus int
+
+	for attempt := 1; attempt <= attempts; attempt++ {
+		acc := h.pool.candidate(routePlan.Shape.ConversationID, exclude, routePlan.AccountType, routePlan.RequiredPlan)
+		if acc == nil {
+			writeBufferedUnavailableAccountError(w, lastErr, routePlan.AccountType, routePlan.RequiredPlan, routePlan.Shape.RequestedModel)
+			return nil, true
+		}
+		exclude[acc.ID] = true
+
+		atomic.AddInt64(&acc.Inflight, 1)
+		atomic.AddInt64(&h.inflight, 1)
+
+		resp, sampleBuf, refreshFailed, err := h.tryOnce(ctx, r, bodyBytes, routePlan.TargetBase, routePlan.Provider, acc, reqID)
+
+		atomic.AddInt64(&acc.Inflight, -1)
+		atomic.AddInt64(&h.inflight, -1)
+
+		if err != nil {
+			lastErr = err
+			h.recent.add(err.Error())
+			if h.cfg.debug {
+				log.Printf("[%s] attempt %d/%d account=%s failed: %v", reqID, attempt, attempts, acc.ID, err)
+			}
+			continue
+		}
+		lastStatus = resp.StatusCode
+
+		if retry, retryErr := h.applyBufferedRetryDisposition(reqID, acc, resp, refreshFailed, attempt, attempts); retry {
+			lastErr = retryErr
+			continue
+		}
+
+		return &bufferedAttemptSuccess{
+			acc:       acc,
+			resp:      resp,
+			sampleBuf: sampleBuf,
+		}, false
+	}
+
+	writeBufferedAttemptFailure(w, lastStatus, lastErr)
+	return nil, true
+}
+
+func (h *proxyHandler) deliverCopiedProxyResponse(
+	w http.ResponseWriter,
+	cancel context.CancelFunc,
+	reqID string,
+	provider Provider,
+	acc *Account,
+	userID string,
+	resp *http.Response,
+	start time.Time,
+	opts copiedProxyResponseDeliveryOptions,
+) bool {
+	if resp == nil {
+		return false
+	}
+
+	provider.ParseUsageHeaders(acc, resp.Header)
+
+	// Snapshot rate limits from headers for use in SSE callback
+	// (Claude SSE events carry 0% — real data comes from headers)
+	acc.mu.Lock()
+	headerPrimaryPct := acc.Usage.PrimaryUsedPercent
+	headerSecondaryPct := acc.Usage.SecondaryUsedPercent
+	acc.mu.Unlock()
+
+	// Write response to client.
+	copyHeader(w.Header(), resp.Header)
+	removeHopByHopHeaders(w.Header())
+	// Replace individual account usage headers with pool aggregate usage.
+	h.replaceUsageHeaders(w.Header())
+	w.WriteHeader(resp.StatusCode)
+
+	flusher, _ := w.(http.Flusher)
+	respContentType := resp.Header.Get("Content-Type")
+	// Use provider's SSE detection logic.
+	isSSE := provider.DetectsSSE(opts.requestPath, respContentType)
+	if opts.flushAfterWrite && !isSSE && flusher != nil {
+		flusher.Flush()
+	}
+	if opts.logResponseDebug && h.cfg.debug {
+		log.Printf("[%s] response: isSSE=%v content-type=%s", reqID, isSSE, respContentType)
+	}
+
+	// Stream body while optionally flushing.
+	var writer io.Writer = w
+	var fw *flushWriter
+	if isSSE && flusher != nil {
+		fw = &flushWriter{w: w, f: flusher, flushInterval: h.cfg.flushInterval}
+		writer = fw
+	}
+	managedStreamFailed := false
+	var managedStreamFailureOnce sync.Once
+
+	sampleBuf := opts.existingSample
+	if opts.captureResponseSample {
+		// Tee a bounded sample for usage extraction and conversation pinning.
+		sampleLimit := int64(16 * 1024)
+		if h.cfg.logBodies && h.cfg.bodyLogLimit > 0 {
+			sampleLimit = h.cfg.bodyLogLimit
+		}
+		sampleBuf = &bytes.Buffer{}
+		resp.Body = struct {
+			io.Reader
+			io.Closer
+		}{
+			Reader: io.TeeReader(resp.Body, &limitedWriter{w: sampleBuf, n: sampleLimit}),
+			Closer: resp.Body,
+		}
+	}
+
+	if isSSE {
+		writer = h.wrapUsageInterceptWriter(
+			reqID,
+			writer,
+			provider,
+			acc,
+			userID,
+			headerPrimaryPct,
+			headerSecondaryPct,
+			&managedStreamFailed,
+			&managedStreamFailureOnce,
+		)
+	}
+
+	// Wrap response body with idle timeout to kill zombie SSE connections.
+	var idleReader *idleTimeoutReader
+	if isSSE && h.cfg.streamIdleTimeout > 0 {
+		idleReader = newIdleTimeoutReader(resp.Body, h.cfg.streamIdleTimeout, cancel)
+		resp.Body = idleReader
+	}
+
+	_, copyErr := io.Copy(writer, resp.Body)
+	if opts.closeBodyAfterCopy {
+		resp.Body.Close()
+	}
+	if fw != nil {
+		fw.stop()
+	}
+
+	var respSample []byte
+	if sampleBuf != nil {
+		respSample = sampleBuf.Bytes()
+	}
+	return h.finalizeCopiedProxyResponse(reqID, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, opts.initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, copyErr, idleReader != nil, start, opts.debugLabel)
+}
+
+func (h *proxyHandler) deliverBufferedAttemptSuccess(
+	w http.ResponseWriter,
+	cancel context.CancelFunc,
+	reqID string,
+	provider Provider,
+	attemptSuccess *bufferedAttemptSuccess,
+	requestPath string,
+	userID, conversationID string,
+	start time.Time,
+) bool {
+	if attemptSuccess == nil {
+		return false
+	}
+
+	return h.deliverCopiedProxyResponse(
+		w,
+		cancel,
+		reqID,
+		provider,
+		attemptSuccess.acc,
+		userID,
+		attemptSuccess.resp,
+		start,
+		copiedProxyResponseDeliveryOptions{
+			requestPath:           requestPath,
+			initialConversationID: conversationID,
+			debugLabel:            "done",
+			logResponseDebug:      true,
+			closeBodyAfterCopy:    true,
+			existingSample:        attemptSuccess.sampleBuf,
+		},
+	)
+}
+
+func (h *proxyHandler) deliverStreamedProxyResponse(
+	w http.ResponseWriter,
+	cancel context.CancelFunc,
+	reqID string,
+	requestPath string,
+	provider Provider,
+	acc *Account,
+	userID string,
+	resp *http.Response,
+	needStatusBody bool,
+	start time.Time,
+) bool {
+	return h.deliverCopiedProxyResponse(
+		w,
+		cancel,
+		reqID,
+		provider,
+		acc,
+		userID,
+		resp,
+		start,
+		copiedProxyResponseDeliveryOptions{
+			requestPath:           requestPath,
+			debugLabel:            "streamed done",
+			flushAfterWrite:       needStatusBody,
+			captureResponseSample: true,
+		},
+	)
 }
 
 func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqID string) {
@@ -904,7 +1436,6 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	requestedModel := routePlan.Shape.RequestedModel
 	accountType := routePlan.AccountType
 	provider := routePlan.Provider
-	targetBase := routePlan.TargetBase
 	userID := routePlan.Admission.UserID
 
 	if h.cfg.debug && conversationID == "" && len(inspect) > 0 {
@@ -957,225 +1488,15 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	}
 	defer cancel()
 
-	attempts := h.cfg.maxAttempts
-	if attempts <= 0 {
-		attempts = 1
-	}
-	// Try at least all accounts of this type, up to configured max
-	if n := h.pool.countByType(accountType); n > attempts {
-		attempts = n
-	}
-	// But don't exceed total pool size
-	if n := h.pool.count(); n > 0 && attempts > n {
-		attempts = n
-	}
-
-	exclude := map[string]bool{}
-	var lastErr error
-	var lastStatus int
-	requiredPlan := routePlan.RequiredPlan
-
-	for attempt := 1; attempt <= attempts; attempt++ {
-		acc := h.pool.candidate(conversationID, exclude, accountType, requiredPlan)
-		if acc == nil {
-			if lastErr != nil {
-				http.Error(w, lastErr.Error(), http.StatusServiceUnavailable)
-			} else {
-				if requiredPlan != "" {
-					http.Error(w, fmt.Sprintf("no live %s %s accounts for model %s", accountType, requiredPlan, requestedModel), http.StatusServiceUnavailable)
-				} else {
-					http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
-				}
-			}
-			return
-		}
-		exclude[acc.ID] = true
-
-		atomic.AddInt64(&acc.Inflight, 1)
-		atomic.AddInt64(&h.inflight, 1)
-
-		resp, sampleBuf, refreshFailed, err := h.tryOnce(ctx, r, bodyBytes, targetBase, provider, acc, reqID)
-
-		atomic.AddInt64(&acc.Inflight, -1)
-		atomic.AddInt64(&h.inflight, -1)
-
-		if err != nil {
-			lastErr = err
-			h.recent.add(err.Error())
-			if h.cfg.debug {
-				log.Printf("[%s] attempt %d/%d account=%s failed: %v", reqID, attempt, attempts, acc.ID, err)
-			}
-			continue
-		}
-		lastStatus = resp.StatusCode
-
-		if resp.StatusCode == http.StatusTooManyRequests && !isManagedCodexAPIKeyAccount(acc) {
-			_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, nil)
-		}
-
-		if isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired) {
-			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-			resp.Body.Close()
-			errBody = bodyForInspection(nil, errBody)
-			lastErr = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, errBody)
-			continue
-		}
-
-		// Handle 402 Payment Required - often means deactivated workspace/subscription
-		if resp.StatusCode == http.StatusPaymentRequired {
-			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-			resp.Body.Close()
-			errBody = bodyForInspection(nil, errBody)
-			if isGitLabClaudeAccount(acc) {
-				_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, errBody)
-				if len(errBody) > 0 {
-					lastErr = fmt.Errorf("upstream %s: %s", resp.Status, string(errBody))
-				} else {
-					lastErr = fmt.Errorf("upstream %s", resp.Status)
-				}
-				h.recent.add(lastErr.Error())
-				continue
-			}
-			errStr := string(errBody)
-			// Check for deactivated_workspace or similar permanent failures
-			if strings.Contains(errStr, "deactivated_workspace") || strings.Contains(errStr, "subscription") {
-				acc.mu.Lock()
-				acc.Dead = true
-				acc.Penalty += 100.0
-				acc.mu.Unlock()
-				log.Printf("[%s] marking account %s as DEAD: %s", reqID, acc.ID, errStr)
-				if err := saveAccount(acc); err != nil {
-					log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
-				}
-				lastErr = fmt.Errorf("account deactivated: %s", errStr)
-				h.recent.add(lastErr.Error())
-				continue
-			}
-		}
-
-		if isRetryableStatus(resp.StatusCode) {
-			// Read error body FIRST before any other processing
-			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-			resp.Body.Close()
-			errBody = bodyForInspection(nil, errBody)
-			errBodyStr := string(errBody)
-
-			if isManagedCodexAPIKeyAccount(acc) {
-				lastErr = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, errBody)
-				if h.cfg.debug {
-					log.Printf("[%s] attempt %d/%d account=%s retryable status=%d refreshFailed=%v", reqID, attempt, attempts, acc.ID, resp.StatusCode, refreshFailed)
-				}
-				continue
-			}
-
-			_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, errBody)
-			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-				if refreshFailed && acc.Type != AccountTypeCodex {
-					log.Printf("[%s] account %s DEAD: 401/403 refresh failed, body=%s", reqID, acc.ID, errBodyStr)
-				} else if !isPermanentCodexAuthFailure(resp, errBody) {
-					// Always log 401/403 with error body and response headers for debugging
-					var respHdrs []string
-					for k, v := range resp.Header {
-						respHdrs = append(respHdrs, fmt.Sprintf("%s=%s", k, v[0]))
-					}
-					acc.mu.Lock()
-					penalty := acc.Penalty
-					acc.mu.Unlock()
-					log.Printf("[%s] account %s got %d, penalty now %.0f, body=%s, resp_headers=%v", reqID, acc.ID, resp.StatusCode, penalty, errBodyStr, respHdrs)
-				}
-			}
-			if len(errBody) > 0 {
-				lastErr = fmt.Errorf("upstream %s: %s", resp.Status, errBodyStr)
-			} else {
-				lastErr = fmt.Errorf("upstream %s", resp.Status)
-			}
-			h.recent.add(lastErr.Error())
-			if h.cfg.debug {
-				log.Printf("[%s] attempt %d/%d account=%s retryable status=%d refreshFailed=%v", reqID, attempt, attempts, acc.ID, resp.StatusCode, refreshFailed)
-			}
-			continue
-		}
-
-		provider.ParseUsageHeaders(acc, resp.Header)
-
-		// Snapshot rate limits from headers for use in SSE callback
-		// (Claude SSE events carry 0% — real data comes from headers)
-		acc.mu.Lock()
-		headerPrimaryPct := acc.Usage.PrimaryUsedPercent
-		headerSecondaryPct := acc.Usage.SecondaryUsedPercent
-		acc.mu.Unlock()
-
-		// Write response to client.
-		copyHeader(w.Header(), resp.Header)
-		removeHopByHopHeaders(w.Header())
-		// Replace individual account usage headers with pool aggregate usage
-		h.replaceUsageHeaders(w.Header())
-		w.WriteHeader(resp.StatusCode)
-
-		flusher, _ := w.(http.Flusher)
-		respContentType := resp.Header.Get("Content-Type")
-		// Use provider's SSE detection logic
-		isSSE := provider.DetectsSSE(r.URL.Path, respContentType)
-		if h.cfg.debug {
-			log.Printf("[%s] response: isSSE=%v content-type=%s", reqID, isSSE, respContentType)
-		}
-
-		// Stream body while optionally flushing.
-		var writer io.Writer = w
-		var fw *flushWriter
-		if isSSE && flusher != nil {
-			fw = &flushWriter{w: w, f: flusher, flushInterval: h.cfg.flushInterval}
-			writer = fw
-		}
-		managedStreamFailed := false
-		var managedStreamFailureOnce sync.Once
-
-		if isSSE {
-			writer = h.wrapUsageInterceptWriter(
-				reqID,
-				writer,
-				provider,
-				acc,
-				userID,
-				headerPrimaryPct,
-				headerSecondaryPct,
-				&managedStreamFailed,
-				&managedStreamFailureOnce,
-			)
-		}
-
-		// Wrap response body with idle timeout to kill zombie SSE connections.
-		var idleReader *idleTimeoutReader
-		if isSSE && h.cfg.streamIdleTimeout > 0 {
-			idleReader = newIdleTimeoutReader(resp.Body, h.cfg.streamIdleTimeout, cancel)
-			resp.Body = idleReader
-		}
-
-		_, copyErr := io.Copy(writer, resp.Body)
-		resp.Body.Close()
-		if fw != nil {
-			fw.stop()
-		}
-
-		respSample := []byte(nil)
-		if sampleBuf != nil {
-			respSample = sampleBuf.Bytes()
-		}
-		if !h.finalizeCopiedProxyResponse(reqID, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, conversationID, headerPrimaryPct, headerSecondaryPct, respSample, copyErr, idleReader != nil, start, "done") {
-			return
-		}
+	attemptSuccess, handled := h.runBufferedAttemptContour(ctx, w, r, bodyBytes, reqID, routePlan)
+	if handled {
 		return
 	}
 
-	// All attempts failed.
-	status := http.StatusBadGateway
-	if lastStatus == http.StatusTooManyRequests {
-		status = http.StatusTooManyRequests
+	if !h.deliverBufferedAttemptSuccess(w, cancel, reqID, provider, attemptSuccess, r.URL.Path, userID, conversationID, start) {
+		return
 	}
-	if lastErr == nil {
-		lastErr = errors.New("all attempts failed")
-	}
-	http.Error(w, lastErr.Error(), status)
+	return
 }
 
 func (h *proxyHandler) proxyRequestWebSocket(w http.ResponseWriter, r *http.Request, reqID string, routePlan RoutePlan) {
@@ -1247,6 +1568,35 @@ func (h *proxyHandler) proxyRequestWebSocket(w http.ResponseWriter, r *http.Requ
 
 	var statusCode int
 	var proxyErr error
+	statusCode, proxyErr = h.servePooledWebSocketProxy(w, r, reqID, outURL, targetBase, provider, acc, access, protocolAuthUsed, refreshFailed, conversationID)
+
+	if proxyErr != nil {
+		h.recent.add(proxyErr.Error())
+		h.metrics.inc("error", acc.ID)
+		return
+	}
+	if statusCode != 0 {
+		h.metrics.inc(strconv.Itoa(statusCode), acc.ID)
+	}
+	if h.cfg.debug {
+		log.Printf("[%s] websocket done status=%d account=%s user=%s duration_ms=%d", reqID, statusCode, acc.ID, userID, time.Since(start).Milliseconds())
+	}
+}
+
+func (h *proxyHandler) servePooledWebSocketProxy(
+	w http.ResponseWriter,
+	r *http.Request,
+	reqID string,
+	outURL, targetBase *url.URL,
+	provider Provider,
+	acc *Account,
+	access string,
+	protocolAuthUsed bool,
+	refreshFailed bool,
+	conversationID string,
+) (int, error) {
+	var statusCode int
+	var proxyErr error
 
 	reverseProxy := &httputil.ReverseProxy{
 		Transport:     h.transport,
@@ -1273,43 +1623,7 @@ func (h *proxyHandler) proxyRequestWebSocket(w http.ResponseWriter, r *http.Requ
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			statusCode = resp.StatusCode
-			provider.ParseUsageHeaders(acc, resp.Header)
-			needStatusBody := resp.StatusCode != http.StatusSwitchingProtocols &&
-				((isManagedCodexAPIKeyAccount(acc) && isManagedCodexAPIKeyRetryableStatus(resp.StatusCode)) ||
-					resp.StatusCode == http.StatusUnauthorized ||
-					resp.StatusCode == http.StatusForbidden)
-			var inspectedStatusBody []byte
-			if needStatusBody {
-				inspectedStatusBody = inspectResponseBodyPrefix(resp, preCopyStatusInspectionLimit)
-			}
-			if resp.StatusCode != http.StatusSwitchingProtocols {
-				_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, inspectedStatusBody)
-			}
-
-			if resp.StatusCode == http.StatusSwitchingProtocols || (resp.StatusCode >= 200 && resp.StatusCode < 300) {
-				if conversationID != "" {
-					h.pool.pin(conversationID, acc.ID)
-				}
-				acc.mu.Lock()
-				if isManagedCodexAPIKeyAccount(acc) {
-					acc.Dead = false
-					acc.HealthStatus = "healthy"
-					acc.HealthError = ""
-					acc.HealthCheckedAt = time.Now()
-					acc.LastHealthyAt = acc.HealthCheckedAt
-					acc.RateLimitUntil = time.Time{}
-				}
-				acc.LastUsed = time.Now()
-				if acc.Penalty > 0 {
-					acc.Penalty *= 0.5
-					if acc.Penalty < 0.01 {
-						acc.Penalty = 0
-					}
-				}
-				acc.mu.Unlock()
-			}
-
-			return nil
+			return h.modifyWebSocketProxyResponse(reqID, provider, acc, resp, refreshFailed, conversationID)
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
 			proxyErr = err
@@ -1325,18 +1639,36 @@ func (h *proxyHandler) proxyRequestWebSocket(w http.ResponseWriter, r *http.Requ
 	}
 
 	reverseProxy.ServeHTTP(w, r)
+	return statusCode, proxyErr
+}
 
-	if proxyErr != nil {
-		h.recent.add(proxyErr.Error())
-		h.metrics.inc("error", acc.ID)
+func (h *proxyHandler) finalizeWebSocketSuccessState(acc *Account, conversationID string, statusCode int) {
+	if acc == nil {
 		return
 	}
-	if statusCode != 0 {
-		h.metrics.inc(strconv.Itoa(statusCode), acc.ID)
+	if statusCode != http.StatusSwitchingProtocols && (statusCode < 200 || statusCode >= 300) {
+		return
 	}
-	if h.cfg.debug {
-		log.Printf("[%s] websocket done status=%d account=%s user=%s duration_ms=%d", reqID, statusCode, acc.ID, userID, time.Since(start).Milliseconds())
+
+	if conversationID != "" && h.pool != nil {
+		h.pool.pin(conversationID, acc.ID)
 	}
+
+	now := time.Now()
+	acc.mu.Lock()
+	applySuccessfulAccountStateLocked(acc, now)
+	acc.mu.Unlock()
+}
+
+func (h *proxyHandler) modifyWebSocketProxyResponse(reqID string, provider Provider, acc *Account, resp *http.Response, refreshFailed bool, conversationID string) error {
+	if resp == nil {
+		return nil
+	}
+
+	provider.ParseUsageHeaders(acc, resp.Header)
+	h.applyPreCopyUpstreamStatusHandling(reqID, acc, resp, refreshFailed, true)
+	h.finalizeWebSocketSuccessState(acc, conversationID, resp.StatusCode)
+	return nil
 }
 
 func (h *proxyHandler) proxyPassthroughWebSocket(
@@ -1565,88 +1897,11 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		log.Printf("[%s] request body sample (%d bytes): %s", reqID, reqSample.Len(), safeText(reqSample.Bytes()))
 	}
 
-	needStatusBody := (isManagedCodexAPIKeyAccount(acc) && isManagedCodexAPIKeyRetryableStatus(resp.StatusCode)) ||
-		resp.StatusCode == http.StatusUnauthorized ||
-		resp.StatusCode == http.StatusForbidden
-	var inspectedStatusBody []byte
-	if needStatusBody {
-		inspectedStatusBody = inspectResponseBodyPrefix(resp, preCopyStatusInspectionLimit)
-		if !isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
-			log.Printf("[%s] account %s got %d from %s, body=%s", reqID, acc.ID, resp.StatusCode, outReq.URL.Host, safeText(inspectedStatusBody))
-		}
+	statusHandling := h.applyPreCopyUpstreamStatusHandling(reqID, acc, resp, refreshFailed, false)
+	if statusHandling.NeedStatusBody && !isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		log.Printf("[%s] account %s got %d from %s, body=%s", reqID, acc.ID, resp.StatusCode, outReq.URL.Host, safeText(statusHandling.InspectedBody))
 	}
-	_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, inspectedStatusBody)
-
-	provider.ParseUsageHeaders(acc, resp.Header)
-
-	// Snapshot rate limits from headers for use in SSE callback
-	acc.mu.Lock()
-	headerPrimaryPct := acc.Usage.PrimaryUsedPercent
-	headerSecondaryPct := acc.Usage.SecondaryUsedPercent
-	acc.mu.Unlock()
-
-	// Write response to client.
-	copyHeader(w.Header(), resp.Header)
-	removeHopByHopHeaders(w.Header())
-	h.replaceUsageHeaders(w.Header())
-	flusher, _ := w.(http.Flusher)
-	respContentType := resp.Header.Get("Content-Type")
-	isSSE := provider.DetectsSSE(r.URL.Path, respContentType)
-	w.WriteHeader(resp.StatusCode)
-	if needStatusBody && !isSSE && flusher != nil {
-		flusher.Flush()
-	}
-
-	var writer io.Writer = w
-	var fw *flushWriter
-	if isSSE && flusher != nil {
-		fw = &flushWriter{w: w, f: flusher, flushInterval: h.cfg.flushInterval}
-		writer = fw
-	}
-	managedStreamFailed := false
-	var managedStreamFailureOnce sync.Once
-
-	// Tee a bounded sample for usage extraction and conversation pinning.
-	sampleLimit := int64(16 * 1024)
-	if h.cfg.logBodies && h.cfg.bodyLogLimit > 0 {
-		sampleLimit = h.cfg.bodyLogLimit
-	}
-	sampleBuf := &bytes.Buffer{}
-	resp.Body = struct {
-		io.Reader
-		io.Closer
-	}{
-		Reader: io.TeeReader(resp.Body, &limitedWriter{w: sampleBuf, n: sampleLimit}),
-		Closer: resp.Body,
-	}
-
-	if isSSE {
-		writer = h.wrapUsageInterceptWriter(
-			reqID,
-			writer,
-			provider,
-			acc,
-			userID,
-			headerPrimaryPct,
-			headerSecondaryPct,
-			&managedStreamFailed,
-			&managedStreamFailureOnce,
-		)
-	}
-
-	// Wrap response body with idle timeout to kill zombie SSE connections.
-	var idleReader *idleTimeoutReader
-	if isSSE && h.cfg.streamIdleTimeout > 0 {
-		idleReader = newIdleTimeoutReader(resp.Body, h.cfg.streamIdleTimeout, cancel)
-		resp.Body = idleReader
-	}
-
-	_, copyErr := io.Copy(writer, resp.Body)
-	if fw != nil {
-		fw.stop()
-	}
-	respSample := sampleBuf.Bytes()
-	if !h.finalizeCopiedProxyResponse(reqID, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, "", headerPrimaryPct, headerSecondaryPct, respSample, copyErr, idleReader != nil, start, "streamed done") {
+	if !h.deliverStreamedProxyResponse(w, cancel, reqID, r.URL.Path, provider, acc, userID, resp, statusHandling.NeedStatusBody, start) {
 		return
 	}
 }
@@ -1767,14 +2022,6 @@ func (h *proxyHandler) finalizeProxyResponse(reqID string, provider Provider, ac
 	now := time.Now()
 	shouldPersistAccountState := false
 	acc.mu.Lock()
-	if isManagedCodexAPIKeyAccount(acc) {
-		acc.Dead = false
-		acc.HealthStatus = "healthy"
-		acc.HealthError = ""
-		acc.HealthCheckedAt = now
-		acc.LastHealthyAt = now
-		acc.RateLimitUntil = time.Time{}
-	}
 	if isGitLabClaudeAccount(acc) {
 		shouldPersistAccountState = acc.Dead || !acc.RateLimitUntil.IsZero() || acc.GitLabQuotaExceededCount > 0 || acc.HealthStatus != "healthy" || acc.HealthError != ""
 		acc.Dead = false
@@ -1786,17 +2033,33 @@ func (h *proxyHandler) finalizeProxyResponse(reqID string, provider Provider, ac
 		acc.GitLabQuotaExceededCount = 0
 		acc.GitLabLastQuotaExceededAt = time.Time{}
 	}
+	applySuccessfulAccountStateLocked(acc, now)
+	acc.mu.Unlock()
+	if shouldPersistAccountState {
+		if err := saveAccount(acc); err != nil {
+			log.Printf("[%s] warning: failed to persist healthy gitlab claude account %s: %v", reqID, acc.ID, err)
+		}
+	}
+}
+
+// Caller must hold acc.mu when applying shared success-state recovery.
+func applySuccessfulAccountStateLocked(acc *Account, now time.Time) {
+	if acc == nil {
+		return
+	}
+	if isManagedCodexAPIKeyAccount(acc) {
+		acc.Dead = false
+		acc.HealthStatus = "healthy"
+		acc.HealthError = ""
+		acc.HealthCheckedAt = now
+		acc.LastHealthyAt = now
+		acc.RateLimitUntil = time.Time{}
+	}
 	acc.LastUsed = now
 	if acc.Penalty > 0 {
 		acc.Penalty *= 0.5
 		if acc.Penalty < 0.01 {
 			acc.Penalty = 0
-		}
-	}
-	acc.mu.Unlock()
-	if shouldPersistAccountState {
-		if err := saveAccount(acc); err != nil {
-			log.Printf("[%s] warning: failed to persist healthy gitlab claude account %s: %v", reqID, acc.ID, err)
 		}
 	}
 }

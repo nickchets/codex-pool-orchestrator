@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"crypto/sha1"
 	"encoding/base64"
 	"fmt"
@@ -326,7 +327,8 @@ func TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat(t
 	if !strings.Contains(firstStatus, "401") {
 		t.Fatalf("expected first response to fail with 401, got %q", firstStatus)
 	}
-	if !deadAcc.Dead {
+	deadState := snapshotProxyTestAccount(deadAcc)
+	if !deadState.Dead {
 		t.Fatalf("expected dead seat to be marked dead after account_deactivated response")
 	}
 	pool.mu.RLock()
@@ -417,17 +419,18 @@ func TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback(t *
 	if calls != 2 {
 		t.Fatalf("upstream calls = %d, want 2", calls)
 	}
-	if acc.Dead {
+	accState := snapshotProxyTestAccount(acc)
+	if accState.Dead {
 		t.Fatalf("expected managed api key to remain non-dead on transient 5xx")
 	}
-	if acc.HealthStatus != "error" {
-		t.Fatalf("health status = %q", acc.HealthStatus)
+	if accState.HealthStatus != "error" {
+		t.Fatalf("health status = %q", accState.HealthStatus)
 	}
-	if !strings.Contains(acc.HealthError, "Bad Gateway") {
-		t.Fatalf("health error = %q", acc.HealthError)
+	if !strings.Contains(accState.HealthError, "Bad Gateway") {
+		t.Fatalf("health error = %q", accState.HealthError)
 	}
-	if !acc.LastUsed.IsZero() {
-		t.Fatalf("expected failed websocket handshake to keep LastUsed zero, got %v", acc.LastUsed)
+	if !accState.LastUsed.IsZero() {
+		t.Fatalf("expected failed websocket handshake to keep LastUsed zero, got %v", accState.LastUsed)
 	}
 	recent := h.recent.snapshot()
 	if len(recent) != 1 || !strings.Contains(recent[0], "managed api fallback 502 Bad Gateway") {
@@ -435,6 +438,134 @@ func TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback(t *
 	}
 	pool.mu.RLock()
 	_, pinned := pool.convPin["thread-ws-managed-502"]
+	pool.mu.RUnlock()
+	if pinned {
+		t.Fatalf("expected failed managed-api handshake session to stay unpinned")
+	}
+}
+
+func TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	expectedJSON := []byte(fmt.Sprintf(
+		`{"error":{"message":"%s","code":"insufficient_quota"}}`,
+		strings.Repeat("prefix-", 24)+"insufficient_quota",
+	))
+	var gzippedBody bytes.Buffer
+	gz := gzip.NewWriter(&gzippedBody)
+	if _, err := gz.Write(expectedJSON); err != nil {
+		t.Fatalf("write gzip body: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip body: %v", err)
+	}
+
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls == 1 {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"probe","status":"completed"}`))
+			return
+		}
+		w.Header().Set("Content-Encoding", "gzip")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write(gzippedBody.Bytes()[:1])
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(50 * time.Millisecond)
+		_, _ = w.Write(gzippedBody.Bytes()[1:8])
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		time.Sleep(50 * time.Millisecond)
+		_, _ = w.Write(gzippedBody.Bytes()[8:])
+	}))
+	defer upstream.Close()
+
+	baseURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	codex := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	claude := NewClaudeProvider(baseURL)
+	gemini := NewGeminiProvider(baseURL, baseURL)
+	registry := NewProviderRegistry(codex, claude, gemini)
+
+	tmp := t.TempDir()
+	accFile := filepath.Join(tmp, "openai_api_deadbeef.json")
+	if err := os.WriteFile(accFile, []byte(`{"OPENAI_API_KEY":"sk-proj-test","auth_mode":"api_key","plan_type":"api"}`), 0o600); err != nil {
+		t.Fatalf("write key file: %v", err)
+	}
+
+	acc := &Account{
+		ID:          "openai_api_deadbeef",
+		Type:        AccountTypeCodex,
+		File:        accFile,
+		AccessToken: "sk-proj-test",
+		PlanType:    "api",
+		AuthMode:    accountAuthModeAPIKey,
+	}
+	pool := newPoolState([]*Account{acc}, false)
+
+	h := &proxyHandler{
+		cfg: config{
+			requestTimeout:       5 * time.Second,
+			maxInMemoryBodyBytes: 1024,
+		},
+		transport: http.DefaultTransport,
+		pool:      pool,
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+	}
+
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	status, gotCompressedBody := performRawWebSocketHTTPResponse(t, proxy.URL, "/responses", map[string]string{
+		"Authorization":   "Bearer " + generateClaudePoolToken(getPoolJWTSecret(), "thread-ws-managed-gzip-429"),
+		"session_id":      "thread-ws-managed-gzip-429",
+		"Accept-Encoding": "gzip",
+	})
+	if !strings.Contains(status, "429") {
+		t.Fatalf("expected 429 response, got %q", status)
+	}
+
+	gotGzip, err := gzip.NewReader(bytes.NewReader(gotCompressedBody))
+	if err != nil {
+		t.Fatalf("new gzip reader: %v", err)
+	}
+	defer gotGzip.Close()
+
+	gotBody, err := io.ReadAll(gotGzip)
+	if err != nil {
+		t.Fatalf("read decompressed body: %v", err)
+	}
+	if !bytes.Equal(gotBody, expectedJSON) {
+		t.Fatalf("body = %q want %q", string(gotBody), string(expectedJSON))
+	}
+	if calls != 2 {
+		t.Fatalf("upstream calls = %d, want 2", calls)
+	}
+	accState := snapshotProxyTestAccount(acc)
+	if !accState.Dead {
+		t.Fatalf("expected managed api key to be marked dead on insufficient quota")
+	}
+	if accState.HealthStatus != "dead" {
+		t.Fatalf("health status = %q", accState.HealthStatus)
+	}
+	if !strings.Contains(accState.HealthError, "insufficient_quota") {
+		t.Fatalf("health error = %q", accState.HealthError)
+	}
+	recent := h.recent.snapshot()
+	if len(recent) != 1 || !strings.Contains(recent[0], "managed api fallback 429 Too Many Requests") {
+		t.Fatalf("recent = %+v", recent)
+	}
+	pool.mu.RLock()
+	_, pinned := pool.convPin["thread-ws-managed-gzip-429"]
 	pool.mu.RUnlock()
 	if pinned {
 		t.Fatalf("expected failed managed-api handshake session to stay unpinned")

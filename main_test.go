@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
@@ -452,6 +454,90 @@ func TestFinalizeProxyResponseSkipsSuccessRecoveryAfterManagedStreamFailure(t *t
 	}
 }
 
+func TestFinalizeWebSocketSuccessStateRecoversManagedAPIAccountOnNonSwitching2xx(t *testing.T) {
+	acc := &Account{
+		ID:             "openai_api_deadbeef",
+		Type:           AccountTypeCodex,
+		AuthMode:       accountAuthModeAPIKey,
+		Dead:           true,
+		HealthStatus:   "dead",
+		HealthError:    "quota_exhausted",
+		Penalty:        0.8,
+		RateLimitUntil: time.Now().Add(5 * time.Minute),
+	}
+	pool := newPoolState([]*Account{acc}, false)
+	h := &proxyHandler{pool: pool}
+
+	h.finalizeWebSocketSuccessState(acc, "thread-ws-200", http.StatusOK)
+
+	if got := pool.convPin["thread-ws-200"]; got != acc.ID {
+		t.Fatalf("conversation pin = %q", got)
+	}
+	if acc.Dead {
+		t.Fatal("expected managed api account to recover on websocket success")
+	}
+	if acc.HealthStatus != "healthy" {
+		t.Fatalf("health status = %q", acc.HealthStatus)
+	}
+	if acc.HealthError != "" {
+		t.Fatalf("health error = %q", acc.HealthError)
+	}
+	if acc.HealthCheckedAt.IsZero() || acc.LastHealthyAt.IsZero() {
+		t.Fatal("expected health timestamps to be updated")
+	}
+	if !acc.RateLimitUntil.IsZero() {
+		t.Fatalf("rate limit until = %v", acc.RateLimitUntil)
+	}
+	if acc.LastUsed.IsZero() {
+		t.Fatal("expected LastUsed to be updated")
+	}
+	if acc.Penalty != 0.4 {
+		t.Fatalf("penalty = %v", acc.Penalty)
+	}
+}
+
+func TestFinalizeWebSocketSuccessStateSkipsFailedHandshake(t *testing.T) {
+	acc := &Account{
+		ID:             "openai_api_deadbeef",
+		Type:           AccountTypeCodex,
+		AuthMode:       accountAuthModeAPIKey,
+		Dead:           true,
+		HealthStatus:   "dead",
+		HealthError:    "quota_exhausted",
+		Penalty:        0.8,
+		RateLimitUntil: time.Now().Add(5 * time.Minute),
+	}
+	pool := newPoolState([]*Account{acc}, false)
+	h := &proxyHandler{pool: pool}
+
+	h.finalizeWebSocketSuccessState(acc, "thread-ws-failed", http.StatusTooManyRequests)
+
+	if len(pool.convPin) != 0 {
+		t.Fatalf("unexpected pin map: %+v", pool.convPin)
+	}
+	if !acc.Dead {
+		t.Fatal("expected managed api account to stay dead after failed websocket handshake")
+	}
+	if acc.HealthStatus != "dead" {
+		t.Fatalf("health status = %q", acc.HealthStatus)
+	}
+	if acc.HealthError != "quota_exhausted" {
+		t.Fatalf("health error = %q", acc.HealthError)
+	}
+	if acc.HealthCheckedAt != (time.Time{}) || acc.LastHealthyAt != (time.Time{}) {
+		t.Fatalf("unexpected health timestamps: checked=%v healthy=%v", acc.HealthCheckedAt, acc.LastHealthyAt)
+	}
+	if acc.LastUsed != (time.Time{}) {
+		t.Fatalf("last used = %v", acc.LastUsed)
+	}
+	if acc.Penalty != 0.8 {
+		t.Fatalf("penalty = %v", acc.Penalty)
+	}
+	if acc.RateLimitUntil.IsZero() {
+		t.Fatal("expected rate limit state to remain unchanged")
+	}
+}
+
 func TestFinalizeCopiedProxyResponseRecordsCopyError(t *testing.T) {
 	acc := &Account{ID: "acc-1", Type: AccountTypeCodex}
 	h := &proxyHandler{
@@ -824,6 +910,88 @@ func TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededBackoffEscalate
 	}
 }
 
+func TestApplyPreCopyUpstreamStatusDispositionPreservesDeadGitLabAccount(t *testing.T) {
+	acc := &Account{
+		ID:              "claude_gitlab_deadbeef",
+		Type:            AccountTypeClaude,
+		PlanType:        "gitlab_duo",
+		AuthMode:        accountAuthModeGitLab,
+		RefreshToken:    "glpat-source",
+		AccessToken:     "gateway-token",
+		SourceBaseURL:   "https://gitlab.com",
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders:    map[string]string{"X-Gitlab-Instance-Id": "inst-1"},
+		Dead:            true,
+		HealthStatus:    "dead",
+	}
+	h := &proxyHandler{}
+	resp := &http.Response{
+		StatusCode: http.StatusForbidden,
+		Status:     "403 Forbidden",
+		Header:     http.Header{},
+	}
+
+	err := h.applyPreCopyUpstreamStatusDisposition(
+		"req-test",
+		acc,
+		resp,
+		true,
+		[]byte(`{"error":"temporary denied"}`),
+	)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if !acc.Dead {
+		t.Fatal("expected dead gitlab account to stay dead")
+	}
+	if acc.HealthStatus != "dead" {
+		t.Fatalf("health_status=%q", acc.HealthStatus)
+	}
+	if !acc.RateLimitUntil.IsZero() {
+		t.Fatalf("rate_limit_until=%v", acc.RateLimitUntil)
+	}
+}
+
+func TestApplyUpstreamAuthFailureDispositionPreservesDeadGitLabAccount(t *testing.T) {
+	acc := &Account{
+		ID:              "claude_gitlab_deadbeef",
+		Type:            AccountTypeClaude,
+		PlanType:        "gitlab_duo",
+		AuthMode:        accountAuthModeGitLab,
+		RefreshToken:    "glpat-source",
+		AccessToken:     "gateway-token",
+		SourceBaseURL:   "https://gitlab.com",
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders:    map[string]string{"X-Gitlab-Instance-Id": "inst-1"},
+		Dead:            true,
+		HealthStatus:    "dead",
+	}
+	h := &proxyHandler{}
+	resp := &http.Response{
+		StatusCode: http.StatusUnauthorized,
+		Status:     "401 Unauthorized",
+		Header:     http.Header{},
+	}
+
+	h.applyUpstreamAuthFailureDisposition(
+		"req-test",
+		acc,
+		resp,
+		true,
+		[]byte(`{"error":"temporary denied"}`),
+	)
+
+	if !acc.Dead {
+		t.Fatal("expected dead gitlab account to stay dead")
+	}
+	if acc.HealthStatus != "dead" {
+		t.Fatalf("health_status=%q", acc.HealthStatus)
+	}
+	if !acc.RateLimitUntil.IsZero() {
+		t.Fatalf("rate_limit_until=%v", acc.RateLimitUntil)
+	}
+}
+
 func TestRefreshAccountOnceGitLabBypassesPerAccountThrottle(t *testing.T) {
 	baseURL, _ := url.Parse("https://claude.example.com")
 	provider := NewClaudeProvider(baseURL)
@@ -919,5 +1087,118 @@ func TestFinalizeProxyResponseResetsGitLabQuotaBackoffAfterSuccess(t *testing.T)
 	}
 	if strings.Contains(string(saved), "\"gitlab_quota_exceeded_count\"") {
 		t.Fatalf("expected saved file to clear quota count: %s", string(saved))
+	}
+}
+
+func TestInspectResponseBodyForClassificationPlaintext(t *testing.T) {
+	body := []byte(`{"error":{"code":"insufficient_quota"}}`)
+	resp := &http.Response{
+		Header: http.Header{"Content-Type": []string{"application/json"}},
+		Body:   io.NopCloser(bytes.NewReader(body)),
+	}
+	result := inspectResponseBodyForClassification(resp, preCopyStatusInspectionLimit)
+	if !bytes.Equal(result.Inspected, body) {
+		t.Fatalf("Inspected = %q, want %q", result.Inspected, body)
+	}
+	if !bytes.Equal(result.RawPrefix, body) {
+		t.Fatalf("RawPrefix = %q, want %q", result.RawPrefix, body)
+	}
+
+	remaining, _ := io.ReadAll(resp.Body)
+	if len(remaining) != 0 {
+		t.Fatalf("body not drained: %d bytes remaining", len(remaining))
+	}
+}
+
+func TestInspectResponseBodyForClassificationGzip(t *testing.T) {
+	plain := []byte(`{"error":{"code":"insufficient_quota"}}`)
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(plain); err != nil {
+		t.Fatalf("write gzip: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	raw := buf.Bytes()
+
+	resp := &http.Response{
+		Header: http.Header{
+			"Content-Type":     []string{"application/json"},
+			"Content-Encoding": []string{"gzip"},
+		},
+		Body: io.NopCloser(bytes.NewReader(raw)),
+	}
+	result := inspectResponseBodyForClassification(resp, preCopyStatusInspectionLimit)
+	if !bytes.Equal(result.Inspected, plain) {
+		t.Fatalf("Inspected = %q, want decoded %q", result.Inspected, plain)
+	}
+	if len(result.RawPrefix) == 0 {
+		t.Fatal("RawPrefix should contain raw gzip bytes")
+	}
+	if bytes.Equal(result.RawPrefix, plain) {
+		t.Fatal("RawPrefix should be raw gzip bytes, not decoded")
+	}
+}
+
+func TestInspectResponseBodyForClassificationDoesNotReplayAutomatically(t *testing.T) {
+	plain := []byte(`{"error":{"code":"insufficient_quota"}}`)
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(plain); err != nil {
+		t.Fatalf("write gzip: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	raw := buf.Bytes()
+
+	tail := []byte("TAIL-DATA")
+	combined := append(append([]byte(nil), raw...), tail...)
+
+	resp := &http.Response{
+		Header: http.Header{
+			"Content-Type":     []string{"application/json"},
+			"Content-Encoding": []string{"gzip"},
+		},
+		Body: io.NopCloser(bytes.NewReader(combined)),
+	}
+	result := inspectResponseBodyForClassification(resp, preCopyStatusInspectionLimit)
+	if !bytes.Equal(result.Inspected, plain) {
+		t.Fatalf("Inspected = %q, want %q", result.Inspected, plain)
+	}
+
+	resp.Body = replayResponseBody(result.RawPrefix, resp.Body)
+	full, _ := io.ReadAll(resp.Body)
+	if !bytes.HasPrefix(full, result.RawPrefix) {
+		t.Fatalf("replayed body should start with raw prefix")
+	}
+	if !bytes.HasSuffix(full, tail) {
+		t.Fatalf("replayed body should end with tail data")
+	}
+}
+
+func TestInspectBufferedRetryBodyDecodesGzip(t *testing.T) {
+	plain := []byte(`{"error":{"code":"insufficient_quota"}}`)
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	if _, err := gz.Write(plain); err != nil {
+		t.Fatalf("write gzip: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("close gzip: %v", err)
+	}
+	raw := buf.Bytes()
+
+	resp := &http.Response{
+		Header: http.Header{
+			"Content-Type":     []string{"application/json"},
+			"Content-Encoding": []string{"gzip"},
+		},
+		Body: io.NopCloser(bytes.NewReader(raw)),
+	}
+	inspected := inspectBufferedRetryBody(resp.Body, preCopyStatusInspectionLimit)
+	if !bytes.Equal(inspected, plain) {
+		t.Fatalf("inspected = %q, want %q", inspected, plain)
 	}
 }

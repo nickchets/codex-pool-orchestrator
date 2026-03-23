@@ -10,18 +10,123 @@ _(empty — truthful idle handoff; successor cards are hydrated in `NEXT`)_
 
 ### NEXT
 
-#### REPO-CPO-BUG-P1-T12: Harden gzip retryable inspection against short first reads
-1. Remove the remaining chunking sensitivity in gzip retryable-status inspection so managed API quota/auth markers are not lost when the transport surfaces only a short first read.
-2. Preserve early error response delivery and full client-visible body replay for streamed and websocket non-`101` paths.
-3. Lock the slice with late-marker and short-read gzip fixtures before returning to lower-priority websocket success-state refactors.
+#### REPO-CPO-REFAC-P1-T31: Share the websocket reverse-proxy execution shell
+1. Collapse the duplicated websocket reverse-proxy execution shell so pooled and passthrough lanes share the common `ReverseProxy` serve/error/status plumbing while still injecting their own rewrite/modify behavior.
+2. Preserve path-specific semantics exactly: pooled websocket must keep auth overwrite and subprotocol bearer replacement, while passthrough must preserve original auth and Claude OAuth `beta=true` query behavior.
+3. Keep the new pre-copy status helper and pooled success finalizers untouched; this slice is only about sharing the common execution shell after `T30`.
 
-**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429DoesNotWaitForFullLargeBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestApplyPreCopyUpstreamStatusDisposition" ./...`
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestFinalizeWebSocketSuccessState.*|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketPoolAcceptsAuthFromSubprotocol|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat|TestProxyWebSocketPassthroughPreservesAuthorization" ./...`
 
 ### BLOCKED
 
 _(none)_
 
 ### DONE
+
+#### REPO-CPO-REFAC-P1-T30: Extract the pooled websocket reverse-proxy shell
+1. Collapse the remaining pooled websocket reverse-proxy contour so rewrite/error/status capture wiring no longer lives as one large inline literal inside `proxyRequestWebSocket`.
+2. Preserve pooled websocket semantics exactly: auth rewrite, subprotocol bearer replacement, response status capture, error handling, metrics accounting, and debug logging must remain unchanged.
+3. Keep the new shared pre-copy status helper and copied-response delivery helpers untouched; this slice is only about shrinking the last large pooled websocket shell before any pooled/passthrough merge discussion.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestFinalizeWebSocketSuccessState.*|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketPoolAcceptsAuthFromSubprotocol|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat|TestProxyWebSocketPassthroughPreservesAuthorization" ./...`
+
+#### REPO-CPO-REFAC-P1-T29: Share pre-copy status handling between streamed and websocket paths
+1. Collapse the duplicated streamed/websocket pre-copy response contour so retryable-status inspection, raw-body replay, and status disposition live behind one explicit helper instead of staying half-inline in both paths.
+2. Preserve path-specific differences exactly: websocket still skips `101 Switching Protocols`, while streamed still owns the extra non-managed `401/403` diagnostic log and passes `needStatusBody` into copied-response delivery for early flush behavior.
+3. Keep websocket success finalization and copied-response delivery helpers untouched; this slice is only about removing the last duplicated pre-copy status handling after `T28`.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestInspectResponseBodyForClassification|TestFinalizeWebSocketSuccessState.*|TestApplyPreCopyUpstreamStatusDisposition|TestProxyStreamedManagedAPI5xxPreservesFullErrorBody|TestProxyStreamedManagedAPI5xxDoesNotWaitForFullLargeBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat" ./...`
+
+#### REPO-CPO-REFAC-P1-T28: Extract the websocket `ModifyResponse` contour
+1. Collapse the remaining websocket response-handling contour so `ParseUsageHeaders`, status-body inspection/replay, pre-copy disposition, and success finalization live behind one explicit helper instead of staying inline in `proxyRequestWebSocket`.
+2. Preserve websocket semantics exactly: `101` vs non-`101` handling, failed-handshake no-pin behavior, raw error-body replay, and status/metrics propagation must remain unchanged.
+3. Keep copied-response delivery helpers untouched; this slice is only about shrinking the last inline websocket response contour after `T26/T27`.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestFinalizeWebSocketSuccessState.*|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat|TestApplyPreCopyUpstreamStatusDisposition" ./...`
+
+#### REPO-CPO-REFAC-P1-T27: Share success-account recovery between copied-response and websocket finalizers
+1. Extract the duplicated managed-account success recovery, `LastUsed`, and penalty-decay mutation so `finalizeProxyResponse` and `finalizeWebSocketSuccessState` stop carrying parallel account-state updates.
+2. Preserve path-specific differences exactly: buffered/streamed keep body-derived conversation pinning and GitLab Claude persistence, while websocket keeps request-conversation-only pinning and no extra persistence side effects.
+3. Keep the pre-copy disposition helpers and shared copied-response delivery core untouched while finishing the remaining success-path duplication in one bounded slice.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestFinalizeProxyResponse|TestFinalizeWebSocketSuccessState.*|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat" ./...`
+
+#### REPO-CPO-REFAC-P1-T26: Extract the websocket success-state finalizer
+1. Collapse the remaining websocket success-state mutation block in `proxyRequestWebSocket` `ModifyResponse` so session pinning, managed API recovery, `LastUsed`, and penalty decay live behind one explicit helper instead of inline mutation after status disposition.
+2. Preserve the current websocket semantics exactly: `101` vs non-`101` handling, failed-handshake no-pin behavior, managed API recovery, and response-body/error propagation must remain unchanged.
+3. Keep the shared copied-response delivery core from `T25` untouched; websocket stays on its own lane because it does not call `finalizeCopiedProxyResponse`.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestFinalizeWebSocketSuccessState.*|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat|TestApplyPreCopyUpstreamStatusDisposition" ./...`
+
+#### REPO-CPO-REFAC-P1-T25: Extract the shared copied-response delivery core
+1. Collapse the duplicated buffered/streamed copied-response delivery mechanics behind one shared helper that owns header copy, usage-header replacement, SSE writer setup, idle-timeout wiring, body copy, and `finalizeCopiedProxyResponse` entry while accepting the remaining mode-specific inputs explicitly.
+2. Preserve the current mode differences exactly: buffered `sampleBuf` reuse vs streamed tee sampling, buffered `conversationID` passthrough vs streamed empty pin input, streamed early flush after inspected status bodies, and the current response-body close semantics.
+3. Keep websocket flow untouched while preparing a later success-path cleanup for that lane instead of widening this slice into a three-way merge.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyBuffered.*|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+
+#### REPO-CPO-REFAC-P1-T24: Extract the streamed success-delivery tail
+1. Collapse the remaining streamed success-response setup in `proxyRequestStreamed` so header copy, optional early flush after inspected status bodies, sample tee wiring, SSE wrapping, idle-timeout wiring, body copy, and `finalizeCopiedProxyResponse` entry live behind one explicit helper instead of another large inline tail.
+2. Preserve the current streamed delivery semantics exactly: replayed inspected status bodies, usage capture, managed-stream failure handling, empty buffered conversation pin input, and `recent`/metrics finalization must remain unchanged.
+3. Keep the buffered-only delivery helper from `T23` untouched while preparing a later shared copied-response delivery slice between buffered and streamed modes.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyBuffered.*|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+
+#### REPO-CPO-REFAC-P1-T23: Extract the buffered success-delivery tail
+1. Collapse the remaining buffered success-response setup in `proxyRequest` so header copy, SSE wrapping, idle-timeout wiring, body copy, and `finalizeCopiedProxyResponse` entry live behind one explicit helper instead of another large inline tail.
+2. Preserve the current buffered delivery semantics exactly: usage-header replacement, SSE flush/usage interception, idle timeout handling, conversation pinning, and `recent`/metrics finalization must remain unchanged.
+3. Keep the new retry-attempt contour from `T22` untouched while preparing the buffered path for a later shared copied-response transport slice with streamed mode.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyBuffered.*|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+
+#### REPO-CPO-REFAC-P1-T22: Extract the buffered retry attempt contour
+1. Collapse the remaining repeated buffered retry-attempt bookkeeping in `proxyRequest` so account selection, exclusion, retryable-status formatting, and final all-attempt failure shaping share one explicit contour.
+2. Preserve the current disposition semantics for ordinary Codex seats, managed API keys, and managed GitLab Claude tokens exactly as locked by `T20/T21`.
+3. Keep streamed and websocket paths untouched while preparing the buffered path for smaller follow-on routing refactors instead of more ad hoc branch growth.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyBuffered.*|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+
+#### REPO-CPO-TEST-P1-T21: Add buffered GitLab Claude retry parity coverage
+1. Add focused non-stream proxy tests for GitLab Claude buffered `402/401/403` retry behavior, including quota-exceeded cooldown handling and refresh-failed dead-state handling where applicable.
+2. Verify that buffered Claude/GitLab retries keep their current semantics without borrowing any streamed/websocket replay assumptions.
+3. Keep the new buffered Codex parity suite unchanged while closing the last provider-specific buffered coverage gap before broader retry-loop extraction.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyBuffered.*|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+
+#### REPO-CPO-TEST-P1-T20: Add buffered retry parity coverage for status handling
+1. Add focused non-stream proxy tests that exercise buffered retry behavior for managed API `402/429` and ordinary account `402/403/5xx` branches, so the retry loop is covered as behavior rather than only through helper-level tests.
+2. Verify that buffered retries keep their current semantics: managed API fallback/dead-state handling, ordinary codex dead-state and retry behavior, and synthesized upstream error messages without replay assumptions.
+3. Keep streamed/websocket coverage unchanged while locking the buffered path before provider-specific GitLab Claude follow-ups.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyBuffered.*|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+
+#### REPO-CPO-REFAC-P1-T19: Simplify buffered retry status branches after inspection split
+1. Use the explicit buffered inspection helper as the only semantic body snapshot primitive in the non-stream retry loop, and remove the remaining repeated per-branch inspection calls around retryable `402/429/401/403/5xx` handling.
+2. Keep the streamed/websocket pre-copy replay contract untouched while shrinking buffered retry branching to status-specific disposition logic only.
+3. Lock the slice with focused helper/replay parity tests before returning to deeper buffered retry coverage.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+
+#### REPO-CPO-REFAC-P1-T18: Align buffered inspection with the split pre-copy contract
+1. Keep streamed/websocket pre-copy inspection on the split `preCopyInspection` contract, while making the buffered retry loop explicitly use a separate fully buffered semantic snapshot helper instead of a dead compatibility shim.
+2. Remove the transitional `inspectAndReplayResponseBody` path now that no production caller needs a one-call “inspect plus replay” helper.
+3. Lock the slice with focused inspection tests plus retry-path parity before returning to broader buffered branch simplification.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestApplyPreCopyUpstreamStatusDisposition|TestInspectResponseBodyForClassification|TestInspectBufferedRetryBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback" ./...`
+
+#### REPO-CPO-REFAC-P1-T17: Separate pre-copy inspection semantics from replay transport
+1. Split the shared pre-copy status-inspection contract so transport body replay and semantic error classification no longer overload the same helper return value.
+2. Preserve streamed and websocket non-`101` client-visible error bodies exactly while unifying gzip/plain inspection behavior behind one bounded semantic inspector.
+3. Lock the refactor with parity tests for managed API quota/auth bodies and websocket fallback responses before touching broader retry or provider routing paths.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestApplyPreCopyUpstreamStatusDisposition" ./...`
+
+#### REPO-CPO-BUG-P1-T12: Harden gzip retryable inspection against short first reads
+1. Remove the remaining chunking sensitivity in gzip retryable-status inspection so managed API quota/auth markers are not lost when the transport surfaces only a short first read.
+2. Preserve early error response delivery and full client-visible body replay for streamed and websocket non-`101` paths.
+3. Lock the slice with late-marker and short-read gzip fixtures before returning to lower-priority websocket success-state refactors.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyStreamedManagedAPICompressed429DoesNotWaitForFullLargeBody|TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestApplyPreCopyUpstreamStatusDisposition" ./...`
 
 #### REPO-CPO-REFAC-P1-T16: Harden GitLab Claude persistence and health truth
 1. Collapse `saveGitLabClaudeAccount` to one fail-closed persistence path so managed GitLab Claude files stop relying on dual serialization branches and ad hoc map rewrites.
