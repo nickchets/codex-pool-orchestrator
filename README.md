@@ -1,22 +1,10 @@
-<p align="center">
-  <img src="logo.png" alt="codex-pool" width="400">
-</p>
+# codex-pool
 
-<h1 align="center">codex-pool</h1>
-
-<p align="center">
-  <strong>Pool your accounts. Share with friends. Never swap credentials again.</strong>
-</p>
-
----
+Pool your accounts. Share with friends. Never swap credentials again.
 
 A reverse proxy that distributes your Agent (Codex/Claude/Gemini) sessions across multiple accounts. Got three Codex accounts? Five Claude logins? The proxy spreads your usage across all of them automatically - no manual switching, no juggling auth files.
 
 Works with **Codex CLI**, **Claude Code**, and **Gemini CLI**.
-
-<p align="center">
-  <img src="screenshots/analytics-dashboard.png" alt="Pool Analytics" width="700">
-</p>
 
 ---
 
@@ -33,23 +21,20 @@ Or maybe you want to pool accounts with friends - everyone throws their accounts
 - Auto-refreshes tokens before they expire
 - Proxies WebSocket upgrades (including Codex Responses WS and realtime `/ws` flows)
 - Tracks usage so you can see who's burning through quota
+- Exposes a dashboard-first local operator surface on `/` and `/status`
 
 ---
 
-## Screenshots
+## Operator Surface
 
-### Setup Dashboard
+The local operator UI is dashboard-first:
 
-<p align="center">
-  <img src="screenshots/local-mode.png" alt="Local Mode" width="700">
-</p>
+- `/` shows live `Codex`, `Claude`, and `Gemini` dashboards
+- `/status` exposes the raw operator dashboard and JSON status contract
+- account onboarding and delete actions are available from the web surface
+- fallback API keys and GitLab Claude tokens are managed from the same operator surface
 
-### Friends Mode
-Share your pool with others using a friend code.
-
-<p align="center">
-  <img src="screenshots/friends-mode-login.png" alt="Friends Mode" width="500">
-</p>
+Friends mode still exists, but the local documentation and operator flow are intentionally text-first and dashboard-first instead of screenshot-driven.
 
 ---
 
@@ -174,8 +159,9 @@ systemctl --user status codex-pool.service --no-pager
 
 The preferred add-account path is the `/status` web button or `codex-oauth-add`.
 Keep `codex-oauth-start` and `codex-oauth-exchange` as low-level fallback only.
+The local `/` page is intended to be an operator dashboard, not a decorative landing page.
 
-Current development version is tracked in `VERSION`. Fork-specific release history lives in
+Current tracked version is stored in `VERSION`. Fork-specific release history lives in
 `CHANGELOG.md`, and version bump rules live in `VERSIONING.md`.
 
 ---

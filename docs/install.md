@@ -60,6 +60,11 @@ One-shot add-account flow:
 python3 orchestrator/codex_pool_manager.py codex-oauth-add
 ```
 
+Preferred web surfaces:
+
+- `http://127.0.0.1:8989/` for the dashboard-first operator view
+- `http://127.0.0.1:8989/status` for the raw operator dashboard and JSON status contract
+
 Low-level fallback:
 
 ```bash
