@@ -6,27 +6,34 @@
 
 ### DOING
 
-#### REPO-CPO-ALIGN-P1-T43: Separate Gemini onboarding lanes from provider-specific automation
-1. Split the current Gemini operator contract into explicit lanes so `/` and `/status` stop mixing managed Gemini OAuth seat onboarding with provider-specific automation/import behavior.
-2. Remove borrowed antigravity semantics from the default Gemini dashboard flow and replace them with first-party pool concepts: managed Gemini seats, optional generic API pool, and any future automation as a separate operator lane.
-3. Keep the slice bounded to operator/UI/router behavior first, then re-verify that the resulting Gemini dashboard still reflects truthful pool state instead of button-driven side effects.
-
-**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestLocalOperatorGeminiSeatAddStoresManagedSeat|TestLocalOperatorGeminiOAuthStartAllowsLoopbackWithoutAdminHeader|TestManagedGeminiOAuthCallbackStoresManagedSeat|TestServeStatusPageIncludesOperatorActionForLocalLoopback|TestServeStatusPageHidesOperatorActionOutsideLoopback|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction|TestBuildPoolDashboardData.*' ./...`
-
-### NEXT
-
 #### REPO-CPO-ALIGN-P1-T44: Reconcile Gemini pool truth after the operator split
 1. Make the Gemini dashboard summarize the actual pool composition after the operator split: managed seats, generic API-style fallback lanes if enabled, and automation/import lanes if configured.
 2. Ensure account rows, counters, and operator actions use the same source-of-truth field names across `/status?format=json`, `/status`, and the landing page.
 3. Lock the slice with targeted dashboard/status regressions and one live smoke against the running service once the UI split lands.
 
-**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestServeStatusPageReturnsJSONForFormatQuery|TestServeStatusPage|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction|TestBuildPoolDashboardData.*|TestGeminiProviderLoadAccountLoadsPersistedState' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="gemini")|{id,eligible:(.routing.eligible//false),block_reason:(.routing.block_reason//null),managed:(.managed//false),health_status:(.health_status//null)}]}'`
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestServeStatusPageReturnsJSONForFormatQuery|TestServeStatusPage|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction|TestBuildPoolDashboardData.*|TestGeminiProviderLoadAccountLoadsPersistedState' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,gemini_operator:.gemini_operator,accounts:[.accounts[]|select(.type=="gemini")|{id,operator_source,eligible:(.routing.eligible//false),block_reason:(.routing.block_reason//null),health_status:(.health_status//null)}]}'`
+
+### NEXT
+
+#### REPO-CPO-BUG-P1-T45: Repair Gemini managed OAuth runtime after env externalization
+1. Split the current Gemini operator contract into explicit lanes so `/` and `/status` stop mixing managed Gemini OAuth seat onboarding with provider-specific automation/import behavior.
+2. Now that the repo no longer ships hardcoded Google OAuth clients, make the managed Gemini path degrade cleanly from the local service env and recover existing seats without ambiguous `unauthorized_client` drift.
+3. Keep it bounded to runtime/config truth: env-backed client discovery, operator messaging, and migration/sanity for older managed seats that depended on repo-bundled defaults.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestGeminiProviderRefreshTokenFallsBackToGCloudClient|TestGeminiProviderRefreshTokenFallsBackOn400InvalidGrant|TestGeminiProviderRefreshTokenFallsBackOn400InvalidClient|TestLocalOperatorGeminiOAuthStartAllowsLoopbackWithoutAdminHeader|TestManagedGeminiOAuthCallbackStoresManagedSeat|TestBuildPoolDashboardDataSeparatesGeminiOperatorLanes' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_operator:.gemini_operator,gemini_accounts:[.accounts[]|select(.type=="gemini")|{id,operator_source,health_status}]}'`
 
 ### BLOCKED
 
 _(none)_
 
 ### DONE
+
+#### REPO-CPO-ALIGN-P1-T43: Separate Gemini onboarding lanes from provider-specific automation
+1. Split the Gemini operator/dashboard contract into explicit lanes so managed Gemini OAuth and manual `oauth_creds.json` import stop pretending to be the same action.
+2. Remove the false "fallback-only" wording from Gemini import flow, classify Gemini seats by operator source, and hide the managed OAuth CTA when the local service has no configured Gemini OAuth client.
+3. Keep the slice operator-facing and truthful: `/status?format=json`, `/status`, and the landing page now expose the same Gemini lane split and source labels.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestBuildPoolDashboardDataSeparatesGeminiOperatorLanes|TestGeminiProviderLoadAccountLoadsPersistedState|TestSaveGeminiAccountPersistsOAuthProfileID|TestGeminiProviderRefreshTokenFallsBackToGCloudClient|TestGeminiProviderRefreshTokenFallsBackOn400InvalidGrant|TestGeminiProviderRefreshTokenFallsBackOn400InvalidClient|TestLocalOperatorGeminiSeatAddStoresManagedSeat|TestLocalOperatorGeminiSeatAddMarksUnauthorizedSeatDead|TestLocalOperatorGeminiSeatAddIgnoresProvidedRuntimeState|TestLocalOperatorGeminiSeatAddRejectsNullAuthJSON|TestLocalOperatorGeminiOAuthStartAllowsLoopbackWithoutAdminHeader|TestManagedGeminiOAuthCallbackRejectsExpiredState|TestManagedGeminiRedirectURIPreservesLoopbackFamily|TestLocalOperatorGeminiOAuthCallbackStoresManagedSeat|TestServeStatusPageIncludesOperatorActionForLocalLoopback|TestServeStatusPageHidesOperatorActionOutsideLoopback|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction' ./... && go build ./... && go build -o /home/lap/.local/bin/codex-pool . && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_operator:.gemini_operator,gemini_accounts:[.accounts[]|select(.type=="gemini")|{id,operator_source,health_status,block_reason:(.routing.block_reason//null)}]}'`
 
 #### REPO-CPO-VERIFY-P1-T41: Controlled live threshold and API-fallback cutover proof
 1. Temporarily exclude every currently eligible local Codex seat from the live pool, then verify the API fallback lane becomes the only remaining eligible Codex path.

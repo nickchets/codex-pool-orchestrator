@@ -11,6 +11,8 @@ type accountSnapshot struct {
 	Type                      AccountType
 	PlanType                  string
 	AuthMode                  string
+	OAuthProfileID            string
+	OperatorSource            string
 	AccountID                 string
 	IDToken                   string
 	IDTokenChatGPTAccountID   string
@@ -57,6 +59,8 @@ func snapshotAccountState(a *Account, now time.Time, accountType AccountType, re
 		Type:                      a.Type,
 		PlanType:                  a.PlanType,
 		AuthMode:                  authMode,
+		OAuthProfileID:            a.OAuthProfileID,
+		OperatorSource:            normalizeGeminiOperatorSource(a.OperatorSource, a.OAuthProfileID, a.Type),
 		AccountID:                 a.AccountID,
 		IDToken:                   a.IDToken,
 		IDTokenChatGPTAccountID:   a.IDTokenChatGPTAccountID,

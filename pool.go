@@ -30,6 +30,12 @@ const (
 	accountAuthModeGitLab = "gitlab_duo"
 )
 
+const (
+	geminiOperatorSourceManagedOAuth       = "managed_oauth"
+	geminiOperatorSourceManualImport       = "manual_import"
+	geminiOperatorSourceManualImportLegacy = "manual_import_legacy"
+)
+
 // Codex seats leave rotation once usage reaches 90%, i.e. when remaining headroom is 10% or below.
 const codexPreemptiveUsedThreshold = 0.90
 
@@ -166,6 +172,7 @@ type Account struct {
 	OAuthProfileID    string
 	OAuthClientID     string
 	OAuthClientSecret string
+	OperatorSource    string
 	// AccountID corresponds to Codex `auth.json` field `tokens.account_id`.
 	// Codex uses this value as the `ChatGPT-Account-ID` header.
 	AccountID string
@@ -216,6 +223,24 @@ func accountAuthMode(a *Account) string {
 
 func isManagedCodexAPIKeyAccount(a *Account) bool {
 	return a != nil && a.Type == AccountTypeCodex && accountAuthMode(a) == accountAuthModeAPIKey
+}
+
+func normalizeGeminiOperatorSource(source, profileID string, accountType AccountType) string {
+	if accountType != AccountTypeGemini {
+		return ""
+	}
+	switch strings.TrimSpace(source) {
+	case geminiOperatorSourceManagedOAuth:
+		return geminiOperatorSourceManagedOAuth
+	case geminiOperatorSourceManualImport:
+		return geminiOperatorSourceManualImport
+	case geminiOperatorSourceManualImportLegacy:
+		return geminiOperatorSourceManualImportLegacy
+	}
+	if strings.TrimSpace(profileID) != "" {
+		return geminiOperatorSourceManagedOAuth
+	}
+	return geminiOperatorSourceManualImportLegacy
 }
 
 func codexAccountCountsAgainstQuota(a *Account) bool {
@@ -355,6 +380,7 @@ type GeminiAuthJSON struct {
 	OAuthProfileID  string     `json:"oauth_profile_id,omitempty"`
 	ClientID        string     `json:"client_id,omitempty"`
 	ClientSecret    string     `json:"client_secret,omitempty"`
+	OperatorSource  string     `json:"operator_source,omitempty"`
 	ExpiryDate      int64      `json:"expiry_date"`  // Unix timestamp in milliseconds
 	PlanType        string     `json:"plan_type"`    // e.g., "ultra", "gemini"
 	LastRefresh     string     `json:"last_refresh"` // RFC3339 timestamp of last refresh attempt
@@ -1256,6 +1282,12 @@ func saveGeminiAccount(a *Account) error {
 		} else {
 			delete(root, "client_secret")
 		}
+	}
+	operatorSource := strings.TrimSpace(a.OperatorSource)
+	if operatorSource != "" {
+		root["operator_source"] = operatorSource
+	} else {
+		delete(root, "operator_source")
 	}
 	if !a.ExpiresAt.IsZero() {
 		root["expiry_date"] = a.ExpiresAt.UnixMilli()

@@ -9,6 +9,16 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.6.1] - 2026-03-24
+
+### Changed
+- Gemini operator surfaces now split managed OAuth onboarding from manual `oauth_creds.json` import instead of presenting them as one mixed flow.
+- `/status?format=json` now exposes explicit Gemini operator truth via `gemini_operator` and per-account `operator_source` labels so the landing page and `/status` can describe the same pool composition.
+- When the local service has no configured Gemini OAuth client, the managed Gemini CTA now degrades honestly into an unavailable note instead of looking like another working onboarding path.
+
+### Fixed
+- Manual Gemini `oauth_creds.json` import is no longer mislabeled as a fallback/API pool. Imported credentials are shown as regular Gemini seats with explicit source labels.
+
 ## [0.6.0] - 2026-03-24
 
 ### Added

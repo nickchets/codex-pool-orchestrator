@@ -246,6 +246,52 @@ func TestBuildPoolDashboardDataShowsGitLabDirectAccessSignals(t *testing.T) {
 	}
 }
 
+func TestBuildPoolDashboardDataSeparatesGeminiOperatorLanes(t *testing.T) {
+	setGeminiOAuthTestProfiles(t)
+
+	now := time.Date(2026, 3, 24, 10, 0, 0, 0, time.UTC)
+	managed := &Account{
+		ID:             "gemini_managed",
+		Type:           AccountTypeGemini,
+		PlanType:       "gemini",
+		AuthMode:       accountAuthModeOAuth,
+		OAuthProfileID: "gcloud",
+		OperatorSource: geminiOperatorSourceManagedOAuth,
+	}
+	imported := &Account{
+		ID:             "gemini_imported",
+		Type:           AccountTypeGemini,
+		PlanType:       "gemini",
+		AuthMode:       accountAuthModeOAuth,
+		OperatorSource: geminiOperatorSourceManualImport,
+	}
+
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{managed, imported}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	data := h.buildPoolDashboardData(now)
+	if data.GeminiOperator.ManagedSeatCount != 1 {
+		t.Fatalf("managed_seat_count=%d", data.GeminiOperator.ManagedSeatCount)
+	}
+	if data.GeminiOperator.ImportedSeatCount != 1 {
+		t.Fatalf("imported_seat_count=%d", data.GeminiOperator.ImportedSeatCount)
+	}
+	if !data.GeminiOperator.ManagedOAuthAvailable {
+		t.Fatalf("expected managed_oauth_available=true")
+	}
+	if data.GeminiOperator.ManagedOAuthProfile != "gcloud" {
+		t.Fatalf("managed_oauth_profile=%q", data.GeminiOperator.ManagedOAuthProfile)
+	}
+	if len(data.Accounts) != 2 {
+		t.Fatalf("accounts=%d", len(data.Accounts))
+	}
+	if data.Accounts[0].OperatorSource == "" || data.Accounts[1].OperatorSource == "" {
+		t.Fatalf("operator sources missing: %+v", data.Accounts)
+	}
+}
+
 func TestBuildPoolDashboardDataBlocksGitLabTokensMissingGatewayState(t *testing.T) {
 	now := time.Date(2026, 3, 23, 6, 45, 0, 0, time.UTC)
 	gitlabClaude := &Account{
@@ -772,6 +818,8 @@ func TestLocalOperatorCodexAPIKeyAddMarksQuotaKeyDead(t *testing.T) {
 }
 
 func TestLocalOperatorGeminiSeatAddStoresManagedSeat(t *testing.T) {
+	setGeminiOAuthTestProfiles(t)
+
 	apiBase, err := url.Parse("https://api.example.com")
 	if err != nil {
 		t.Fatalf("parse api base: %v", err)
@@ -794,7 +842,7 @@ func TestLocalOperatorGeminiSeatAddStoresManagedSeat(t *testing.T) {
 	}
 
 	authJSON := `{"access_token":"seed-token","refresh_token":"refresh-token","expiry_date":1774353600000}`
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/gemini/account-add", strings.NewReader(`{"auth_json":`+strconv.Quote(authJSON)+`}`))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/gemini/import-oauth-creds", strings.NewReader(`{"auth_json":`+strconv.Quote(authJSON)+`}`))
 	req.Host = "127.0.0.1:8989"
 	req.RemoteAddr = "127.0.0.1:4242"
 	req.Header.Set("Content-Type", "application/json")
@@ -823,9 +871,22 @@ func TestLocalOperatorGeminiSeatAddStoresManagedSeat(t *testing.T) {
 	if _, err := os.Stat(seatPath); err != nil {
 		t.Fatalf("expected stored gemini seat file at %s: %v", seatPath, err)
 	}
+	saved, err := os.ReadFile(seatPath)
+	if err != nil {
+		t.Fatalf("read seat file: %v", err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(saved, &root); err != nil {
+		t.Fatalf("unmarshal seat file: %v", err)
+	}
+	if root["operator_source"] != geminiOperatorSourceManualImport {
+		t.Fatalf("operator_source=%#v", root["operator_source"])
+	}
 }
 
 func TestLocalOperatorGeminiSeatAddMarksUnauthorizedSeatDead(t *testing.T) {
+	setGeminiOAuthTestProfiles(t)
+
 	apiBase, err := url.Parse("https://api.example.com")
 	if err != nil {
 		t.Fatalf("parse api base: %v", err)
@@ -869,6 +930,8 @@ func TestLocalOperatorGeminiSeatAddMarksUnauthorizedSeatDead(t *testing.T) {
 }
 
 func TestLocalOperatorGeminiSeatAddIgnoresProvidedRuntimeState(t *testing.T) {
+	setGeminiOAuthTestProfiles(t)
+
 	apiBase, err := url.Parse("https://api.example.com")
 	if err != nil {
 		t.Fatalf("parse api base: %v", err)
@@ -958,7 +1021,7 @@ func TestLocalOperatorGeminiSeatAddRejectsNullAuthJSON(t *testing.T) {
 		registry: NewProviderRegistry(codex, claude, gemini),
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/gemini/account-add", strings.NewReader(`{"auth_json":"null"}`))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/gemini/import-oauth-creds", strings.NewReader(`{"auth_json":"null"}`))
 	req.Host = "127.0.0.1:8989"
 	req.RemoteAddr = "127.0.0.1:4242"
 	req.Header.Set("Content-Type", "application/json")
@@ -1172,6 +1235,9 @@ func TestLocalOperatorGeminiOAuthCallbackStoresManagedSeat(t *testing.T) {
 	}
 	if root["oauth_profile_id"] != "gcloud" {
 		t.Fatalf("saved oauth_profile_id=%#v", root["oauth_profile_id"])
+	}
+	if root["operator_source"] != geminiOperatorSourceManagedOAuth {
+		t.Fatalf("saved operator_source=%#v", root["operator_source"])
 	}
 	if _, ok := root["client_id"]; ok {
 		t.Fatalf("expected saved seat to omit raw client_id: %#v", root["client_id"])
@@ -1402,6 +1468,8 @@ func TestServeStatusPageIncludesQuarantineStatus(t *testing.T) {
 }
 
 func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
+	setGeminiOAuthTestProfiles(t)
+
 	now := time.Date(2026, 3, 19, 13, 0, 0, 0, time.UTC)
 	account := &Account{
 		ID:        "healthy",
@@ -1433,14 +1501,15 @@ func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 	for _, fragment := range []string{
 		"Start Codex OAuth",
 		"Fallback API Pool",
-		"Gemini Seat Pool",
-		"Start Gemini OAuth",
+		"Managed Gemini OAuth",
+		"Start Managed Gemini OAuth",
+		"Manual Gemini Import",
 		"Add API Key",
-		"Add Gemini Seat",
+		"Import oauth_creds.json",
 		"openai-api-key-input",
 		"gemini-seat-json-input",
 		"/operator/codex/api-key-add",
-		"/operator/gemini/account-add",
+		"/operator/gemini/import-oauth-creds",
 		"/operator/gemini/oauth-start",
 		"/operator/account-delete",
 		"deleteAccountFromStatus",
@@ -1465,7 +1534,6 @@ func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
-		"Import Gemini",
 		"noopener noreferrer",
 		"auth_expires_in || ''",
 		"local_last_used || ''",
@@ -1512,10 +1580,11 @@ func TestServeStatusPageHidesOperatorActionOutsideLoopback(t *testing.T) {
 		"codex_pool_manager.py codex-oauth-start",
 		"/operator/codex/oauth-start",
 		"Fallback API Pool",
-		"Gemini Seat Pool",
-		"Start Gemini OAuth",
+		"Managed Gemini OAuth",
+		"Start Managed Gemini OAuth",
+		"Manual Gemini Import",
 		"/operator/codex/api-key-add",
-		"/operator/gemini/account-add",
+		"/operator/gemini/import-oauth-creds",
 		"/operator/gemini/oauth-start",
 		"/operator/account-delete",
 	} {

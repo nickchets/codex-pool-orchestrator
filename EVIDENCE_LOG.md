@@ -2,6 +2,28 @@
 
 > Repo-local evidence for root harness proof execution.
 
+### 2026-03-24T10:38:00Z | REPO-CPO-ALIGN-P1-T43
+- Commands
+  - `gofmt -w pool.go account_snapshot.go provider_gemini.go gemini_operator.go status.go router.go provider_gemini_test.go status_dashboard_test.go frontend_setup_scripts_test.go`
+  - `go test -count=1 -run 'TestBuildPoolDashboardDataSeparatesGeminiOperatorLanes|TestGeminiProviderLoadAccountLoadsPersistedState|TestSaveGeminiAccountPersistsOAuthProfileID|TestGeminiProviderRefreshTokenFallsBackToGCloudClient|TestGeminiProviderRefreshTokenFallsBackOn400InvalidGrant|TestGeminiProviderRefreshTokenFallsBackOn400InvalidClient|TestLocalOperatorGeminiSeatAddStoresManagedSeat|TestLocalOperatorGeminiSeatAddMarksUnauthorizedSeatDead|TestLocalOperatorGeminiSeatAddIgnoresProvidedRuntimeState|TestLocalOperatorGeminiSeatAddRejectsNullAuthJSON|TestLocalOperatorGeminiOAuthStartAllowsLoopbackWithoutAdminHeader|TestManagedGeminiOAuthCallbackRejectsExpiredState|TestManagedGeminiRedirectURIPreservesLoopbackFamily|TestLocalOperatorGeminiOAuthCallbackStoresManagedSeat|TestServeStatusPageIncludesOperatorActionForLocalLoopback|TestServeStatusPageHidesOperatorActionOutsideLoopback|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction' ./...`
+  - `go build ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_gemini_split_status.json`
+  - `jq '{gemini_operator:.gemini_operator, gemini_accounts:[.accounts[]|select(.type=="gemini")|{id,operator_source,health_status,block_reason:(.routing.block_reason//null)}]}' /tmp/cpo_gemini_split_status.json`
+  - `curl -fsS http://127.0.0.1:8989/ >/tmp/cpo_gemini_split_landing.html`
+  - `rg -n 'Managed Gemini OAuth|Manual Gemini Import|Import oauth_creds.json|Managed OAuth|Imported Seats' /tmp/cpo_gemini_split_landing.html`
+- Result
+  - PASS
+  - Gemini operator flow is now split into two explicit lanes instead of one ambiguous dashboard action. `/status` and `/` both show `Managed Gemini OAuth` separately from `Manual Gemini Import`, and the raw `oauth_creds.json` path is no longer described as a fallback/API pool.
+  - The live JSON contract now surfaces Gemini operator truth directly: the running service reports `gemini_operator.managed_oauth_available = false`, `managed_seat_count = 0`, `imported_seat_count = 4`, and every current Gemini account is labeled `operator_source = "manual import"`.
+  - The live landing page reflects the same split. Captured HTML includes `Managed Gemini OAuth`, `Manual Gemini Import`, `Import oauth_creds.json`, `Imported Seats`, and `Managed OAuth`, so the operator-facing DOM no longer hides the lane distinction behind one mixed CTA.
+  - Managed Gemini OAuth now degrades honestly when the service env is not configured. Instead of exposing a broken button that silently behaves like another flow, the running UI reports that the service has no configured Gemini OAuth client and leaves only the manual-import lane available.
+- Artifacts
+  - `/tmp/cpo_gemini_split_status.json`
+  - `/tmp/cpo_gemini_split_landing.html`
+- Notes
+  - This slice intentionally stopped before repairing the underlying managed Gemini OAuth runtime for env-backed recovery of older seats; that successor is now tracked separately after the UI/operator split landed.
+
 ### 2026-03-24T10:08:00Z | REPO-CPO-VERIFY-P1-T41
 - Commands
   - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_t41_before.json`

@@ -33,7 +33,7 @@ The local operator UI is dashboard-first:
 - `/status` exposes the raw operator dashboard and JSON status contract
 - account onboarding and delete actions are available from the web surface
 - fallback API keys and GitLab Claude tokens are managed from the same operator surface
-- Gemini seats can be onboarded from `/` or `/status` with `Start Gemini OAuth`; pasted `oauth_creds.json` stays fallback-only
+- Gemini now exposes separate operator lanes for managed OAuth onboarding and manual `oauth_creds.json` import on `/` and `/status`
 - managed Gemini OAuth client credentials are loaded from the local service environment, not committed in the repo
 
 Friends mode still exists, but the local documentation and operator flow are intentionally text-first and dashboard-first instead of screenshot-driven.
@@ -68,7 +68,7 @@ pool/
 For Gemini seats, use the local operator dashboard:
 
 1. Open `http://127.0.0.1:8989/` or `http://127.0.0.1:8989/status`
-2. In the Gemini operator panel, click `Start Gemini OAuth`
+2. In the Gemini operator panel, click `Start Managed Gemini OAuth` if the service is configured for managed Gemini OAuth
 3. Complete Google sign-in and let the dashboard store and probe the seat
 
 Managed Gemini OAuth requires local client credentials in the service environment:
@@ -78,7 +78,7 @@ export GEMINI_OAUTH_GCLOUD_CLIENT_ID=...
 export GEMINI_OAUTH_GCLOUD_CLIENT_SECRET=...
 ```
 
-If you already have a real Gemini `oauth_creds.json`, you can still paste it into the fallback field on `/` or `/status`.
+If you already have a real Gemini `oauth_creds.json`, you can import it through the manual-import field on `/` or `/status`. Imported credentials become regular Gemini seats, not a separate fallback pool.
 
 ### 2. Run it
 

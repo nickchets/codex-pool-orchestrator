@@ -36,6 +36,7 @@ func TestGeminiProviderLoadAccountLoadsPersistedState(t *testing.T) {
 		"refresh_token": "refresh-token",
 		"client_id": "client-id",
 		"client_secret": "client-secret",
+		"operator_source": "manual_import",
 		"expiry_date": 1774353600000,
 		"plan_type": "gemini",
 		"last_refresh": "2026-03-23T10:00:00Z",
@@ -75,6 +76,9 @@ func TestGeminiProviderLoadAccountLoadsPersistedState(t *testing.T) {
 	}
 	if acc.OAuthClientSecret != "client-secret" {
 		t.Fatalf("OAuthClientSecret = %q", acc.OAuthClientSecret)
+	}
+	if acc.OperatorSource != geminiOperatorSourceManualImport {
+		t.Fatalf("OperatorSource = %q", acc.OperatorSource)
 	}
 	if acc.HealthCheckedAt != healthCheckedAt {
 		t.Fatalf("HealthCheckedAt = %v, want %v", acc.HealthCheckedAt, healthCheckedAt)
@@ -200,6 +204,7 @@ func TestSaveGeminiAccountPersistsOAuthProfileID(t *testing.T) {
 		AccessToken:    "new-access",
 		RefreshToken:   "new-refresh",
 		OAuthProfileID: "gcloud",
+		OperatorSource: geminiOperatorSourceManagedOAuth,
 	}
 
 	if err := saveGeminiAccount(acc); err != nil {
@@ -217,6 +222,9 @@ func TestSaveGeminiAccountPersistsOAuthProfileID(t *testing.T) {
 
 	if root["oauth_profile_id"] != "gcloud" {
 		t.Fatalf("oauth_profile_id = %#v", root["oauth_profile_id"])
+	}
+	if root["operator_source"] != geminiOperatorSourceManagedOAuth {
+		t.Fatalf("operator_source = %#v", root["operator_source"])
 	}
 	if _, ok := root["client_id"]; ok {
 		t.Fatalf("expected client_id to be dropped: %s", string(saved))

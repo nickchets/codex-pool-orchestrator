@@ -8,6 +8,16 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.6.1] - 2026-03-24
+
+### Изменено
+- Gemini operator surfaces теперь разделяют managed OAuth onboarding и ручной импорт `oauth_creds.json`, а не выдают их за один смешанный flow.
+- `/status?format=json` теперь явно показывает Gemini operator truth через `gemini_operator` и `operator_source` у аккаунтов, так что landing и `/status` описывают один и тот же состав пула.
+- Если на локальном сервисе не сконфигурирован Gemini OAuth client, managed Gemini CTA теперь честно деградирует в unavailable note вместо того, чтобы выглядеть как ещё один рабочий onboarding path.
+
+### Исправлено
+- Ручной импорт Gemini `oauth_creds.json` больше не помечается как fallback/API pool. Импортированные credentials теперь показываются как обычные Gemini seat’ы с явной source-меткой.
+
 ## [0.6.0] - 2026-03-24
 
 ### Добавлено

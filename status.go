@@ -24,6 +24,7 @@ type StatusData struct {
 	PoolUsers            int                           `json:"pool_users,omitempty"`
 	OpenAIAPIPool        OpenAIAPIPoolStatus           `json:"openai_api_pool"`
 	GitLabClaudePool     GitLabClaudePoolStatus        `json:"gitlab_claude_pool"`
+	GeminiOperator       GeminiOperatorStatus          `json:"gemini_operator"`
 	Quarantine           QuarantineStatus              `json:"quarantine,omitempty"`
 	PoolSummary          PoolDashboardSummary          `json:"pool_summary"`
 	CurrentSeat          *CurrentSeatStatus            `json:"current_seat,omitempty"`
@@ -68,6 +69,14 @@ type GitLabClaudePoolStatus struct {
 	NextTokenID    string `json:"next_token_id,omitempty"`
 }
 
+type GeminiOperatorStatus struct {
+	ManagedOAuthAvailable bool   `json:"managed_oauth_available"`
+	ManagedOAuthProfile   string `json:"managed_oauth_profile,omitempty"`
+	ManagedOAuthNote      string `json:"managed_oauth_note,omitempty"`
+	ManagedSeatCount      int    `json:"managed_seat_count"`
+	ImportedSeatCount     int    `json:"imported_seat_count"`
+}
+
 type PoolDashboardWorkspaceGroup struct {
 	WorkspaceID       string   `json:"workspace_id"`
 	Provider          string   `json:"provider"`
@@ -92,6 +101,17 @@ type CurrentSeatStatus struct {
 	LocalLastUsed        string  `json:"local_last_used,omitempty"`
 	ActiveSeatCount      int     `json:"active_seat_count,omitempty"`
 	Basis                string  `json:"basis"`
+}
+
+func geminiOperatorSourceLabel(source string) string {
+	switch strings.TrimSpace(source) {
+	case geminiOperatorSourceManagedOAuth:
+		return "managed oauth"
+	case geminiOperatorSourceManualImport, geminiOperatorSourceManualImportLegacy:
+		return "manual import"
+	default:
+		return ""
+	}
 }
 
 // TokenAnalytics contains capacity estimation data for the status page.
@@ -131,6 +151,7 @@ type AccountStatus struct {
 	WorkspaceID              string               `json:"workspace_id,omitempty"`
 	SeatKey                  string               `json:"seat_key,omitempty"`
 	FallbackOnly             bool                 `json:"fallback_only,omitempty"`
+	OperatorSource           string               `json:"operator_source,omitempty"`
 	Disabled                 bool                 `json:"disabled"`
 	Dead                     bool                 `json:"dead"`
 	PrimaryUsed              float64              `json:"primary_used_pct"`
@@ -370,6 +391,12 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		data.PoolUsers = len(h.poolUsers.List())
 	}
 	data.Quarantine = loadQuarantineStatus(h.cfg.poolDir, now)
+	if profile := geminiOAuthDefaultProfile(); strings.TrimSpace(profile.ID) != "" && strings.TrimSpace(profile.Secret) != "" {
+		data.GeminiOperator.ManagedOAuthAvailable = true
+		data.GeminiOperator.ManagedOAuthProfile = firstNonEmpty(geminiOAuthProfileIDForLabel(profile.Label), strings.TrimSpace(profile.Label))
+	} else {
+		data.GeminiOperator.ManagedOAuthNote = geminiOAuthConfigError().Error()
+	}
 
 	providerSummary := make(map[string]PoolDashboardProviderSum)
 	workspaceGroups := make(map[string]*poolWorkspaceAccumulator)
@@ -415,6 +442,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		effectiveSecondary := secondaryUsed
 		claims, workspaceID, seatKey := poolIdentityForSnapshot(snapshot)
 
+		operatorSource := normalizeGeminiOperatorSource(snapshot.OperatorSource, snapshot.OAuthProfileID, snapshot.Type)
 		status := AccountStatus{
 			ID:                 snapshot.ID,
 			Type:               string(snapshot.Type),
@@ -427,6 +455,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 			WorkspaceID:        workspaceID,
 			SeatKey:            seatKey,
 			FallbackOnly:       snapshot.FallbackOnly,
+			OperatorSource:     geminiOperatorSourceLabel(operatorSource),
 			Disabled:           snapshot.Disabled,
 			Dead:               snapshot.Dead,
 			PrimaryUsed:        primaryUsed * 100,
@@ -503,6 +532,14 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 			}
 			if status.UsageObserved == "" {
 				status.UsageObserved = "local totals only · GitLab quota hidden"
+			}
+		}
+		if snapshot.Type == AccountTypeGemini {
+			switch operatorSource {
+			case geminiOperatorSourceManagedOAuth:
+				data.GeminiOperator.ManagedSeatCount++
+			case geminiOperatorSourceManualImport, geminiOperatorSourceManualImportLegacy:
+				data.GeminiOperator.ImportedSeatCount++
 			}
 		}
 
@@ -1125,16 +1162,17 @@ const statusHTML = `<!DOCTYPE html>
             <div id="gitlab-claude-token-add-status" class="muted" style="margin-top: 10px;"></div>
         </div>
         <div class="operator-card">
-            <div class="operator-title">Gemini Seat Pool</div>
+            <div class="operator-title">Managed Gemini OAuth</div>
             <div class="muted">
-                Starts a first-party Google OAuth flow for a managed Gemini seat, stores the seat locally, runs a refresh probe, and then reuses it with the normal sticky pool logic. Raw <code>oauth_creds.json</code> paste stays available only as a fallback.
+                This lane creates first-party managed Gemini seats through a local Google OAuth flow. It is separate from manual <code>oauth_creds.json</code> imports and should only appear when this service has a configured Gemini OAuth client.
             </div>
             <div class="result-block">
-                <div><strong>Seats:</strong> {{.GeminiCount}}</div>
-                <div><strong>Flow:</strong> first-party OAuth into the local Gemini pool</div>
+                <div><strong>Managed seats:</strong> {{.GeminiOperator.ManagedSeatCount}}</div>
+                <div><strong>OAuth client:</strong> {{if .GeminiOperator.ManagedOAuthAvailable}}{{if .GeminiOperator.ManagedOAuthProfile}}{{.GeminiOperator.ManagedOAuthProfile}}{{else}}configured{{end}}{{else}}not configured{{end}}</div>
             </div>
+            {{if .GeminiOperator.ManagedOAuthAvailable}}
             <div class="action-row">
-                <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromStatus()">Start Gemini OAuth</button>
+                <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromStatus()">Start Managed Gemini OAuth</button>
             </div>
             <div id="gemini-oauth-start-status" class="muted" style="margin-top: 10px;"></div>
             <div id="gemini-oauth-start-result" class="result-block" style="display: none;">
@@ -1143,12 +1181,24 @@ const statusHTML = `<!DOCTYPE html>
                 <div id="gemini-oauth-start-outcome" class="muted" style="margin-top: 10px;"></div>
                 <a id="gemini-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px;">Open OAuth Page</a>
             </div>
-            <div class="muted" style="margin-top: 12px;">Fallback only: paste an existing Gemini <code>oauth_creds.json</code> below if you already have one.</div>
+            {{else}}
+            <div class="muted" style="margin-top: 12px;">Managed Gemini OAuth is currently unavailable on this service. {{.GeminiOperator.ManagedOAuthNote}}</div>
+            {{end}}
+        </div>
+        <div class="operator-card">
+            <div class="operator-title">Manual Gemini Import</div>
+            <div class="muted">
+                Import an existing Gemini <code>oauth_creds.json</code> into the same Gemini seat pool. This is not a separate fallback/API pool; imported credentials become normal Gemini seats and are probed immediately after save.
+            </div>
+            <div class="result-block">
+                <div><strong>Imported seats:</strong> {{.GeminiOperator.ImportedSeatCount}}</div>
+                <div><strong>Total Gemini seats:</strong> {{.GeminiCount}}</div>
+            </div>
             <div class="action-row">
                 <textarea id="gemini-seat-json-input" class="action-input action-textarea mono" autocomplete="off" spellcheck="false" placeholder='{"access_token":"...","refresh_token":"...","expiry_date":1774353600000}'></textarea>
             </div>
             <div class="action-row">
-                <button id="gemini-seat-add-btn" class="action-btn" onclick="addGeminiSeatFromStatus()">Add Gemini Seat</button>
+                <button id="gemini-seat-add-btn" class="action-btn" onclick="addGeminiSeatFromStatus()">Import oauth_creds.json</button>
             </div>
             <div id="gemini-seat-add-status" class="muted" style="margin-top: 10px;"></div>
         </div>
@@ -1386,6 +1436,7 @@ const statusHTML = `<!DOCTYPE html>
             <td>
                 {{if .Routing.Eligible}}<span class="status-ok">eligible</span>{{else}}<span class="status-warn">{{.Routing.BlockReason}}</span>{{end}}
                 {{if .FallbackOnly}}<br><small><span class="tag tag-api">fallback</span></small>{{end}}
+                {{if .OperatorSource}}<br><small><span class="tag tag-gemini">{{.OperatorSource}}</span></small>{{end}}
                 <br><small class="detail-line">headroom {{printf "%.0f%%" .Routing.PrimaryHeadroomPct}} / {{printf "%.0f%%" .Routing.SecondaryHeadroomPct}}</small>
                 {{if .UsageObserved}}<br><small class="detail-line">usage {{.UsageObserved}}</small>{{end}}
                 {{if .GitLabRateLimitName}}<br><small class="detail-line" title="{{.GitLabRateLimitName}}{{if .GitLabRateLimitResetAt}} · reset {{.GitLabRateLimitResetAt}}{{end}}">gitlab api {{.GitLabRateLimitRemaining}}/{{.GitLabRateLimitLimit}}{{if .GitLabRateLimitResetIn}} · resets in {{.GitLabRateLimitResetIn}}{{end}}</small>{{end}}
@@ -1909,10 +1960,10 @@ const statusHTML = `<!DOCTYPE html>
 
             button.disabled = true;
             status.style.color = '#8b949e';
-            status.textContent = 'Saving Gemini seat and running refresh probe...';
+            status.textContent = 'Importing oauth_creds.json and running refresh probe...';
 
             try {
-                const response = await fetch('/operator/gemini/account-add', {
+                const response = await fetch('/operator/gemini/import-oauth-creds', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ auth_json: authJSON })
@@ -1925,7 +1976,7 @@ const statusHTML = `<!DOCTYPE html>
                     data = null;
                 }
                 if (!response.ok) {
-                    throw new Error((data && data.error) || text || 'Failed to add Gemini seat');
+                    throw new Error((data && data.error) || text || 'Failed to import Gemini oauth_creds.json');
                 }
 
                 input.value = '';
@@ -1934,15 +1985,15 @@ const statusHTML = `<!DOCTYPE html>
                 const healthError = String((data && data.health_error) || '').trim();
                 if (data && data.dead) {
                     status.style.color = '#d29922';
-                    status.textContent = 'Stored ' + accountID + ', but it is currently marked dead' + (healthError ? ': ' + healthError : '.');
+                    status.textContent = 'Imported ' + accountID + ', but it is currently marked dead' + (healthError ? ': ' + healthError : '.');
                 } else {
                     status.style.color = '#3fb950';
-                    status.textContent = 'Stored ' + accountID + '. Health: ' + healthStatus + (healthError ? ' (' + healthError + ')' : '') + '. Reloading status...';
+                    status.textContent = 'Imported ' + accountID + '. Health: ' + healthStatus + (healthError ? ' (' + healthError + ')' : '') + '. Reloading status...';
                 }
                 window.setTimeout(() => window.location.reload(), 900);
             } catch (error) {
                 status.style.color = '#f85149';
-                status.textContent = 'Failed to add Gemini seat: ' + (error && error.message ? error.message : error);
+                status.textContent = 'Failed to import Gemini oauth_creds.json: ' + (error && error.message ? error.message : error);
             } finally {
                 button.disabled = false;
             }

@@ -1115,17 +1115,18 @@ brew install claude-code</pre>
                     <div class="surface-header">
                         <div>
                             <h3>Operator Actions</h3>
-                            <p>Managed Gemini seats use the same local operator flow here as on the raw status dashboard.</p>
+                            <p>Managed Gemini OAuth and manual <code>oauth_creds.json</code> imports are separate lanes here.</p>
                         </div>
                     </div>
                     <div class="action-stack">
                         <div class="action-card">
                             <p>
-                                Starts a first-party Google OAuth flow, stores the seat locally, runs a refresh probe,
-                                and refreshes this page automatically when Gemini seat state changes.
+                                Managed Gemini OAuth creates first-party seats through a local Google OAuth flow.
+                                This lane is shown only when the service has a configured Gemini OAuth client.
                             </p>
-                            <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromWeb()">Start Gemini OAuth</button>
+                            <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromWeb()">Start Managed Gemini OAuth</button>
                             <div id="gemini-oauth-start-status" class="status-line"></div>
+                            <div id="gemini-managed-oauth-note" class="status-line"></div>
                             <div id="gemini-oauth-start-result" style="display: none; margin-top: 16px;">
                                 <div class="code-shell">
                                     <button class="copy-btn" onclick="copyToClipboard('gemini-oauth-start-url', this)">Copy</button>
@@ -1137,13 +1138,13 @@ brew install claude-code</pre>
                         </div>
 
                         <div class="action-card">
-                            <p>Fallback only: paste an existing Gemini <code>oauth_creds.json</code> if you already have one and want the pool to store and probe it directly.</p>
+                            <p>Import an existing Gemini <code>oauth_creds.json</code> into the same Gemini seat pool. This is not a separate fallback/API pool.</p>
                             <form onsubmit="event.preventDefault(); addGeminiSeatFromWeb();">
                                 <div class="input-row">
                                     <textarea id="gemini-seat-json-input" autocomplete="off" spellcheck="false" placeholder='{"access_token":"...","refresh_token":"...","expiry_date":1774353600000}'></textarea>
                                 </div>
                                 <div class="input-row" style="margin-top: 10px;">
-                                    <button id="gemini-seat-add-btn" class="action-btn" type="submit">Add Gemini Seat</button>
+                                    <button id="gemini-seat-add-btn" class="action-btn" type="submit">Import oauth_creds.json</button>
                                 </div>
                             </form>
                             <div id="gemini-seat-add-status" class="status-line"></div>
@@ -1244,10 +1245,10 @@ brew install gemini-cli</pre>
 python3 -m webbrowser '{{.BaseURL}}/'
 # Or the raw operator dashboard
 python3 -m webbrowser '{{.BaseURL}}/status'
-# Then click: Start Gemini OAuth
+# Then click: Start Managed Gemini OAuth
 
-# Fallback only if you already have a real Gemini oauth_creds.json:
-# paste its JSON into the Gemini fallback field on / or /status.</pre>
+# If you already have a real Gemini oauth_creds.json:
+# import it into the Gemini manual-import field on / or /status.</pre>
                             </div>
                         </div>
                     </div>
@@ -1613,6 +1614,7 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 return;
             }
 
+            const geminiOperator = data && data.gemini_operator ? data.gemini_operator : {};
             renderMetricCards('gemini-summary-cards', [
                 {
                     label: 'Accounts',
@@ -1621,22 +1623,24 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                     tone: 'neutral',
                 },
                 {
-                    label: 'Workspaces',
-                    value: formatNumber(workspaces.length),
-                    detail: 'Distinct Gemini workspace groups detected.',
-                    tone: workspaces.length > 0 ? 'success' : 'neutral',
+                    label: 'Managed Seats',
+                    value: formatNumber(geminiOperator.managed_seat_count || 0),
+                    detail: 'Seats created through the managed Gemini OAuth lane.',
+                    tone: (geminiOperator.managed_seat_count || 0) > 0 ? 'success' : 'neutral',
                 },
                 {
-                    label: 'Primary Load',
-                    value: formatPct(summary.time_weighted_primary_pct || 0),
-                    detail: 'Time-weighted 5h usage across Gemini seats.',
-                    tone: (summary.time_weighted_primary_pct || 0) >= 90 ? 'warning' : 'neutral',
+                    label: 'Imported Seats',
+                    value: formatNumber(geminiOperator.imported_seat_count || 0),
+                    detail: 'Existing oauth_creds.json imports sharing the same Gemini seat pool.',
+                    tone: (geminiOperator.imported_seat_count || 0) > 0 ? 'warning' : 'neutral',
                 },
                 {
-                    label: 'Secondary Load',
-                    value: formatPct(summary.time_weighted_secondary_pct || 0),
-                    detail: 'Time-weighted 7d usage across Gemini seats.',
-                    tone: (summary.time_weighted_secondary_pct || 0) >= 90 ? 'warning' : 'neutral',
+                    label: 'Managed OAuth',
+                    value: geminiOperator.managed_oauth_available ? 'ready' : 'off',
+                    detail: geminiOperator.managed_oauth_available
+                        ? ('Configured profile: ' + String(geminiOperator.managed_oauth_profile || 'configured'))
+                        : String(geminiOperator.managed_oauth_note || 'Managed Gemini OAuth is not configured on this service.'),
+                    tone: geminiOperator.managed_oauth_available ? 'success' : 'warning',
                 },
             ]);
         }
@@ -1686,6 +1690,33 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 seatCardData('Last Used', lastUsed, 'No Gemini seat has a recent local-use signal.'),
                 seatCardData('Best Eligible', nextEligible || current, 'No Gemini seat is currently preferred for fresh routing.'),
             ]);
+        }
+
+        function syncGeminiOperatorActions(data) {
+            const operator = data && data.gemini_operator ? data.gemini_operator : {};
+            const startButton = document.getElementById('gemini-oauth-start-btn');
+            const note = document.getElementById('gemini-managed-oauth-note');
+            const status = document.getElementById('gemini-oauth-start-status');
+            const result = document.getElementById('gemini-oauth-start-result');
+            if (!startButton || !note) {
+                return;
+            }
+            if (operator.managed_oauth_available) {
+                startButton.style.display = '';
+                startButton.disabled = false;
+                note.textContent = 'Managed Gemini OAuth is configured' + (operator.managed_oauth_profile ? ' via ' + operator.managed_oauth_profile + '.' : '.');
+                note.className = 'status-line success';
+                return;
+            }
+            startButton.style.display = 'none';
+            if (status) {
+                status.textContent = '';
+            }
+            if (result) {
+                result.style.display = 'none';
+            }
+            note.textContent = String(operator.managed_oauth_note || 'Managed Gemini OAuth is not configured on this service.');
+            note.className = 'status-line warn';
         }
 
         function renderWorkspaceTable(provider, data) {
@@ -1744,10 +1775,16 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             }
             const plan = String(acc.plan_type || '').trim();
             const auth = String(acc.auth_mode || '').trim();
-            if (plan && auth) {
-                return plan + ' | ' + auth;
+            const source = acc.type === 'gemini' ? String(acc.operator_source || '').trim() : '';
+            const parts = [plan, auth];
+            if (source) {
+                parts.push(source);
             }
-            return plan || auth || '-';
+            const filtered = parts.filter(Boolean);
+            if (filtered.length > 0) {
+                return filtered.join(' | ');
+            }
+            return '-';
         }
 
         function renderAccountsTable(provider, data) {
@@ -1778,6 +1815,9 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 }
                 if (acc.seat_key && acc.seat_key !== acc.id) {
                     meta.push('seat ' + clipMiddle(acc.seat_key, 10, 6));
+                }
+                if (acc.type === 'gemini' && acc.operator_source) {
+                    meta.push(String(acc.operator_source));
                 }
                 return `
                     <tr>
@@ -1846,6 +1886,7 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 renderWorkspaceTable(provider, data);
                 renderAccountsTable(provider, data);
             });
+            syncGeminiOperatorActions(data);
         }
 
         async function loadDashboard() {
@@ -1952,7 +1993,7 @@ export ANTHROPIC_API_KEY="local-pool"`;
 echo "Config written. Add or refresh a Gemini seat from:"
 echo "  ${BASE_URL}/"
 echo "  ${BASE_URL}/status"
-echo 'Then click: Start Gemini OAuth'`;
+echo 'Then click: Start Managed Gemini OAuth'`;
 
             document.getElementById('gemini-config').textContent =
 `{
@@ -2362,10 +2403,10 @@ echo 'Then click: Start Gemini OAuth'`;
 
             button.disabled = true;
             status.style.color = 'var(--muted)';
-            status.textContent = 'Saving Gemini seat and running refresh probe...';
+            status.textContent = 'Importing oauth_creds.json and running refresh probe...';
 
             try {
-                const response = await fetch('/operator/gemini/account-add', {
+                const response = await fetch('/operator/gemini/import-oauth-creds', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ auth_json: authJSON })
@@ -2378,7 +2419,7 @@ echo 'Then click: Start Gemini OAuth'`;
                     data = null;
                 }
                 if (!response.ok) {
-                    throw new Error((data && data.error) || text || 'Failed to add Gemini seat');
+                    throw new Error((data && data.error) || text || 'Failed to import Gemini oauth_creds.json');
                 }
 
                 input.value = '';
@@ -2387,15 +2428,15 @@ echo 'Then click: Start Gemini OAuth'`;
                 const healthError = String((data && data.health_error) || '').trim();
                 if (data && data.dead) {
                     status.style.color = 'var(--warning)';
-                    status.textContent = 'Stored ' + accountID + ', but it is currently marked dead' + (healthError ? ': ' + healthError : '.');
+                    status.textContent = 'Imported ' + accountID + ', but it is currently marked dead' + (healthError ? ': ' + healthError : '.');
                 } else {
                     status.style.color = 'var(--success)';
-                    status.textContent = 'Stored ' + accountID + '. Health: ' + healthStatus + (healthError ? ' (' + healthError + ')' : '') + '. Reloading status...';
+                    status.textContent = 'Imported ' + accountID + '. Health: ' + healthStatus + (healthError ? ' (' + healthError + ')' : '') + '. Reloading status...';
                 }
                 window.setTimeout(() => window.location.reload(), 900);
             } catch (error) {
                 status.style.color = 'var(--danger)';
-                status.textContent = 'Failed to add Gemini seat: ' + (error && error.message ? error.message : error);
+                status.textContent = 'Failed to import Gemini oauth_creds.json: ' + (error && error.message ? error.message : error);
             } finally {
                 button.disabled = false;
             }

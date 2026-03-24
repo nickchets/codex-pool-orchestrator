@@ -164,6 +164,8 @@ func TestServeClaudeSetupScript_PowerShell(t *testing.T) {
 }
 
 func TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction(t *testing.T) {
+	setGeminiOAuthTestProfiles(t)
+
 	h := &proxyHandler{}
 
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
@@ -184,17 +186,17 @@ func TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction(t *testing.T) 
 		"overview-quarantine-detail",
 		"Long-dead seats moved out of active rotation",
 		"dead since",
-		"Managed Gemini seats use the same local operator flow here as on the raw status dashboard",
+		"Managed Gemini OAuth and manual <code>oauth_creds.json</code> imports are separate lanes here",
 		"Configures the Gemini CLI endpoint and points you to the same local dashboard/operator flow used for seat onboarding",
-		"Start Gemini OAuth",
-		"Add Gemini Seat",
+		"Start Managed Gemini OAuth",
+		"Import oauth_creds.json",
 		"gemini-seat-json-input",
 		"/operator/gemini/oauth-start",
-		"/operator/gemini/account-add",
+		"/operator/gemini/import-oauth-creds",
 		"gemini_oauth_result",
 		"python3 -m webbrowser",
-		"Fallback only if you already have a real Gemini oauth_creds.json",
-		"paste its JSON into the Gemini fallback field on / or /status",
+		"If you already have a real Gemini oauth_creds.json",
+		"import it into the Gemini manual-import field on / or /status",
 		"Fallback API Pool",
 		"GitLab Claude Pool",
 		"Start Codex OAuth",

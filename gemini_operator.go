@@ -85,7 +85,7 @@ func managedGeminiSeatID(refreshToken, accessToken string) string {
 	return fmt.Sprintf("gemini_seat_%x", sum[:6])
 }
 
-func saveManagedGeminiSeat(poolDir, rawAuthJSON string) (*Account, bool, error) {
+func saveManagedGeminiSeat(poolDir, rawAuthJSON, operatorSource string) (*Account, bool, error) {
 	payload := strings.TrimSpace(rawAuthJSON)
 	if payload == "" {
 		return nil, false, fmt.Errorf("auth_json is empty")
@@ -125,6 +125,7 @@ func saveManagedGeminiSeat(poolDir, rawAuthJSON string) (*Account, bool, error) 
 
 	root["auth_mode"] = accountAuthModeOAuth
 	root["plan_type"] = firstNonEmpty(strings.TrimSpace(gj.PlanType), "gemini")
+	root["operator_source"] = normalizeGeminiOperatorSource(operatorSource, gj.OAuthProfileID, AccountTypeGemini)
 	root["health_status"] = "unknown"
 	delete(root, "disabled")
 	delete(root, "dead")
@@ -149,6 +150,7 @@ func saveManagedGeminiSeat(poolDir, rawAuthJSON string) (*Account, bool, error) 
 		return nil, false, fmt.Errorf("gemini seat could not be loaded after save")
 	}
 	acc.AuthMode = accountAuthModeOAuth
+	acc.OperatorSource = normalizeGeminiOperatorSource(operatorSource, acc.OAuthProfileID, AccountTypeGemini)
 	return acc, created, nil
 }
 
@@ -216,7 +218,7 @@ func (h *proxyHandler) probeManagedGeminiSeat(ctx context.Context, acc *Account)
 }
 
 func (h *proxyHandler) addManagedGeminiSeat(ctx context.Context, rawAuthJSON string) (*managedGeminiSeatAddOutcome, error) {
-	acc, created, err := saveManagedGeminiSeat(h.cfg.poolDir, rawAuthJSON)
+	acc, created, err := saveManagedGeminiSeat(h.cfg.poolDir, rawAuthJSON, geminiOperatorSourceManualImport)
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +378,44 @@ func (h *proxyHandler) completeManagedGeminiOAuth(ctx context.Context, code stri
 	if err != nil {
 		return nil, err
 	}
-	return h.addManagedGeminiSeat(ctx, authJSON)
+	acc, created, err := saveManagedGeminiSeat(h.cfg.poolDir, authJSON, geminiOperatorSourceManagedOAuth)
+	if err != nil {
+		return nil, err
+	}
+
+	probeErr := h.probeManagedGeminiSeat(ctx, acc)
+	if probeErr != nil {
+		log.Printf("managed gemini seat %s probe failed during add: %v", acc.ID, probeErr)
+	}
+
+	h.reloadAccounts()
+
+	live, liveOK := h.snapshotAccountByID(acc.ID, time.Now())
+	outcome := &managedGeminiSeatAddOutcome{
+		AccountID: acc.ID,
+		Created:   created,
+		ProbeOK:   probeErr == nil,
+		ProbeError: sanitizeStatusMessage(func() string {
+			if probeErr == nil {
+				return ""
+			}
+			return probeErr.Error()
+		}()),
+		HealthStatus: firstNonEmpty(strings.TrimSpace(acc.HealthStatus), "unknown"),
+		HealthError:  sanitizeStatusMessage(acc.HealthError),
+		Dead:         acc.Dead,
+	}
+	if liveOK {
+		outcome.HealthStatus = firstNonEmpty(strings.TrimSpace(live.HealthStatus), "unknown")
+		outcome.HealthError = sanitizeStatusMessage(live.HealthError)
+		outcome.Dead = live.Dead
+		if !live.ExpiresAt.IsZero() {
+			outcome.AuthExpiresAt = live.ExpiresAt.UTC().Format(time.RFC3339)
+		}
+	} else if !acc.ExpiresAt.IsZero() {
+		outcome.AuthExpiresAt = acc.ExpiresAt.UTC().Format(time.RFC3339)
+	}
+	return outcome, nil
 }
 
 func (h *proxyHandler) exchangeManagedGeminiOAuthCode(ctx context.Context, code string, session *managedGeminiOAuthSession) (*managedGeminiOAuthTokens, error) {
@@ -481,11 +520,12 @@ func buildManagedGeminiOAuthAuthJSON(tokens *managedGeminiOAuthTokens, userInfo 
 	}
 
 	root := map[string]any{
-		"access_token":  strings.TrimSpace(tokens.AccessToken),
-		"refresh_token": strings.TrimSpace(tokens.RefreshToken),
-		"token_type":    firstNonEmpty(strings.TrimSpace(tokens.TokenType), "Bearer"),
-		"scope":         strings.TrimSpace(tokens.Scope),
-		"plan_type":     "gemini",
+		"access_token":    strings.TrimSpace(tokens.AccessToken),
+		"refresh_token":   strings.TrimSpace(tokens.RefreshToken),
+		"token_type":      firstNonEmpty(strings.TrimSpace(tokens.TokenType), "Bearer"),
+		"scope":           strings.TrimSpace(tokens.Scope),
+		"plan_type":       "gemini",
+		"operator_source": geminiOperatorSourceManagedOAuth,
 	}
 	if session != nil {
 		if profileID := strings.TrimSpace(session.ProfileID); profileID != "" {

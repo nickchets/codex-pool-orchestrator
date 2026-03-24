@@ -199,7 +199,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.handleOperatorClaudeGitLabTokenAdd(w, r)
 		return
-	case "/operator/gemini/account-add":
+	case "/operator/gemini/account-add", "/operator/gemini/import-oauth-creds":
 		if !h.checkLocalOperatorAuth(w, r) {
 			return
 		}
