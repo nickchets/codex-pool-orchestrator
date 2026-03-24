@@ -125,14 +125,11 @@ func routingStateLocked(a *Account, now time.Time, accountType AccountType, requ
 		state.BlockReason = "missing_gateway_state"
 		return state
 	}
-	if (a.Type != AccountTypeCodex || isManagedCodexAPI) && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
+	if !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
 		state.Eligible = false
 		state.BlockReason = "rate_limited"
 		state.RecoveryAt = a.RateLimitUntil
 		return state
-	}
-	if a.Type == AccountTypeCodex && !isManagedCodexAPI && !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
-		state.CodexRateLimitBypass = true
 	}
 	if a.Type == AccountTypeCodex && !isManagedCodexAPI {
 		primaryBlocked := usageAtOrAbovePreemptiveThreshold(primaryUsed)
@@ -165,6 +162,10 @@ type Account struct {
 	AccessToken  string
 	RefreshToken string
 	IDToken      string
+	// Optional provider OAuth client metadata for providers that support multiple public clients.
+	OAuthProfileID    string
+	OAuthClientID     string
+	OAuthClientSecret string
 	// AccountID corresponds to Codex `auth.json` field `tokens.account_id`.
 	// Codex uses this value as the `ChatGPT-Account-ID` header.
 	AccountID string
@@ -183,6 +184,7 @@ type Account struct {
 	Dead                      bool
 	LastUsed                  time.Time
 	RateLimitUntil            time.Time
+	DeadSince                 time.Time
 	HealthStatus              string
 	HealthError               string
 	HealthCheckedAt           time.Time
@@ -327,6 +329,7 @@ type CodexAuthJSON struct {
 	LastRefresh     *time.Time `json:"last_refresh"`
 	LastHealthyAt   *time.Time `json:"last_healthy_at"`
 	HealthCheckedAt *time.Time `json:"health_checked_at"`
+	DeadSince       *time.Time `json:"dead_since"`
 	HealthStatus    string     `json:"health_status"`
 	HealthError     string     `json:"health_error"`
 	PlanType        string     `json:"plan_type"`
@@ -345,13 +348,24 @@ type TokenData struct {
 // GeminiAuthJSON is the format for Gemini oauth_creds.json files.
 // Files should be named gemini_*.json in the pool folder.
 type GeminiAuthJSON struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	TokenType    string `json:"token_type"`
-	Scope        string `json:"scope"`
-	ExpiryDate   int64  `json:"expiry_date"`  // Unix timestamp in milliseconds
-	PlanType     string `json:"plan_type"`    // e.g., "ultra", "gemini"
-	LastRefresh  string `json:"last_refresh"` // RFC3339 timestamp of last refresh attempt
+	AccessToken     string     `json:"access_token"`
+	RefreshToken    string     `json:"refresh_token"`
+	TokenType       string     `json:"token_type"`
+	Scope           string     `json:"scope"`
+	OAuthProfileID  string     `json:"oauth_profile_id,omitempty"`
+	ClientID        string     `json:"client_id,omitempty"`
+	ClientSecret    string     `json:"client_secret,omitempty"`
+	ExpiryDate      int64      `json:"expiry_date"`  // Unix timestamp in milliseconds
+	PlanType        string     `json:"plan_type"`    // e.g., "ultra", "gemini"
+	LastRefresh     string     `json:"last_refresh"` // RFC3339 timestamp of last refresh attempt
+	LastHealthyAt   *time.Time `json:"last_healthy_at,omitempty"`
+	HealthCheckedAt *time.Time `json:"health_checked_at,omitempty"`
+	DeadSince       *time.Time `json:"dead_since,omitempty"`
+	HealthStatus    string     `json:"health_status,omitempty"`
+	HealthError     string     `json:"health_error,omitempty"`
+	RateLimitUntil  *time.Time `json:"rate_limit_until,omitempty"`
+	Disabled        bool       `json:"disabled,omitempty"`
+	Dead            bool       `json:"dead,omitempty"`
 }
 
 // ClaudeAuthJSON is the format for Claude auth files.
@@ -383,6 +397,7 @@ type ClaudeAuthJSON struct {
 	LastRefresh               *time.Time        `json:"last_refresh,omitempty"`
 	Disabled                  bool              `json:"disabled,omitempty"`
 	Dead                      bool              `json:"dead,omitempty"`
+	DeadSince                 *time.Time        `json:"dead_since,omitempty"`
 	HealthStatus              string            `json:"health_status,omitempty"`
 	HealthError               string            `json:"health_error,omitempty"`
 	HealthCheckedAt           *time.Time        `json:"health_checked_at,omitempty"`
@@ -447,6 +462,14 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 				return nil, err
 			}
 			if acc != nil {
+				normalizeLoadedDeadState(acc)
+				now := time.Now().UTC()
+				if shouldQuarantineAccount(acc, now) {
+					if err := quarantineAccountFile(dir, acc, now); err != nil {
+						return nil, fmt.Errorf("quarantine %s: %w", acc.File, err)
+					}
+					continue
+				}
 				accs = append(accs, acc)
 			}
 		}
@@ -507,6 +530,8 @@ type poolState struct {
 	mu            sync.RWMutex
 	accounts      []*Account
 	convPin       map[string]string // conversation_id -> account ID
+	activeCodexID string
+	activeAPIID   string
 	debug         bool
 	rr            uint64
 	tierThreshold float64 // secondary usage % at which we stop preferring a tier
@@ -571,7 +596,9 @@ func applyRuntimeState(accs []*Account, state map[string]accountRuntimeState) {
 		a.Penalty = prev.Penalty
 		a.LastPenalty = prev.LastPenalty
 		a.LastUsed = prev.LastUsed
-		a.RateLimitUntil = prev.RateLimitUntil
+		if prev.RateLimitUntil.After(a.RateLimitUntil) {
+			a.RateLimitUntil = prev.RateLimitUntil
+		}
 		a.Totals = prev.Totals
 		a.mu.Unlock()
 	}
@@ -640,9 +667,16 @@ func (p *poolState) candidateAtLocked(now time.Time, conversationID string, excl
 		return pinned
 	}
 	if sticky := p.stickyEligibleCandidateLocked(now, exclude, accountType, requiredPlan); sticky != nil {
+		if advanceRR && len(exclude) == 0 {
+			p.rememberSelectedSeatLocked(accountType, sticky)
+		}
 		return sticky
 	}
-	return p.selectEligibleCandidateLocked(now, exclude, accountType, requiredPlan, advanceRR)
+	selected := p.selectEligibleCandidateLocked(now, exclude, accountType, requiredPlan, advanceRR)
+	if advanceRR && len(exclude) == 0 {
+		p.rememberSelectedSeatLocked(accountType, selected)
+	}
+	return selected
 }
 
 func (p *poolState) pinnedEligibleCandidateLocked(now time.Time, conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string) *Account {
@@ -694,6 +728,9 @@ func (p *poolState) pinnedEligibleCandidateLocked(now time.Time, conversationID 
 
 func (p *poolState) stickyEligibleCandidateLocked(now time.Time, exclude map[string]bool, accountType AccountType, requiredPlan string) *Account {
 	if accountType == AccountTypeCodex {
+		if acc := p.activeCodexCandidateLocked(now, exclude, requiredPlan, false); acc != nil {
+			return acc
+		}
 		if acc := p.stickyEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, func(a *Account) bool {
 			return !isManagedCodexAPIKeyAccount(a)
 		}); acc != nil {
@@ -704,6 +741,55 @@ func (p *poolState) stickyEligibleCandidateLocked(now time.Time, exclude map[str
 		})
 	}
 	return p.stickyEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, nil)
+}
+
+func (p *poolState) rememberSelectedSeatLocked(accountType AccountType, acc *Account) {
+	if accountType != AccountTypeCodex || acc == nil {
+		return
+	}
+	if isManagedCodexAPIKeyAccount(acc) {
+		p.activeAPIID = acc.ID
+		return
+	}
+	p.activeCodexID = acc.ID
+}
+
+func (p *poolState) activeCodexCandidateLocked(now time.Time, exclude map[string]bool, requiredPlan string, managed bool) *Account {
+	activeID := p.activeCodexID
+	if managed {
+		activeID = p.activeAPIID
+	}
+	if activeID == "" {
+		return nil
+	}
+	if exclude != nil && exclude[activeID] {
+		return nil
+	}
+
+	a := p.getLocked(activeID)
+	if a == nil {
+		p.clearActiveCodexSeatLocked(managed)
+		return nil
+	}
+
+	a.mu.Lock()
+	expired := !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now)
+	routing := routingStateLocked(a, now, AccountTypeCodex, requiredPlan)
+	ok := routing.Eligible && !expired && (isManagedCodexAPIKeyAccount(a) == managed)
+	a.mu.Unlock()
+	if !ok {
+		p.clearActiveCodexSeatLocked(managed)
+		return nil
+	}
+	return a
+}
+
+func (p *poolState) clearActiveCodexSeatLocked(managed bool) {
+	if managed {
+		p.activeAPIID = ""
+		return
+	}
+	p.activeCodexID = ""
 }
 
 func (p *poolState) stickyEligibleCandidateMatchingLocked(now time.Time, exclude map[string]bool, accountType AccountType, requiredPlan string, include func(*Account) bool) *Account {
@@ -738,6 +824,9 @@ func (p *poolState) selectEligibleCandidateLocked(now time.Time, exclude map[str
 		if acc := p.selectEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, advanceRR, func(a *Account) bool {
 			return !isManagedCodexAPIKeyAccount(a)
 		}); acc != nil {
+			return acc
+		}
+		if acc := p.activeCodexCandidateLocked(now, exclude, "", true); acc != nil {
 			return acc
 		}
 		return p.selectEligibleCandidateMatchingLocked(now, exclude, accountType, "", advanceRR, func(a *Account) bool {
@@ -1086,6 +1175,7 @@ func saveCodexAccount(a *Account) error {
 		} else {
 			delete(root, "dead")
 		}
+		setJSONTimeField(root, "dead_since", a.DeadSince)
 		delete(root, "tokens")
 		delete(root, "last_refresh")
 		return atomicWriteJSON(a.File, root)
@@ -1124,6 +1214,7 @@ func saveCodexAccount(a *Account) error {
 	} else {
 		delete(root, "dead")
 	}
+	setJSONTimeField(root, "dead_since", a.DeadSince)
 
 	return atomicWriteJSON(a.File, root)
 }
@@ -1146,12 +1237,40 @@ func saveGeminiAccount(a *Account) error {
 	if a.RefreshToken != "" {
 		root["refresh_token"] = a.RefreshToken
 	}
+	profileID := strings.TrimSpace(a.OAuthProfileID)
+	rawClientID := strings.TrimSpace(a.OAuthClientID)
+	rawClientSecret := strings.TrimSpace(a.OAuthClientSecret)
+	if profileID != "" {
+		root["oauth_profile_id"] = profileID
+		delete(root, "client_id")
+		delete(root, "client_secret")
+	} else {
+		delete(root, "oauth_profile_id")
+		if rawClientID != "" {
+			root["client_id"] = rawClientID
+		} else {
+			delete(root, "client_id")
+		}
+		if rawClientSecret != "" {
+			root["client_secret"] = rawClientSecret
+		} else {
+			delete(root, "client_secret")
+		}
+	}
 	if !a.ExpiresAt.IsZero() {
 		root["expiry_date"] = a.ExpiresAt.UnixMilli()
 	}
 	if !a.LastRefresh.IsZero() {
 		root["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
 	}
+	setJSONField(root, "disabled", true, a.Disabled)
+	setJSONField(root, "dead", true, a.Dead)
+	setJSONTimeField(root, "dead_since", a.DeadSince)
+	setJSONTimeField(root, "rate_limit_until", a.RateLimitUntil)
+	setJSONField(root, "health_status", strings.TrimSpace(a.HealthStatus), strings.TrimSpace(a.HealthStatus) != "")
+	setJSONField(root, "health_error", strings.TrimSpace(a.HealthError), strings.TrimSpace(a.HealthError) != "")
+	setJSONTimeField(root, "health_checked_at", a.HealthCheckedAt)
+	setJSONTimeField(root, "last_healthy_at", a.LastHealthyAt)
 
 	return atomicWriteJSON(a.File, root)
 }
@@ -1192,6 +1311,10 @@ func mergeUsage(prev, next UsageSnapshot) UsageSnapshot {
 	hardSource := res.Source == "body" || res.Source == "headers" || res.Source == "wham"
 	authoritativeZero := res.Source == "claude-api" || res.Source == "wham"
 	hardReset := res.PrimaryUsedPercent == 0 && res.SecondaryUsedPercent == 0
+	referenceTime := res.RetrievedAt
+	if referenceTime.IsZero() {
+		referenceTime = time.Now()
+	}
 
 	if res.PrimaryUsedPercent == 0 && prev.PrimaryUsedPercent > 0 && !authoritativeZero && !(hardSource && hardReset) {
 		res.PrimaryUsedPercent = prev.PrimaryUsedPercent
@@ -1211,10 +1334,10 @@ func mergeUsage(prev, next UsageSnapshot) UsageSnapshot {
 	if res.SecondaryWindowMinutes == 0 && prev.SecondaryWindowMinutes > 0 {
 		res.SecondaryWindowMinutes = prev.SecondaryWindowMinutes
 	}
-	if res.PrimaryResetAt.IsZero() && !prev.PrimaryResetAt.IsZero() {
+	if res.PrimaryResetAt.IsZero() && !prev.PrimaryResetAt.IsZero() && prev.PrimaryResetAt.After(referenceTime) {
 		res.PrimaryResetAt = prev.PrimaryResetAt
 	}
-	if res.SecondaryResetAt.IsZero() && !prev.SecondaryResetAt.IsZero() {
+	if res.SecondaryResetAt.IsZero() && !prev.SecondaryResetAt.IsZero() && prev.SecondaryResetAt.After(referenceTime) {
 		res.SecondaryResetAt = prev.SecondaryResetAt
 	}
 	if res.CreditsBalance == 0 && prev.CreditsBalance > 0 {

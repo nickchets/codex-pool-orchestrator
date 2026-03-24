@@ -273,7 +273,7 @@ func RefreshClaudeAccountTokens(acc *Account) error {
 	}
 	acc.ExpiresAt = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second)
 	acc.LastRefresh = time.Now().UTC()
-	acc.Dead = false
+	clearAccountDeadStateLocked(acc, time.Now().UTC(), false)
 	acc.mu.Unlock()
 
 	return saveClaudeAccount(acc)

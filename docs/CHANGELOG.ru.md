@@ -8,6 +8,27 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.6.0] - 2026-03-24
+
+### Добавлено
+- Managed Gemini onboarding на `/` и `/status`: loopback OAuth start/callback, popup/manual-open recovery и fallback-паста `oauth_creds.json`.
+- Явная quarantine-логика для long-dead seat’ов и operator-видимость quarantine state в status JSON, status HTML и overview на landing.
+- Персистентные Codex usage snapshots с restore на старте, а также локальный cached `/backend-api/codex/models`, чтобы metadata lane меньше зависел от хрупких upstream round-trip’ов.
+- Дополнительные focused regression tests для Gemini persistence, Codex usage restore/rotation, quarantine visibility и fallback/request-path поведения.
+
+### Изменено
+- Локальная главная страница теперь truthfully зеркалит `/status?format=json`, а не живет как отдельная setup-only поверхность. На `/` собраны live dashboards для `Codex`, `Claude` и `Gemini`, cleanup state, operator actions и delete controls.
+- Codex routing теперь удерживает один active local seat до порога, честнее восстанавливает usage state после рестарта, уважает local cooldown окна и не дает retry-path poisoning ломать active lease.
+- Codex fallback вынесен в явную operator-логику: fallback API keys health-probe’ятся, отображаются отдельно от local seats и доказанно принимают live traffic, когда локальные Codex seat’ы временно недоступны.
+- Managed Gemini и GitLab Claude save/load/reload path теперь сохраняют больше operator-visible runtime state между рестартами и hot reload.
+
+### Исправлено
+- Codex seat’ы больше не забывают недавнее quota state после рестарта и не возвращаются сразу в ротацию из-за stale/missing usage snapshots.
+- Локальные Codex seat’ы, поймавшие live cooldown, теперь реально выходят из fresh rotation вместо debug-only bypass.
+- Active Codex lease больше не переписывается retry-only кандидатами, которые не завершили успешный запрос.
+- Landing/status surfaces больше не прячут quarantine и dead-seat cleanup truth только в глубоком `/status`.
+- Managed Gemini OAuth client credentials больше не зашиты в репозитории; operator flow теперь ожидает их из локального service environment.
+
 ## [0.5.1] - 2026-03-23
 
 ### Изменено

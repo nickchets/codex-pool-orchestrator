@@ -172,7 +172,7 @@
         }
 
         .overview-grid {
-            grid-template-columns: repeat(4, minmax(0, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
             margin-bottom: 16px;
         }
 
@@ -199,6 +199,10 @@
         .stat-card,
         .metric-card {
             padding: 18px 20px;
+        }
+
+        .stat-card.is-warn {
+            border-color: rgba(231, 185, 90, 0.28);
         }
 
         .stat-label,
@@ -388,7 +392,8 @@
             flex-wrap: wrap;
         }
 
-        .input-row input {
+        .input-row input,
+        .input-row textarea {
             flex: 1 1 220px;
             min-width: 0;
             appearance: none;
@@ -400,7 +405,13 @@
             font: inherit;
         }
 
-        .input-row input:focus {
+        .input-row textarea {
+            min-height: 132px;
+            resize: vertical;
+        }
+
+        .input-row input:focus,
+        .input-row textarea:focus {
             outline: 0;
             border-color: rgba(142, 197, 255, 0.4);
             box-shadow: 0 0 0 4px rgba(142, 197, 255, 0.08);
@@ -769,6 +780,11 @@
                 <div class="stat-value" id="overview-recovery">-</div>
                 <div class="stat-detail">Earliest blocked account recovery observed right now.</div>
             </div>
+            <div class="stat-card" id="overview-quarantine-card">
+                <div class="stat-label">Quarantine</div>
+                <div class="stat-value" id="overview-quarantine">-</div>
+                <div class="stat-detail" id="overview-quarantine-detail">Long-dead seats moved out of active rotation.</div>
+            </div>
         </section>
 
         <div class="provider-pills" id="provider-pills"></div>
@@ -1098,15 +1114,40 @@ brew install claude-code</pre>
                 <section class="surface">
                     <div class="surface-header">
                         <div>
-                            <h3>Operator Notes</h3>
-                            <p>This landing does not invent a separate Gemini control plane. It simply renders the same live pool truth as the status dashboard.</p>
+                            <h3>Operator Actions</h3>
+                            <p>Managed Gemini seats use the same local operator flow here as on the raw status dashboard.</p>
                         </div>
                     </div>
-                    <div class="action-card">
-                        <p>
-                            Use this tab for live Gemini pool visibility and CLI setup. If Gemini-specific operator add flows
-                            are introduced later, they should reuse the same local-operator endpoint pattern already used by Codex and Claude.
-                        </p>
+                    <div class="action-stack">
+                        <div class="action-card">
+                            <p>
+                                Starts a first-party Google OAuth flow, stores the seat locally, runs a refresh probe,
+                                and refreshes this page automatically when Gemini seat state changes.
+                            </p>
+                            <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromWeb()">Start Gemini OAuth</button>
+                            <div id="gemini-oauth-start-status" class="status-line"></div>
+                            <div id="gemini-oauth-start-result" style="display: none; margin-top: 16px;">
+                                <div class="code-shell">
+                                    <button class="copy-btn" onclick="copyToClipboard('gemini-oauth-start-url', this)">Copy</button>
+                                    <pre id="gemini-oauth-start-url"></pre>
+                                </div>
+                                <div id="gemini-oauth-start-outcome" class="status-line"></div>
+                                <a id="gemini-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px; color: var(--accent); font-weight: 700; text-decoration: none;">Open OAuth Page</a>
+                            </div>
+                        </div>
+
+                        <div class="action-card">
+                            <p>Fallback only: paste an existing Gemini <code>oauth_creds.json</code> if you already have one and want the pool to store and probe it directly.</p>
+                            <form onsubmit="event.preventDefault(); addGeminiSeatFromWeb();">
+                                <div class="input-row">
+                                    <textarea id="gemini-seat-json-input" autocomplete="off" spellcheck="false" placeholder='{"access_token":"...","refresh_token":"...","expiry_date":1774353600000}'></textarea>
+                                </div>
+                                <div class="input-row" style="margin-top: 10px;">
+                                    <button id="gemini-seat-add-btn" class="action-btn" type="submit">Add Gemini Seat</button>
+                                </div>
+                            </form>
+                            <div id="gemini-seat-add-status" class="status-line"></div>
+                        </div>
                     </div>
                 </section>
             </div>
@@ -1180,7 +1221,7 @@ brew install gemini-cli</pre>
 
                         <div class="detail-block">
                             <h4>One-Line Setup</h4>
-                            <p>Downloads credentials and configures Gemini CLI endpoint.</p>
+                            <p>Configures the Gemini CLI endpoint and points you to the same local dashboard/operator flow used for seat onboarding.</p>
                             <div class="code-shell">
                                 <button class="copy-btn" onclick="copyToClipboard('gemini-one-liner', this)">Copy</button>
                                 <pre id="gemini-one-liner"></pre>
@@ -1196,11 +1237,17 @@ brew install gemini-cli</pre>
                         </div>
 
                         <div class="detail-block">
-                            <h4>Manual Auth</h4>
+                            <h4>Seat Onboarding</h4>
                             <div class="code-shell">
                                 <button class="copy-btn" onclick="copyToClipboard('gemini-auth', this)">Copy</button>
-                                <pre id="gemini-auth"># Copy Gemini account from your pool folder
-cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json</pre>
+                                <pre id="gemini-auth"># Preferred: open the local dashboard
+python3 -m webbrowser '{{.BaseURL}}/'
+# Or the raw operator dashboard
+python3 -m webbrowser '{{.BaseURL}}/status'
+# Then click: Start Gemini OAuth
+
+# Fallback only if you already have a real Gemini oauth_creds.json:
+# paste its JSON into the Gemini fallback field on / or /status.</pre>
                             </div>
                         </div>
                     </div>
@@ -1217,8 +1264,13 @@ cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json</pre>
     <script>
         const BASE_URL = '{{.BaseURL}}';
         const codexOAuthStatusKey = 'codex-oauth-status-snapshot';
+        const geminiOAuthStatusKey = 'gemini-oauth-status-snapshot';
         let codexOAuthPopup = null;
         let codexOAuthWatcher = null;
+        let geminiOAuthPopup = null;
+        let geminiOAuthWatcher = null;
+        let geminiOAuthDone = false;
+        let geminiOAuthMessageBound = false;
         let latestDashboardData = null;
 
         function clipMiddle(value, head = 8, tail = 6) {
@@ -1354,6 +1406,10 @@ cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json</pre>
             }
             const main = String(acc.health_status || '').trim() || 'local only';
             const details = [];
+            const deadSince = String(acc.dead_since || '').trim();
+            if (deadSince) {
+                details.push('dead since ' + formatDateTime(deadSince));
+            }
             const errorText = String(acc.health_error || '').trim();
             if (errorText) {
                 details.push(errorText);
@@ -1439,11 +1495,50 @@ cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json</pre>
             const eligible = data && data.pool_summary ? data.pool_summary.eligible_accounts : 0;
             const workspaces = data && data.pool_summary ? data.pool_summary.workspace_count : 0;
             const nextRecovery = data && data.pool_summary ? data.pool_summary.next_recovery_at : '';
+            const quarantine = data && data.quarantine ? data.quarantine : {};
+            const quarantineTotal = Number(quarantine.total || 0);
+            const quarantineProviders = quarantine && quarantine.providers && typeof quarantine.providers === 'object'
+                ? Object.entries(quarantine.providers)
+                    .filter((entry) => Number(entry[1]) > 0)
+                    .sort((left, right) => String(left[0]).localeCompare(String(right[0])))
+                    .map((entry) => String(entry[0]) + ' ' + formatNumber(entry[1]))
+                    .join(' | ')
+                : '';
+            const quarantineRecent = Array.isArray(quarantine.recent)
+                ? quarantine.recent
+                    .slice(0, 2)
+                    .map((entry) => {
+                        const provider = String(entry && entry.provider || 'unknown');
+                        const id = clipMiddle(String(entry && entry.id || ''), 10, 6);
+                        return provider + ' ' + id;
+                    })
+                    .join(' | ')
+                : '';
 
             document.getElementById('overview-total').textContent = formatNumber(total);
             document.getElementById('overview-eligible').textContent = formatNumber(eligible);
             document.getElementById('overview-workspaces').textContent = formatNumber(workspaces);
             document.getElementById('overview-recovery').textContent = nextRecovery ? formatDateTime(nextRecovery) : 'none';
+            document.getElementById('overview-quarantine').textContent = formatNumber(quarantineTotal);
+            const quarantineCard = document.getElementById('overview-quarantine-card');
+            const quarantineDetail = document.getElementById('overview-quarantine-detail');
+            if (quarantineCard) {
+                quarantineCard.classList.toggle('is-warn', quarantineTotal > 0);
+            }
+            if (quarantineDetail) {
+                if (quarantineTotal > 0) {
+                    const details = [];
+                    if (quarantineProviders) {
+                        details.push('Files moved out of rotation: ' + quarantineProviders + '.');
+                    }
+                    if (quarantineRecent) {
+                        details.push('Recent: ' + quarantineRecent + '.');
+                    }
+                    quarantineDetail.textContent = details.join(' ') || 'Long-dead seats moved out of active rotation.';
+                } else {
+                    quarantineDetail.textContent = 'No long-dead seats currently quarantined.';
+                }
+            }
 
             renderProviderPills(data);
         }
@@ -1765,9 +1860,12 @@ cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json</pre>
                 renderDashboard(data);
                 const eligible = Number(data && data.pool_summary && data.pool_summary.eligible_accounts || 0);
                 const total = Number(data && data.pool_summary && data.pool_summary.total_accounts || 0);
+                const quarantineTotal = Number(data && data.quarantine && data.quarantine.total || 0);
                 setStatusBadge(eligible > 0 ? 'Online' : 'No Eligible', eligible > 0 ? 'ok' : 'warn');
                 if (eligible === 0 && total > 0) {
                     setStatusBadge('All Blocked', 'warn');
+                } else if (quarantineTotal > 0) {
+                    setStatusBadge('Warnings', 'warn');
                 }
             } catch (error) {
                 setStatusBadge('Error', 'error');
@@ -1851,8 +1949,10 @@ export ANTHROPIC_API_KEY="local-pool"`;
 
             document.getElementById('gemini-one-liner').textContent =
 `mkdir -p ~/.gemini && echo '{"codeAssistEndpoint": "${BASE_URL}"}' > ~/.gemini/settings.json
-echo "Config written! Copy oauth_creds.json from your pool folder:"
-echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
+echo "Config written. Add or refresh a Gemini seat from:"
+echo "  ${BASE_URL}/"
+echo "  ${BASE_URL}/status"
+echo 'Then click: Start Gemini OAuth'`;
 
             document.getElementById('gemini-config').textContent =
 `{
@@ -2242,6 +2342,396 @@ echo "  cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json"`;
                 status.textContent = 'Failed to add GitLab token: ' + (error && error.message ? error.message : error);
             } finally {
                 button.disabled = false;
+            }
+        }
+
+        async function addGeminiSeatFromWeb() {
+            const input = document.getElementById('gemini-seat-json-input');
+            const button = document.getElementById('gemini-seat-add-btn');
+            const status = document.getElementById('gemini-seat-add-status');
+            if (!input || !button || !status) {
+                return;
+            }
+
+            const authJSON = String(input.value || '').trim();
+            if (!authJSON) {
+                status.style.color = 'var(--danger)';
+                status.textContent = 'Paste oauth_creds.json first.';
+                return;
+            }
+
+            button.disabled = true;
+            status.style.color = 'var(--muted)';
+            status.textContent = 'Saving Gemini seat and running refresh probe...';
+
+            try {
+                const response = await fetch('/operator/gemini/account-add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ auth_json: authJSON })
+                });
+                const text = await response.text();
+                let data = null;
+                try {
+                    data = text ? JSON.parse(text) : null;
+                } catch (parseError) {
+                    data = null;
+                }
+                if (!response.ok) {
+                    throw new Error((data && data.error) || text || 'Failed to add Gemini seat');
+                }
+
+                input.value = '';
+                const accountID = String((data && data.account_id) || 'gemini_seat');
+                const healthStatus = String((data && data.health_status) || 'unknown');
+                const healthError = String((data && data.health_error) || '').trim();
+                if (data && data.dead) {
+                    status.style.color = 'var(--warning)';
+                    status.textContent = 'Stored ' + accountID + ', but it is currently marked dead' + (healthError ? ': ' + healthError : '.');
+                } else {
+                    status.style.color = 'var(--success)';
+                    status.textContent = 'Stored ' + accountID + '. Health: ' + healthStatus + (healthError ? ' (' + healthError + ')' : '') + '. Reloading status...';
+                }
+                window.setTimeout(() => window.location.reload(), 900);
+            } catch (error) {
+                status.style.color = 'var(--danger)';
+                status.textContent = 'Failed to add Gemini seat: ' + (error && error.message ? error.message : error);
+            } finally {
+                button.disabled = false;
+            }
+        }
+
+        function geminiOAuthSnapshot(accounts) {
+            const rows = Array.isArray(accounts) ? accounts : [];
+            const geminiRows = rows
+                .filter((acc) => acc && acc.type === 'gemini')
+                .map((acc) => [
+                    String(acc.id || ''),
+                    String(acc.type || ''),
+                    String(acc.account_id || ''),
+                    String(acc.workspace_id || ''),
+                    String(acc.last_refresh_at || ''),
+                    String(acc.auth_expires_at || ''),
+                    String(acc.health_status || ''),
+                    String(acc.health_checked_at || ''),
+                    String(acc.last_healthy_at || ''),
+                    String(!!acc.disabled),
+                    String(!!acc.dead),
+                ].join('|'))
+                .sort();
+
+            return {
+                count: geminiRows.length,
+                signature: geminiRows.join('\n'),
+            };
+        }
+
+        function geminiOAuthDescribeOutcome(before, after, backendMode) {
+            const mode = String(backendMode || '').trim().toLowerCase();
+            if (mode === 'added') {
+                return 'Gemini OAuth completed. Added a new seat; refreshing status now.';
+            }
+            if (mode === 'refreshed') {
+                return 'Gemini OAuth completed. Refreshed an existing seat; refreshing status now.';
+            }
+            if (after.count > before.count) {
+                return 'Gemini OAuth completed. Added a new seat; refreshing status now.';
+            }
+            if (after.signature !== before.signature) {
+                return 'Gemini OAuth completed. Refreshed an existing seat; refreshing status now.';
+            }
+            return 'Gemini OAuth completed. Refreshing status now.';
+        }
+
+        function geminiOAuthReadPendingState() {
+            try {
+                const raw = sessionStorage.getItem(geminiOAuthStatusKey);
+                return raw ? JSON.parse(raw) : null;
+            } catch (error) {
+                return null;
+            }
+        }
+
+        function geminiOAuthClearPendingState() {
+            try {
+                sessionStorage.removeItem(geminiOAuthStatusKey);
+            } catch (error) {
+                // Ignore storage errors.
+            }
+        }
+
+        function geminiOAuthSetOutcome(message) {
+            const outcome = document.getElementById('gemini-oauth-start-outcome');
+            if (outcome) {
+                outcome.textContent = message;
+            }
+        }
+
+        function geminiOAuthPreparePopup() {
+            const popup = window.open('', 'gemini-oauth-popup');
+            if (!popup) {
+                return null;
+            }
+            try {
+                popup.document.open();
+                popup.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Preparing Gemini OAuth</title></head><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 24px;"><div style="max-width: 640px; margin: 64px auto; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 24px;">Opening Gemini OAuth session...</div></body></html>`);
+                popup.document.close();
+                popup.focus();
+            } catch (error) {
+                // Ignore document writes that fail on hardened browsers.
+            }
+            return popup;
+        }
+
+        function geminiOAuthStopWatcher() {
+            if (geminiOAuthWatcher !== null) {
+                window.clearTimeout(geminiOAuthWatcher);
+                geminiOAuthWatcher = null;
+            }
+        }
+
+        function geminiOAuthClosePopup() {
+            if (geminiOAuthPopup && !geminiOAuthPopup.closed) {
+                try {
+                    geminiOAuthPopup.close();
+                } catch (error) {
+                    // Ignore close failures.
+                }
+            }
+            geminiOAuthPopup = null;
+        }
+
+        function geminiOAuthIsTrustedOrigin(origin) {
+            const value = String(origin || '').trim();
+            if (!value) {
+                return false;
+            }
+            try {
+                const current = new URL(window.location.origin);
+                const candidate = new URL(value);
+                const loopbackHosts = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+                return current.protocol === candidate.protocol &&
+                    String(current.port || '') === String(candidate.port || '') &&
+                    loopbackHosts.has(current.hostname) &&
+                    loopbackHosts.has(candidate.hostname);
+            } catch (error) {
+                return false;
+            }
+        }
+
+        function geminiOAuthSnapshotsEqual(beforeSnapshot, afterSnapshot) {
+            return beforeSnapshot.count === afterSnapshot.count && beforeSnapshot.signature === afterSnapshot.signature;
+        }
+
+        async function geminiOAuthFinalize(beforeSnapshot, backendMode, resultPayload) {
+            const button = document.getElementById('gemini-oauth-start-btn');
+            const status = document.getElementById('gemini-oauth-start-status');
+            const result = document.getElementById('gemini-oauth-start-result');
+            geminiOAuthDone = true;
+            geminiOAuthStopWatcher();
+            geminiOAuthClosePopup();
+
+            try {
+                const afterSnapshot = geminiOAuthSnapshot((await codexOAuthFetchStatusSnapshot()).accounts);
+                const fallbackMessage = geminiOAuthDescribeOutcome(beforeSnapshot, afterSnapshot, backendMode);
+                const message = String((resultPayload && resultPayload.message) || fallbackMessage).trim() || fallbackMessage;
+                const healthError = String((resultPayload && resultPayload.health_error) || '').trim();
+                if (status) {
+                    status.style.color = (resultPayload && resultPayload.dead) ? 'var(--warning)' : 'var(--success)';
+                    status.textContent = message + (healthError ? ' (' + healthError + ')' : '');
+                }
+                geminiOAuthSetOutcome(message);
+                geminiOAuthClearPendingState();
+                window.setTimeout(() => {
+                    if (button) {
+                        button.disabled = false;
+                    }
+                    if (result) {
+                        result.style.display = 'block';
+                    }
+                    window.location.reload();
+                }, 850);
+            } catch (error) {
+                if (button) {
+                    button.disabled = false;
+                }
+                if (status) {
+                    status.style.color = 'var(--danger)';
+                    status.textContent = 'Gemini OAuth completed, but status refresh failed: ' + (error && error.message ? error.message : error);
+                }
+                geminiOAuthSetOutcome('Refresh failed. Use the Open OAuth Page link or retry after clearing the popup blocker.');
+                geminiOAuthClearPendingState();
+            }
+        }
+
+        function geminiOAuthWatchStatusChange(beforeSnapshot, backendMode) {
+            const button = document.getElementById('gemini-oauth-start-btn');
+            const status = document.getElementById('gemini-oauth-start-status');
+            let attempts = 0;
+            const maxAttempts = 150;
+            const tick = async () => {
+                if (geminiOAuthWatcher === null) {
+                    return;
+                }
+                attempts += 1;
+                try {
+                    const afterSnapshot = geminiOAuthSnapshot((await codexOAuthFetchStatusSnapshot()).accounts);
+                    if (!geminiOAuthSnapshotsEqual(beforeSnapshot, afterSnapshot)) {
+                        if (status) {
+                            status.style.color = 'var(--success)';
+                            status.textContent = 'Gemini OAuth callback applied. Refreshing status now.';
+                        }
+                        void geminiOAuthFinalize(beforeSnapshot, backendMode, null);
+                        return;
+                    }
+                    if (status) {
+                        status.style.color = 'var(--muted)';
+                        status.textContent = 'Waiting for the Gemini seat state to change...';
+                    }
+                } catch (error) {
+                    if (status) {
+                        status.style.color = 'var(--muted)';
+                        status.textContent = 'Waiting for the Gemini seat state to change...';
+                    }
+                }
+                if (attempts >= maxAttempts) {
+                    geminiOAuthStopWatcher();
+                    geminiOAuthClosePopup();
+                    geminiOAuthClearPendingState();
+                    if (button) {
+                        button.disabled = false;
+                    }
+                    if (status) {
+                        status.style.color = 'var(--warning)';
+                        status.textContent = 'Timed out waiting for the Gemini seat state to change. Use the Open OAuth Page link to retry.';
+                    }
+                    geminiOAuthSetOutcome('No Gemini seat state change was detected yet.');
+                    return;
+                }
+                geminiOAuthWatcher = window.setTimeout(tick, 2000);
+            };
+            if (status) {
+                status.style.color = 'var(--muted)';
+                status.textContent = 'Waiting for the Gemini seat state to change...';
+            }
+            geminiOAuthWatcher = window.setTimeout(tick, 2000);
+        }
+
+        function geminiOAuthEnsureMessageListener() {
+            if (geminiOAuthMessageBound) {
+                return;
+            }
+            geminiOAuthMessageBound = true;
+            window.addEventListener('message', (event) => {
+                if (!geminiOAuthIsTrustedOrigin(event && event.origin)) {
+                    return;
+                }
+                const data = event && event.data;
+                if (!data || data.type !== 'gemini_oauth_result') {
+                    return;
+                }
+
+                const button = document.getElementById('gemini-oauth-start-btn');
+                const status = document.getElementById('gemini-oauth-start-status');
+                const pendingState = geminiOAuthReadPendingState();
+                const beforeSnapshot = pendingState && pendingState.before ? pendingState.before : { count: 0, signature: '' };
+                const backendMode = (data && typeof data.created === 'boolean')
+                    ? (data.created ? 'added' : 'refreshed')
+                    : (pendingState && pendingState.backendMode ? pendingState.backendMode : '');
+
+                if (data && data.ok) {
+                    void geminiOAuthFinalize(beforeSnapshot, backendMode, data);
+                    return;
+                }
+
+                geminiOAuthDone = true;
+                geminiOAuthStopWatcher();
+                geminiOAuthClosePopup();
+                geminiOAuthClearPendingState();
+                if (button) {
+                    button.disabled = false;
+                }
+                if (!status) {
+                    return;
+                }
+
+                const message = String((data && data.message) || 'Gemini OAuth failed.').trim();
+                geminiOAuthSetOutcome(message);
+                status.style.color = 'var(--danger)';
+                status.textContent = message || 'Gemini OAuth failed.';
+            }, false);
+        }
+
+        async function startGeminiOAuthFromWeb() {
+            const button = document.getElementById('gemini-oauth-start-btn');
+            const status = document.getElementById('gemini-oauth-start-status');
+            const result = document.getElementById('gemini-oauth-start-result');
+            const urlNode = document.getElementById('gemini-oauth-start-url');
+            const openLink = document.getElementById('gemini-oauth-start-open');
+            if (!button || !status || !result || !urlNode || !openLink) {
+                return;
+            }
+
+            geminiOAuthEnsureMessageListener();
+            geminiOAuthDone = false;
+            geminiOAuthStopWatcher();
+            geminiOAuthClosePopup();
+            geminiOAuthPopup = geminiOAuthPreparePopup();
+
+            button.disabled = true;
+            status.style.color = 'var(--muted)';
+            status.textContent = 'Starting Gemini OAuth session...';
+            result.style.display = 'none';
+            urlNode.textContent = '';
+            openLink.href = '#';
+            geminiOAuthSetOutcome('');
+
+            try {
+                const beforeSnapshot = geminiOAuthSnapshot((await codexOAuthFetchStatusSnapshot()).accounts);
+                const response = await fetch('/operator/gemini/oauth-start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                if (!response.ok) {
+                    throw new Error(await response.text());
+                }
+
+                const data = await response.json();
+                if (!data || !data.oauth_url) {
+                    throw new Error('Missing oauth_url in response');
+                }
+
+                urlNode.textContent = data.oauth_url;
+                openLink.href = data.oauth_url;
+                result.style.display = 'block';
+                status.style.color = geminiOAuthPopup ? 'var(--success)' : 'var(--warning)';
+                status.textContent = geminiOAuthPopup
+                    ? 'OAuth URL generated. Complete sign-in in the popup; this page will refresh when Gemini seat state changes.'
+                    : 'OAuth URL generated, but the popup was blocked. Open the page from the link below.';
+                geminiOAuthSetOutcome(geminiOAuthPopup ? 'Waiting for the Gemini seat state to change.' : 'Open the OAuth URL manually.');
+                try {
+                    sessionStorage.setItem(geminiOAuthStatusKey, JSON.stringify({
+                        before: beforeSnapshot,
+                        backendMode: String(data.result_mode || data.result || data.status || ''),
+                    }));
+                } catch (error) {
+                    // Ignore storage failures on hardened browsers.
+                }
+                if (geminiOAuthPopup) {
+                    geminiOAuthPopup.location.href = data.oauth_url;
+                    geminiOAuthWatchStatusChange(beforeSnapshot, data.result_mode || data.result || data.status);
+                } else {
+                    button.disabled = false;
+                }
+            } catch (error) {
+                geminiOAuthStopWatcher();
+                geminiOAuthClosePopup();
+                geminiOAuthClearPendingState();
+                button.disabled = false;
+                status.style.color = 'var(--danger)';
+                status.textContent = 'Failed to start Gemini OAuth: ' + (error && error.message ? error.message : error);
+                geminiOAuthSetOutcome('Retry after clearing the popup blocker or open the OAuth URL manually.');
             }
         }
 

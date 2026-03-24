@@ -2,6 +2,243 @@
 
 > Repo-local evidence for root harness proof execution.
 
+### 2026-03-24T10:08:00Z | REPO-CPO-VERIFY-P1-T41
+- Commands
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_t41_before.json`
+  - `python3 /home/lap/tools/codex_pool_manager.py status --strict | jq -r '.admin_accounts[] | select(.type=="codex" and .plan_type!="api" and (.routing.eligible // false)) | .id' > /tmp/cpo_t41_20260324060556/eligible_ids.txt`
+  - `cp -p /home/lap/.root_layer/codex_pool/pool/codex/<id>.json /tmp/cpo_t41_20260324060556/<id>.json.bak`
+  - `jq '.disabled = true' /home/lap/.root_layer/codex_pool/pool/codex/<id>.json > <tmp> && mv <tmp> /home/lap/.root_layer/codex_pool/pool/codex/<id>.json`
+  - `curl -fsS -X POST http://127.0.0.1:8989/admin/reload -H "X-Admin-Token: <admin-token>"`
+  - `python3 /home/lap/tools/codex_pool_manager.py status --strict | jq '{current_seat:.current_seat,last_used_seat:.last_used_seat,openai_api_pool:.openai_api_pool,eligible_codex:[.admin_accounts[]|select(.type=="codex" and (.routing.eligible // false))|{id,plan_type,block_reason:(.routing.block_reason//null)}], blocked_local:[.admin_accounts[]|select(.type=="codex" and .plan_type!="api" and (.routing.eligible != true))|{id,block_reason:(.routing.block_reason//null)}]}'`
+  - `AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && timeout 60s curl -sS -N -o /tmp/cpo_t41_responses.sse -w '%{http_code}' http://127.0.0.1:8989/v1/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","input":[{"role":"user","content":[{"type":"input_text","text":"Reply with exactly OK."}]}],"store":false,"stream":true}'`
+  - `cp -p /tmp/cpo_t41_20260324060556/<id>.json.bak /home/lap/.root_layer/codex_pool/pool/codex/<id>.json`
+  - `curl -fsS -X POST http://127.0.0.1:8989/admin/reload -H "X-Admin-Token: <admin-token>"`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_t41_after.json`
+  - `python3 /home/lap/tools/codex_pool_manager.py status --strict | jq '{eligible_codex:[.admin_accounts[]|select(.type=="codex" and .plan_type!="api" and (.routing.eligible // false))|.id], openai_api_pool:.openai_api_pool}'`
+  - `rg -n 'response.completed|OK' /tmp/cpo_t41_responses.sse`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+- Result
+  - PASS
+  - Controlled cutover succeeded. After temporarily disabling the currently eligible local Codex seats and reloading the pool, the live admin view showed that the only remaining eligible Codex account was the fallback API key `openai_api_77ae4df0081f`, while the previously eligible local seats were all blocked with `block_reason = "disabled"`.
+  - The pooled Codex request still completed successfully during that cutover window: `POST /v1/responses` returned HTTP `200`, and the captured SSE stream contains both `response.completed` and assistant output `OK`. This proves the pool can continue serving through the fallback API lane when no local Codex seat remains eligible.
+  - Recovery also succeeded. After restoring the backed-up local seat files and reloading again, the normal eligible local set returned (`andy_4`, `andy_5`, `john4454_2`, `john4454_3`, `john4454_4`, `luka_2`, `primary`), the fallback API key stayed healthy/eligible, and `/healthz` remained `ok`.
+  - The post-restore status JSON also reflects the fallback request in operator truth: `last_used_seat.id == "openai_api_77ae4df0081f"` while `current_seat.id == "primary"` for the restored local selector state.
+- Artifacts
+  - `/tmp/cpo_t41_20260324060556/eligible_ids.txt`
+  - `/tmp/cpo_t41_20260324060556/*.json.bak`
+  - `/tmp/cpo_status_t41_before.json`
+  - `/tmp/cpo_status_t41_after.json`
+  - `/tmp/cpo_t41_responses.sse`
+- Notes
+  - This was a controlled availability cutover using temporary `disabled` flags, not a destructive delete/re-add and not a synthetic Bolt snapshot mutation.
+  - The live fallback lane is now proven end-to-end; further work should focus on any remaining operator-facing polish or deeper automation around this drill, not on basic fallback viability.
+
+### 2026-03-24T09:22:00Z | REPO-CPO-BUG-P1-T42
+- Commands
+  - `go test -count=1 -run 'TestRoutingStateBlocksRateLimitedLocalCodexSeat|TestCandidateSkipsRateLimitedLocalCodexSeat|TestCandidateRetryPathDoesNotMoveActiveCodexSeat|TestRoutingStateBlocksRateLimitedManagedOpenAIAPIKey|TestCandidateDropsActiveCodexSeatAtExactPrimaryThreshold|TestCandidateDropsActiveCodexSeatAtExactSecondaryThreshold' ./...`
+  - `go build ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json | jq '{current_seat,last_used_seat,openai_api_pool,codex_seat_count}'`
+  - `journalctl --user -u codex-pool.service -n 20 --no-pager`
+- Result
+  - PASS
+  - Local Codex `429` cooldowns now gate routing the same way managed fallback keys already did: if `RateLimitUntil` is still in the future, the selector blocks the seat with `block_reason = rate_limited` instead of marking a debug-only bypass and continuing to reuse it.
+  - Retry fallthrough no longer rewrites the active Codex lease. The selector still establishes stickiness on the first clean candidate of a request, but retry candidates selected under a non-empty exclude set no longer poison future traffic by replacing `activeCodexID`.
+  - Focused regressions for local cooldown blocking, retry-path lease stability, and the existing exact-threshold rotation behavior all passed, and the rebuilt service came back healthy on the new binary (`/healthz -> {"status":"ok","uptime":"9s"}`).
+  - After restart the live status surface reflected the updated selector state cleanly: the pool exposed a normal eligible local seat as `current_seat` and kept the API fallback lane separate (`next_key_id = "openai_api_77ae4df0081f"`), with no startup failure on the new routing logic.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - This slice locks the selector semantics in tests; it did not yet run a forced live `429` or full fallback exhaustion drill.
+  - The next truthful successor remains `REPO-CPO-VERIFY-P1-T41`, which owns the controlled live threshold/exclusion/fallback proof.
+
+### 2026-03-24T09:18:00Z | REPO-CPO-VERIFY-P1-T40
+- Commands
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_t40_before.json`
+  - `AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && timeout 60s curl -sS -N -o /tmp/cpo_t40_responses.sse -w '%{http_code}' http://127.0.0.1:8989/v1/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","input":[{"role":"user","content":[{"type":"input_text","text":"Reply with exactly OK."}]}],"store":false,"stream":true}'`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_t40_after.json`
+  - `sleep 3 && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_t40_post.json`
+  - `rg -n 'response.completed|OK' /tmp/cpo_t40_responses.sse`
+  - `jq -n '{before: (input | {current: .current_seat.id, last: .last_used_seat.id, api_next: .openai_api_pool.next_key_id}), after: (input | {current: .current_seat.id, last: .last_used_seat.id, api_next: .openai_api_pool.next_key_id}), post: (input | {current: .current_seat.id, last: .last_used_seat.id, api_next: .openai_api_pool.next_key_id})}' /tmp/cpo_status_t40_before.json /tmp/cpo_status_t40_after.json /tmp/cpo_status_t40_post.json`
+- Result
+  - PASS
+  - The live pooled Codex request completed successfully with HTTP `200`, and the captured SSE stream contains both `response.completed` and assistant output `OK`, so the running service handled the request end-to-end on the updated binary.
+  - The active local Codex seat stayed stable across the smoke: `current_seat.id` was `luka_2` before, immediately after, and a few seconds after the request. The API fallback pointer also stayed unchanged (`openai_api_pool.next_key_id == "openai_api_77ae4df0081f"`), so this smoke did not unexpectedly jump to the fallback lane.
+  - The post-request status still showed the same live seat with fresh headroom (`primary_headroom_pct = 92`, `secondary_headroom_pct = 30`) and active in-flight work, which is consistent with the selector continuing to hold one eligible local seat instead of spreading the request onto another account.
+- Artifacts
+  - `/tmp/cpo_status_t40_before.json`
+  - `/tmp/cpo_status_t40_after.json`
+  - `/tmp/cpo_status_t40_post.json`
+  - `/tmp/cpo_t40_responses.sse`
+- Notes
+  - This smoke intentionally did not force the pool through an exhaustion or fallback cutover; it only proved sticky local-seat behavior on a healthy request path after `T39`.
+  - The next truthful successor is `REPO-CPO-VERIFY-P1-T41`, which now owns the controlled threshold/exclusion/fallback exercise.
+
+### 2026-03-24T09:08:00Z | REPO-CPO-BUG-P1-T39
+- Commands
+  - `go test -count=1 -run 'TestApplyUsageSnapshotDoesNotCarryExpiredResetAcrossTokenCount|TestRestorePersistedUsageStatePrefersNewerTotalsWhenSnapshotStale|TestCandidateStopsReusingMostRecentlyUsedSeatAtExactSecondaryThreshold|TestCandidateDropsActiveCodexSeatAtExactSecondaryThreshold|TestRoutingStateReentersAfterSecondaryResetWithFreshUsage' ./...`
+  - `go build ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json | jq '{current_seat, last_used_seat, codex_seat_count, openai_api_pool, quarantine}'`
+  - `journalctl --user -u codex-pool.service -n 20 --no-pager`
+- Result
+  - PASS
+  - Fresh Codex `token_count` snapshots no longer inherit expired reset timestamps from older usage state. That closes the rollover bug where post-reset burn could still be interpreted as `0%` because an old `PrimaryResetAt` or `SecondaryResetAt` was silently carried forward and then zeroed by routing.
+  - Restore now lets newer persisted `Totals` repair an older saved usage snapshot instead of treating any non-zero `Usage.RetrievedAt` as untouchable. The new regression keeps unexpired reset times when they are still valid, but stale percentages no longer survive restart just because a snapshot happened to exist.
+  - Secondary-window routing is now explicitly locked at the selector layer: the most-recently-used seat and the active Codex lease both rotate away at the exact weekly threshold, and a fresh post-reset snapshot re-enters routing cleanly.
+  - The rebuilt service came back healthy on the new binary (`/healthz -> {"status":"ok","uptime":"9s"}`), restored persisted state on startup (`totals=17 snapshots=14 bridged_from_totals=0` in `journalctl`), and the live status JSON showed one sticky local seat (`current_seat.id == last_used_seat.id == "luka_2"`) instead of an immediately drifting selection.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - The live pool did not happen to contain a stale snapshot that needed totals-bridging at this restart, so that path is locked by the new targeted regression rather than by opportunistic production state.
+  - The next truthful successor is `REPO-CPO-VERIFY-P1-T40`, which will gather before/after runtime artifacts for live stickiness and controlled fallback cutover on the running pool.
+
+### 2026-03-24T08:57:37Z | REPO-CPO-ALIGN-P2-T38
+- Commands
+  - `go test -count=1 -run 'TestServeStatusPageIncludesQuarantineStatus|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction' ./...`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json | jq '{quarantine, providers: [.accounts[]?.provider] | unique}'`
+  - `Playwright navigate http://127.0.0.1:8989/`
+  - `Playwright screenshot /home/lap/cpo-landing-t38.png`
+- Result
+  - PASS
+  - The landing page now truthfully mirrors cleanup state from the live `/status?format=json` contract instead of hiding it behind the deep-ops `/status` page. The overview surface exposes the `Quarantine` card and warns from the same `quarantine.total/providers/recent` payload already used by the status dashboard.
+  - Account health copy on `/` now carries `dead since ...` details, so long-dead-seat cleanup state is visible on the landing itself rather than only inside `/status` JSON/HTML.
+  - Live proof on the running service stayed healthy during the slice: `/healthz` returned `{"status":"ok","uptime":"1m"}`, `/status?format=json` reported `quarantine.total = 0`, and the browser snapshot showed the landing overview with the new `Quarantine` card reading `0` and `No long-dead seats currently quarantined.`
+- Artifacts
+  - `/home/lap/cpo-landing-t38.png`
+- Notes
+  - This slice only closed operator-surface truth for already-existing cleanup data; it did not add new cleanup policy.
+  - The next truthful successor is `REPO-CPO-BUG-P1-T39`, which now owns the remaining Codex routing mismatch around quota freshness at reset/restart boundaries.
+
+### 2026-03-24T08:18:00Z | REPO-CPO-ALIGN-P1-T36
+- Commands
+  - `go test -count=1 -run 'TestGeminiProviderLoadAccountLoadsPersistedState|TestGeminiProviderLoadAccountLoadsOAuthProfileID|TestSaveGeminiAccountPersistsStateFields|TestSaveGeminiAccountPersistsOAuthProfileID|TestFinalizeProxyResponsePersistsHealthyGeminiRecovery|TestFinalizeProxyResponsePersistsHealthyGeminiStateFromUnknown|TestFinalizeProxyResponsePersistsHealthyGeminiTimestampsWhenAlreadyHealthy|TestFinalizeWebSocketSuccessStatePersistsHealthyGeminiState|TestGeminiProviderRefreshTokenFallsBackToGCloudClient|TestGeminiProviderRefreshTokenFallsBackOn400InvalidGrant|TestGeminiProviderRefreshTokenFallsBackOn400InvalidClient|TestReloadAccountsKeepsGeminiPersistedProfileAndHealthState' ./...`
+- Result
+  - PASS
+  - Gemini refresh fallback is now locked for both existing `401/403` behavior and the previously unguarded `400 invalid_grant` / `400 invalid_client` OAuth responses, so one bad public client profile no longer strands an otherwise usable Gemini refresh token without regression coverage.
+  - Managed Gemini seat files now have an explicit reload-proof contract in tests: persisted `oauth_profile_id`, `health_status`, `health_error`, `health_checked_at`, `last_healthy_at`, and `rate_limit_until` survive a pool reload while runtime-only `Usage`, `Penalty`, `LastUsed`, and `Totals` are still preserved.
+  - Successful Gemini HTTP and websocket proxy paths now persist healthy operator state back to disk, so reload truth no longer depends only on failure probes or stale pre-success snapshots.
+  - `applyRuntimeState` no longer clobbers a freshly loaded Gemini `rate_limit_until` with a stale zero-value from the previous in-memory pool, which was the hidden reload coupling between persisted operator probe state and hot-reload runtime merge.
+  - The slice stayed backend-only: no `/status`, landing-page, or docs/UI behavior changed here.
+- Artifacts
+  - targeted test output captured in terminal only
+- Notes
+  - Existing load/save/finalize Gemini tests were already green; this slice closed the remaining runtime gaps by adding the missing bad-request fallback coverage, healthy-state persistence coverage, and the reload round-trip guard.
+  - The next truthful successor is `REPO-CPO-ALIGN-P1-T37`, which now owns the Gemini operator/dashboard/docs contract on top of this verified backend state.
+
+### 2026-03-24T08:39:57Z | REPO-CPO-BUG-P2-T34
+- Commands
+  - `gofmt -w pool_test.go status_dashboard_test.go`
+  - `go test -count=1 -run 'TestLoadAccountsQuarantinesLongDeadAccount|TestServeStatusPageIncludesQuarantineStatus|TestServeStatusPageReturnsJSONForFormatQuery|TestBuildPoolDashboardData.*|TestReloadAccountsPreservesRuntimeState|TestGeminiProviderLoadAccountLoadsPersistedState' ./...`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_t34.json`
+- Result
+  - PASS
+  - Long-dead seats are now explicitly locked by regression coverage at the loader boundary: a seat with `dead_since > 72h` is moved under `pool/quarantine/...`, excluded from the active in-memory pool, and counted in the quarantine summary instead of silently inflating live routing totals.
+  - `/status?format=json` and the loopback HTML status page now have direct regression coverage for quarantine visibility, so cleanup truth is no longer implicit implementation detail only. The JSON payload exposes `quarantine.total/providers/recent`, and the local HTML operator card renders the quarantine summary text and recent entries.
+  - Live status proof was refreshed from the running service into `/tmp/cpo_status_t34.json`, keeping the slice grounded in the same operator endpoint that the dashboard consumes.
+- Artifacts
+  - `/tmp/cpo_status_t34.json`
+- Notes
+  - The cleanup implementation already existed in the dirty tree; this slice finished the governance work by locking the move-to-quarantine behavior and operator visibility with focused tests, then re-pointing the next successor at landing-surface cleanup visibility instead of more backend cleanup policy.
+
+### 2026-03-24T08:34:02Z | REPO-CPO-ALIGN-P1-T37
+- Commands
+  - `gofmt -w frontend_setup_scripts_test.go`
+  - `go test -count=1 -run 'TestLocalOperatorGeminiSeatAddStoresManagedSeat|TestLocalOperatorGeminiSeatAddMarksUnauthorizedSeatDead|TestLocalOperatorGeminiSeatAddIgnoresProvidedRuntimeState|TestLocalOperatorGeminiSeatAddRejectsNullAuthJSON|TestLocalOperatorGeminiOAuthStartAllowsLoopbackWithoutAdminHeader|TestLocalOperatorGeminiOAuthCallbackStoresManagedSeat|TestManagedGeminiOAuthCallbackRejectsExpiredState|TestManagedGeminiRedirectURIPreservesLoopbackFamily|TestServeStatusPageIncludesOperatorActionForLocalLoopback|TestServeStatusPageHidesOperatorActionOutsideLoopback|TestLocalOperatorGemini|TestServeStatusPage|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction' ./...`
+- Result
+  - PASS
+  - The targeted Gemini operator tests are now green end-to-end, including the callback-expiry and loopback-host-family guards that keep the OAuth route/browser trust contract deterministic.
+  - The local landing page now exposes real Gemini operator actions instead of a dead-end note: `Start Gemini OAuth`, the manual `Open OAuth Page` fallback, the raw `oauth_creds.json` fallback textarea, and the same automatic reload-on-success behavior used for the other local operator flows.
+  - The landing-page Gemini onboarding copy and `README.md` now agree on the actual contract: use `/` or `/status` for managed OAuth onboarding, and use pasted `oauth_creds.json` only as an explicit fallback instead of copying pooled seat files into `~/.gemini/`.
+- Artifacts
+  - targeted test output captured in terminal only
+- Notes
+  - This closes the Gemini operator/dashboard/docs slice that was left after `T36`; the next truthful successor is `REPO-CPO-BUG-P2-T34` for long-dead seat cleanup and visible quarantine truth.
+
+### 2026-03-24T07:12:00Z | REPO-CPO-BUG-P1-T33
+- Commands
+  - `gofmt -w main.go pool.go pool_test.go codex_models.go codex_models_test.go`
+  - `go test -count=1 -run 'Test(PeekCandidateDoesNotClaimActiveCodexSeat|CodexWarmState|ServeCodexModels)' ./...`
+  - `go test -count=1 -run 'Test(BuildWhamUsageURLKeepsBackendAPI|CodexProviderUpstreamURLBackendAPIPathUsesWhamBase|CodexProviderNormalizePathBackendAPIPathStripsPrefix|StatusJSONIncludesUsageRouting|StatusJSONIncludesAPIKeyStats)' ./...`
+  - `go test -count=1 -run 'TestRestorePersistedUsageState|TestCodexWarmState|TestServeCodexModels|TestPeekCandidateDoesNotClaimActiveCodexSeat' ./...`
+  - `go test -count=1 -run 'TestProxyBufferedRetryable5xxRetriesNextSeat' ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json > /tmp/cpo_status_t33.json`
+  - `curl -sS -D /tmp/codex-models-headers.txt -o /tmp/codex-models-body.json --max-time 15 -H 'Authorization: Bearer <pool-codex-access-token>' 'http://127.0.0.1:8989/backend-api/codex/models?client_version=0.106.0'`
+  - `curl -sS -D /tmp/codex-models-headers-2.txt -o /tmp/codex-models-body-2.json --max-time 15 -H 'Authorization: Bearer <pool-codex-access-token>' 'http://127.0.0.1:8989/backend-api/codex/models?client_version=0.106.0'`
+  - `curl -sS -D /tmp/codex-responses-headers-6.txt -o /tmp/codex-responses-body-6.txt --max-time 45 -H 'Authorization: Bearer <pool-codex-access-token>' -H 'Content-Type: application/json' -X POST http://127.0.0.1:8989/v1/responses --data '{"model":"gpt-5.4","instructions":"You are a concise assistant. Reply with OK only.","input":[{"role":"user","content":[{"type":"input_text","text":"Reply with OK only."}]}],"store":false,"stream":true}'`
+  - `journalctl --user -u codex-pool.service -n 20 --no-pager`
+- Result
+  - PASS
+  - `peekCandidate` no longer steals the active Codex lease when metadata code only needs a read-only candidate, so `/backend-api/codex/models` refreshes stop mutating `activeCodexID` or reshuffling the next real seat.
+  - Pooled Codex traffic now gets a bounded soft warm-gate: for up to `30s` after startup, requests that need a live Codex seat are rejected with `503` while local seat usage snapshots are still cold. The metadata GET path is intentionally excluded from that barrier.
+  - `/backend-api/codex/models` now uses a local cache with `1h` fresh TTL, `24h` stale-serve TTL, and a `10s` upstream fetch timeout. Live proof on the restarted service showed `X-Codex-Models-Cache: refresh` on the first request and `X-Codex-Models-Cache: hit` on the second request with `total=0.000571`.
+  - The restarted service came up with persisted usage state already restored (`totals=16 snapshots=14 bridged_from_totals=0` in `journalctl`), so the new warm-gate is guarding truly cold seats rather than compensating for restart amnesia.
+  - Live pooled Codex request proof passed on the restarted service: `POST /v1/responses` returned HTTP `200` and the captured SSE stream finished with `response.completed` and assistant text `OK`.
+  - The live smoke also locked the current upstream request contract for this lane: `input` must be a list, `store` must be `false`, `stream` must be `true`, and `max_output_tokens` is rejected on this ChatGPT-backed Codex endpoint.
+- Artifacts
+  - `/tmp/cpo_status_t33.json`
+  - `/tmp/codex-models-headers.txt`
+  - `/tmp/codex-models-headers-2.txt`
+  - `/tmp/codex-models-body.json`
+  - `/tmp/codex-responses-headers-6.txt`
+  - `/tmp/codex-responses-body-6.txt`
+- Notes
+  - The first T33 test run failed only because `codex_models_test.go` still used the old `NewProviderRegistry` test scaffolding. The test harness was updated to instantiate the current Codex, Claude, and Gemini providers before the real T33 verification run.
+  - Cross-check against the operator microaudit: persisted usage snapshots plus `Totals -> Usage` bridge were already landed in `T32`; this slice closed the remaining warm-gate and local models-cache items. Long-dead seat quarantine stays open as successor `REPO-CPO-BUG-P2-T34`.
+
+### 2026-03-24T07:05:00Z | REPO-CPO-PLAN-P1-T35
+- Commands
+  - `git status --short --branch`
+  - `git diff --stat -- README.md frontend_setup_scripts_test.go router.go status.go status_dashboard_test.go templates/local_landing.html provider_gemini.go gemini_operator.go provider_gemini_test.go`
+  - `git diff -- README.md frontend_setup_scripts_test.go router.go status.go status_dashboard_test.go templates/local_landing.html provider_gemini.go gemini_operator.go provider_gemini_test.go | sed -n '1,260p'`
+- Result
+  - PASS
+  - The pre-existing dirty tree was classified into two real alignment tracks instead of being left as one mixed tail: a Gemini provider/runtime slice (`provider_gemini.go`, `gemini_operator.go`, `provider_gemini_test.go`, connected runtime state) and an operator/dashboard/docs slice (`status.go`, `router.go`, `templates/local_landing.html`, `README.md`, frontend/status tests).
+  - Specialist audit findings were promoted into bounded successor cards with explicit verify hooks instead of vague cleanup language. The main risks now on record are: Gemini refresh fallback stops too early on `400 invalid_grant` / `invalid_client`, Gemini OAuth state TTL is not enforced end-to-end, loopback redirect handling is inconsistent across `127.0.0.1` / `localhost` / `::1`, popup/manual-open refresh is weaker than the Codex flow, and the Gemini fallback copy path text is currently wrong.
+  - The repo-local board was reordered so the next execution wave is truthful: `REPO-CPO-ALIGN-P1-T36` for Gemini backend/runtime alignment, `REPO-CPO-ALIGN-P1-T37` for Gemini operator/dashboard/docs alignment, then `REPO-CPO-BUG-P1-T33` for remaining Codex cold-start hardening.
+- Artifacts
+  - specialist audit outputs captured in-session only
+- Notes
+  - This planning slice intentionally did not modify the old implementation hunks themselves; it only turned the unmanaged tail into governed executable successors after the Codex routing fix was closed.
+
+### 2026-03-24T06:45:00Z | REPO-CPO-BUG-P1-T32
+- Commands
+  - `gofmt -w main.go pool.go usage_tracking.go response_usage_stream.go usage_state.go pool_test.go usage_state_test.go response_usage_stream_test.go storage.go sse.go`
+  - `go test -count=1 -run 'TestRestorePersistedUsageState.*|TestWrapUsageInterceptWriterAppliesCodexSnapshot|TestCandidateKeepsActiveCodexSeatWhileEligible|TestCandidateDropsActiveCodexSeatAtExactPrimaryThreshold|TestCandidateActiveManagedAPIFallbackDoesNotStealEligibleCodexSeat|TestRoutingStateBlocksExactTenPercentHeadroom|TestCandidateStopsReusingMostRecentlyUsedSeatAtExactPrimaryThreshold' ./...`
+  - `go test -count=1 -run 'TestReloadAccountsPreservesRuntimeState|TestCodexProviderParseUsageHeaders|TestParseCodexUsageDelta.*|TestUpdateUsageFromBody.*|TestSSEInterceptWriterEventCallbackReceivesNonUsageEvents|TestCandidate.*|TestRoutingState.*|TestBuildPoolDashboardDataSelectsCurrentSeatFromInflightAndLastUsed|TestBuildPoolDashboardDataSeparatesLastUsedAndBestEligibleWhenIdle' ./...`
+  - `go build ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user show -p MainPID,ExecMainStartTimestamp,ActiveState,SubState codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_post_restart_usage_fix.json`
+  - `curl -fsS http://127.0.0.1:8989/config/codex/<pool-user-token> >/tmp/cpo_pool_user_auth.json`
+  - `timeout 60s curl -sS -N -o /tmp/cpo_live_usage_fix_smoke.sse -w '%{http_code}' http://127.0.0.1:8989/responses -H 'Authorization: Bearer <pool-codex-access-token>' -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}'`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_post_smoke_usage_fix.json`
+  - `journalctl --user -u codex-pool.service -n 40 --no-pager | tail -n 20`
+- Result
+  - PASS
+  - Cold-start state is now restored through the new persisted usage snapshot bucket plus the `Totals -> Usage` bridge, instead of restoring only aggregate totals. After the live `systemd` restart at `Tue 2026-03-24 02:40:30 EDT`, `journalctl` recorded `restored usage state from disk: totals=15 snapshots=12 bridged_from_totals=1`.
+  - Streamed Codex `token_count` events now count as usage-bearing SSE events, update live `a.Usage`, and persist the refreshed snapshot instead of only updating `Totals.Last*Pct`.
+  - Codex seat selection now keeps an explicit active seat for new unpinned work until routing becomes ineligible at the existing `>=90%` headroom guards; managed OpenAI API fallback no longer steals traffic while an eligible local Codex seat exists.
+  - The targeted restore/SSE/routing tests and the broader adjacent regression suite both passed, and `go build ./...` plus the deploy build to `/home/lap/.local/bin/codex-pool` completed successfully.
+  - Live service proof passed on the restarted service: `curl /healthz` returned `{"status":"ok","uptime":"3m"}`, the pool-routed `/responses` smoke returned HTTP `200`, and the captured SSE stream finished with assistant text `OK`.
+  - Post-smoke live status remained coherent: `last_used_seat.id == "luka_3"` immediately after the smoke with updated headroom (`primary_headroom_pct=94`, `secondary_headroom_pct=98`), showing the request ran through a local Codex seat on the restarted process.
+- Artifacts
+  - `/tmp/cpo_status_post_restart_usage_fix.json`
+  - `/tmp/cpo_status_post_smoke_usage_fix.json`
+  - `/tmp/cpo_live_usage_fix_smoke.sse`
+- Notes
+  - The service was already running the new binary under `systemd` during verification (`MainPID=26994`); the earlier “temporary” launch attempt ended up coinciding with the real managed restart window, so verification was completed on the production-managed process rather than a sidecar listener.
+  - This slice intentionally stopped before startup warm-gating, local `/backend-api/codex/models` caching, and dead-seat quarantine; those successors are now hydrated as `REPO-CPO-BUG-P1-T33` and `REPO-CPO-BUG-P2-T34`.
+
 ### 2026-03-23T17:45:16Z | REPO-CPO-REFAC-P1-T30
 - Commands
   - `go test -count=1 -timeout 120s -run 'TestFinalizeWebSocketSuccessState.*|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketPoolAcceptsAuthFromSubprotocol|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat|TestProxyWebSocketPassthroughPreservesAuthorization' ./...`

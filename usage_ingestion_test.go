@@ -3,6 +3,7 @@ package main
 import (
 	"net/url"
 	"testing"
+	"time"
 )
 
 func TestParseCodexUsageDeltaTokenCountCapturesUsageAndSnapshot(t *testing.T) {
@@ -17,7 +18,7 @@ func TestParseCodexUsageDeltaTokenCountCapturesUsageAndSnapshot(t *testing.T) {
 			},
 		},
 		"rate_limits": map[string]any{
-			"primary": map[string]any{"used_percent": 25.0},
+			"primary":   map[string]any{"used_percent": 25.0},
 			"secondary": map[string]any{"used_percent": 50.0},
 		},
 	})
@@ -72,6 +73,42 @@ func TestParseCodexUsageDeltaResponseWrapperCapturesLegacyRateLimit(t *testing.T
 	}
 	if delta.Snapshot.Source != "body" {
 		t.Fatalf("snapshot source=%q", delta.Snapshot.Source)
+	}
+}
+
+func TestApplyUsageSnapshotDoesNotCarryExpiredResetAcrossTokenCount(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	acc := &Account{
+		ID:       "seat-a",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.91,
+			SecondaryUsedPercent: 0.94,
+			PrimaryResetAt:       now.Add(-10 * time.Minute),
+			SecondaryResetAt:     now.Add(-2 * time.Hour),
+			RetrievedAt:          now.Add(-30 * time.Minute),
+			Source:               "headers",
+		},
+	}
+
+	applyUsageSnapshot(acc, &UsageSnapshot{
+		PrimaryUsedPercent:   0.05,
+		SecondaryUsedPercent: 0.15,
+		RetrievedAt:          now,
+		Source:               "token_count",
+	})
+
+	acc.mu.Lock()
+	snapshot := acc.Usage
+	acc.mu.Unlock()
+
+	if !snapshot.PrimaryResetAt.IsZero() || !snapshot.SecondaryResetAt.IsZero() {
+		t.Fatalf("expected expired resets to be cleared, got %+v", snapshot)
+	}
+	primaryUsed, secondaryUsed := effectiveUsageForRouting(snapshot, now.Add(time.Second))
+	if primaryUsed != 0.05 || secondaryUsed != 0.15 {
+		t.Fatalf("effective usage = (%.2f, %.2f)", primaryUsed, secondaryUsed)
 	}
 }
 

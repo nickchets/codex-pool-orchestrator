@@ -26,6 +26,7 @@ type accountSnapshot struct {
 	Totals                    AccountUsage
 	LastUsed                  time.Time
 	RateLimitUntil            time.Time
+	DeadSince                 time.Time
 	HealthStatus              string
 	HealthError               string
 	HealthCheckedAt           time.Time
@@ -71,6 +72,7 @@ func snapshotAccountState(a *Account, now time.Time, accountType AccountType, re
 		Totals:                    a.Totals,
 		LastUsed:                  a.LastUsed,
 		RateLimitUntil:            a.RateLimitUntil,
+		DeadSince:                 a.DeadSince,
 		HealthStatus:              a.HealthStatus,
 		HealthError:               a.HealthError,
 		HealthCheckedAt:           a.HealthCheckedAt,

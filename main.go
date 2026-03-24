@@ -211,20 +211,13 @@ func main() {
 	}
 	defer store.Close()
 
-	// Restore persisted usage totals from BoltDB
-	if persisted, err := store.loadAllAccountUsage(); err == nil && len(persisted) > 0 {
-		pool.mu.RLock()
-		restored := 0
-		for _, a := range pool.accounts {
-			if usage, ok := persisted[a.ID]; ok {
-				a.mu.Lock()
-				a.Totals = usage
-				a.mu.Unlock()
-				restored++
-			}
-		}
-		pool.mu.RUnlock()
-		log.Printf("restored usage totals for %d/%d accounts from disk", restored, len(persisted))
+	if restoredTotals, restoredSnapshots, bridged := restorePersistedUsageState(pool.accounts, store); restoredTotals > 0 || restoredSnapshots > 0 || bridged > 0 {
+		log.Printf(
+			"restored usage state from disk: totals=%d snapshots=%d bridged_from_totals=%d",
+			restoredTotals,
+			restoredSnapshots,
+			bridged,
+		)
 	}
 
 	standardTransport := &http.Transport{
@@ -298,6 +291,7 @@ func main() {
 		startTime:        time.Now(),
 	}
 	h.startUsagePoller()
+	h.startDeadAccountCleanupPoller()
 
 	srv := &http.Server{
 		Addr:              cfg.listenAddr,
@@ -342,6 +336,7 @@ type proxyHandler struct {
 	recent           *recentErrors
 	inflight         int64
 	startTime        time.Time
+	codexModels      codexModelsCache
 
 	// Rate limiting for token refresh operations
 	refreshMu       sync.Mutex
@@ -470,9 +465,9 @@ func isPermanentCodexAuthFailure(resp *http.Response, body []byte) bool {
 }
 
 func markAccountDead(reqID string, acc *Account, reason string) {
+	now := time.Now().UTC()
 	acc.mu.Lock()
-	acc.Dead = true
-	acc.Penalty += 100.0
+	markAccountDeadStateLocked(acc, now, 100.0)
 	acc.mu.Unlock()
 	log.Printf("[%s] marking account %s as dead: %s", reqID, acc.ID, reason)
 	if err := saveAccount(acc); err != nil {
@@ -518,9 +513,9 @@ func (h *proxyHandler) applyUpstreamAuthFailureDisposition(reqID string, acc *Ac
 		return
 	}
 	if refreshFailed && acc.Type != AccountTypeCodex {
+		now := time.Now().UTC()
 		acc.mu.Lock()
-		acc.Dead = true
-		acc.Penalty += 1.0
+		markAccountDeadStateLocked(acc, now, 1.0)
 		acc.mu.Unlock()
 		if err := saveAccount(acc); err != nil {
 			log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
@@ -1087,9 +1082,9 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, acc *Account,
 		}
 		// Check for deactivated_workspace or similar permanent failures.
 		if strings.Contains(retryInspection.Text, "deactivated_workspace") || strings.Contains(retryInspection.Text, "subscription") {
+			now := time.Now().UTC()
 			acc.mu.Lock()
-			acc.Dead = true
-			acc.Penalty += 100.0
+			markAccountDeadStateLocked(acc, now, 100.0)
 			acc.mu.Unlock()
 			log.Printf("[%s] marking account %s as DEAD: %s", reqID, acc.ID, retryInspection.Text)
 			if err := saveAccount(acc); err != nil {
@@ -1220,6 +1215,7 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 	}
 
 	provider.ParseUsageHeaders(acc, resp.Header)
+	persistUsageSnapshot(h.store, acc)
 
 	// Snapshot rate limits from headers for use in SSE callback
 	// (Claude SSE events carry 0% — real data comes from headers)
@@ -1384,12 +1380,18 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		http.Error(w, admission.Message, admission.StatusCode)
 		return
 	}
+	if h.maybeServeCachedCodexModels(w, r, reqID, admission) {
+		return
+	}
 
 	if isWebSocketUpgradeRequest(r) {
 		shape := buildWebSocketRequestShape(r)
 		routePlan, _, err := h.planRoute(admission, r, shape, nil)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if !h.ensureCodexRouteReady(w, reqID, routePlan) {
 			return
 		}
 		h.proxyRequestWebSocket(w, r, reqID, routePlan)
@@ -1402,6 +1404,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		routePlan, _, err := h.planRoute(admission, r, shape, nil)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		if !h.ensureCodexRouteReady(w, reqID, routePlan) {
 			return
 		}
 		if h.cfg.debug {
@@ -1422,6 +1427,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	routePlan, rewrittenBody, err := h.planRoute(admission, r, shape, bodyBytes)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	if !h.ensureCodexRouteReady(w, reqID, routePlan) {
 		return
 	}
 	if rewrittenBody != nil {
@@ -1655,9 +1663,18 @@ func (h *proxyHandler) finalizeWebSocketSuccessState(acc *Account, conversationI
 	}
 
 	now := time.Now()
+	shouldPersistGemini := false
 	acc.mu.Lock()
+	if acc.Type == AccountTypeGemini {
+		shouldPersistGemini = shouldPersistHealthyGeminiStateLocked(acc)
+	}
 	applySuccessfulAccountStateLocked(acc, now)
 	acc.mu.Unlock()
+	if shouldPersistGemini {
+		if err := saveAccount(acc); err != nil {
+			log.Printf("warning: failed to persist healthy gemini account %s after websocket success: %v", acc.ID, err)
+		}
+	}
 }
 
 func (h *proxyHandler) modifyWebSocketProxyResponse(reqID string, provider Provider, acc *Account, resp *http.Response, refreshFailed bool, conversationID string) error {
@@ -1666,6 +1683,7 @@ func (h *proxyHandler) modifyWebSocketProxyResponse(reqID string, provider Provi
 	}
 
 	provider.ParseUsageHeaders(acc, resp.Header)
+	persistUsageSnapshot(h.store, acc)
 	h.applyPreCopyUpstreamStatusHandling(reqID, acc, resp, refreshFailed, true)
 	h.finalizeWebSocketSuccessState(acc, conversationID, resp.StatusCode)
 	return nil
@@ -2021,10 +2039,12 @@ func (h *proxyHandler) finalizeProxyResponse(reqID string, provider Provider, ac
 
 	now := time.Now()
 	shouldPersistAccountState := false
+	persistLabel := "account"
 	acc.mu.Lock()
 	if isGitLabClaudeAccount(acc) {
 		shouldPersistAccountState = acc.Dead || !acc.RateLimitUntil.IsZero() || acc.GitLabQuotaExceededCount > 0 || acc.HealthStatus != "healthy" || acc.HealthError != ""
-		acc.Dead = false
+		persistLabel = "gitlab claude"
+		clearAccountDeadStateLocked(acc, now, false)
 		acc.HealthStatus = "healthy"
 		acc.HealthError = ""
 		acc.HealthCheckedAt = now
@@ -2032,14 +2052,31 @@ func (h *proxyHandler) finalizeProxyResponse(reqID string, provider Provider, ac
 		acc.RateLimitUntil = time.Time{}
 		acc.GitLabQuotaExceededCount = 0
 		acc.GitLabLastQuotaExceededAt = time.Time{}
+	} else if acc.Type == AccountTypeGemini {
+		shouldPersistAccountState = shouldPersistHealthyGeminiStateLocked(acc)
+		persistLabel = "gemini"
 	}
 	applySuccessfulAccountStateLocked(acc, now)
 	acc.mu.Unlock()
 	if shouldPersistAccountState {
 		if err := saveAccount(acc); err != nil {
-			log.Printf("[%s] warning: failed to persist healthy gitlab claude account %s: %v", reqID, acc.ID, err)
+			log.Printf("[%s] warning: failed to persist healthy %s account %s: %v", reqID, persistLabel, acc.ID, err)
 		}
 	}
+}
+
+func shouldPersistHealthyGeminiStateLocked(acc *Account) bool {
+	if acc == nil || acc.Type != AccountTypeGemini {
+		return false
+	}
+	healthStatus := strings.TrimSpace(acc.HealthStatus)
+	healthError := strings.TrimSpace(acc.HealthError)
+	return acc.Dead ||
+		!acc.RateLimitUntil.IsZero() ||
+		healthStatus != "healthy" ||
+		healthError != "" ||
+		acc.HealthCheckedAt.IsZero() ||
+		acc.LastHealthyAt.IsZero()
 }
 
 // Caller must hold acc.mu when applying shared success-state recovery.
@@ -2047,8 +2084,8 @@ func applySuccessfulAccountStateLocked(acc *Account, now time.Time) {
 	if acc == nil {
 		return
 	}
-	if isManagedCodexAPIKeyAccount(acc) {
-		acc.Dead = false
+	if isManagedCodexAPIKeyAccount(acc) || acc.Type == AccountTypeGemini {
+		clearAccountDeadStateLocked(acc, now, false)
 		acc.HealthStatus = "healthy"
 		acc.HealthError = ""
 		acc.HealthCheckedAt = now
@@ -2571,9 +2608,9 @@ func (h *proxyHandler) tryOnce(
 					h.applyRateLimit(acc, nil, defaultRateLimitBackoff)
 				} else if strings.Contains(errStr, "invalid_grant") || strings.Contains(errStr, "refresh_token_reused") {
 					// If refresh token is permanently invalid, mark account as dead immediately
+					now := time.Now().UTC()
 					acc.mu.Lock()
-					acc.Dead = true
-					acc.Penalty += 100.0
+					markAccountDeadStateLocked(acc, now, 100.0)
 					acc.mu.Unlock()
 					log.Printf("[%s] marking account %s as dead: refresh token revoked/invalid", reqID, acc.ID)
 					if err := saveAccount(acc); err != nil {
@@ -2762,6 +2799,7 @@ func (h *proxyHandler) updateUsageFromBody(provider Provider, a *Account, userID
 		}
 		if delta.Snapshot != nil {
 			applyUsageSnapshot(a, delta.Snapshot)
+			persistUsageSnapshot(h.store, a)
 		}
 		if delta.Usage != nil {
 			h.recordUsage(a, *enrichUsageRecord(a, userID, delta.Usage, headerPrimaryPct, headerSecondaryPct))

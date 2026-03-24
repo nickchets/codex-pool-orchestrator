@@ -33,6 +33,8 @@ The local operator UI is dashboard-first:
 - `/status` exposes the raw operator dashboard and JSON status contract
 - account onboarding and delete actions are available from the web surface
 - fallback API keys and GitLab Claude tokens are managed from the same operator surface
+- Gemini seats can be onboarded from `/` or `/status` with `Start Gemini OAuth`; pasted `oauth_creds.json` stays fallback-only
+- managed Gemini OAuth client credentials are loaded from the local service environment, not committed in the repo
 
 Friends mode still exists, but the local documentation and operator flow are intentionally text-first and dashboard-first instead of screenshot-driven.
 
@@ -43,7 +45,7 @@ Friends mode still exists, but the local documentation and operator flow are int
 ### 1. Add your accounts
 
 ```bash
-mkdir -p pool/codex pool/claude pool/gemini
+mkdir -p pool/codex pool/claude
 
 # Codex accounts
 cp ~/.codex/auth.json pool/codex/work.json
@@ -51,9 +53,6 @@ cp ~/backup/.codex/auth.json pool/codex/personal.json
 
 # Claude accounts
 cp ~/.claude/credentials.json pool/claude/main.json
-
-# Gemini accounts
-cp ~/.gemini/oauth_creds.json pool/gemini/main.json
 ```
 
 Structure:
@@ -64,9 +63,22 @@ pool/
 │   └── personal.json
 ├── claude/
 │   └── main.json
-└── gemini/
-    └── main.json
 ```
+
+For Gemini seats, use the local operator dashboard:
+
+1. Open `http://127.0.0.1:8989/` or `http://127.0.0.1:8989/status`
+2. In the Gemini operator panel, click `Start Gemini OAuth`
+3. Complete Google sign-in and let the dashboard store and probe the seat
+
+Managed Gemini OAuth requires local client credentials in the service environment:
+
+```bash
+export GEMINI_OAUTH_GCLOUD_CLIENT_ID=...
+export GEMINI_OAUTH_GCLOUD_CLIENT_SECRET=...
+```
+
+If you already have a real Gemini `oauth_creds.json`, you can still paste it into the fallback field on `/` or `/status`.
 
 ### 2. Run it
 

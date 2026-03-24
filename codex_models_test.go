@@ -1,0 +1,193 @@
+package main
+
+import (
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+func testCodexModelsHandler(t *testing.T, transport http.RoundTripper, startTime time.Time, accounts ...*Account) *proxyHandler {
+	t.Helper()
+
+	responsesBase, _ := url.Parse("https://chatgpt.example.com/backend-api/codex")
+	whamBase, _ := url.Parse("https://chatgpt.example.com/backend-api")
+	claudeBase, _ := url.Parse("https://claude.example.com")
+	geminiBase, _ := url.Parse("https://cloudcode-pa.googleapis.com")
+	geminiAPIBase, _ := url.Parse("https://generativelanguage.googleapis.com")
+	provider := NewCodexProvider(responsesBase, whamBase, nil, responsesBase)
+	claude := NewClaudeProvider(claudeBase)
+	gemini := NewGeminiProvider(geminiBase, geminiAPIBase)
+	return &proxyHandler{
+		startTime: startTime,
+		transport: transport,
+		pool:      newPoolState(accounts, false),
+		registry:  NewProviderRegistry(provider, claude, gemini),
+	}
+}
+
+func TestCodexWarmStateBlocksRecentStartupWithoutUsageSnapshots(t *testing.T) {
+	acc := &Account{
+		ID:          "seat-a",
+		Type:        AccountTypeCodex,
+		PlanType:    "pro",
+		AccessToken: "token-a",
+	}
+	h := testCodexModelsHandler(t, roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		t.Fatal("transport should not be called during warm-up gate")
+		return nil, nil
+	}), time.Now(), acc)
+
+	ready, missing, total := h.codexWarmState(time.Now())
+	if ready {
+		t.Fatal("expected codex warm state to block when usage snapshots are still missing")
+	}
+	if missing != 1 || total != 1 {
+		t.Fatalf("warm state counts = (%d missing, %d total)", missing, total)
+	}
+}
+
+func TestCodexWarmStateAllowsAfterTimeout(t *testing.T) {
+	acc := &Account{
+		ID:          "seat-a",
+		Type:        AccountTypeCodex,
+		PlanType:    "pro",
+		AccessToken: "token-a",
+	}
+	h := testCodexModelsHandler(t, roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		return nil, nil
+	}), time.Now().Add(-codexStartupWarmTimeout-time.Second), acc)
+
+	ready, missing, total := h.codexWarmState(time.Now())
+	if !ready {
+		t.Fatal("expected codex warm state to allow traffic after timeout")
+	}
+	if missing != 1 || total != 1 {
+		t.Fatalf("warm state counts = (%d missing, %d total)", missing, total)
+	}
+}
+
+func TestServeCodexModelsCachesSuccessfulUpstreamResponse(t *testing.T) {
+	now := time.Now().UTC()
+	acc := &Account{
+		ID:          "seat-a",
+		Type:        AccountTypeCodex,
+		PlanType:    "pro",
+		AccessToken: "token-a",
+		Usage: UsageSnapshot{
+			RetrievedAt: now,
+		},
+	}
+
+	var calls atomic.Int32
+	transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		if got := r.Header.Get("Authorization"); got != "Bearer token-a" {
+			t.Fatalf("authorization header = %q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header: http.Header{
+				"Content-Type": []string{"application/json"},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"gpt-5.4"}]}`)),
+		}, nil
+	})
+	h := testCodexModelsHandler(t, transport, time.Now().Add(-time.Minute), acc)
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/backend-api/codex/models?client_version=0.106.0", nil)
+	routePlan := RoutePlan{
+		AccountType: AccountTypeCodex,
+		Provider:    h.registry.ForType(AccountTypeCodex),
+	}
+
+	rr1 := httptest.NewRecorder()
+	h.serveCodexModelsForTest(rr1, req, "req-1", routePlan)
+	if rr1.Code != http.StatusOK {
+		t.Fatalf("first status = %d body=%s", rr1.Code, rr1.Body.String())
+	}
+	if got := rr1.Header().Get("X-Codex-Models-Cache"); got != "refresh" {
+		t.Fatalf("first cache header = %q", got)
+	}
+
+	rr2 := httptest.NewRecorder()
+	h.serveCodexModelsForTest(rr2, req, "req-2", routePlan)
+	if rr2.Code != http.StatusOK {
+		t.Fatalf("second status = %d body=%s", rr2.Code, rr2.Body.String())
+	}
+	if got := rr2.Header().Get("X-Codex-Models-Cache"); got != "hit" {
+		t.Fatalf("second cache header = %q", got)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("expected one upstream call, got %d", calls.Load())
+	}
+}
+
+func TestServeCodexModelsServesStaleCacheOnRefreshFailure(t *testing.T) {
+	acc := &Account{
+		ID:          "seat-a",
+		Type:        AccountTypeCodex,
+		PlanType:    "pro",
+		AccessToken: "token-a",
+		Usage: UsageSnapshot{
+			RetrievedAt: time.Now().UTC(),
+		},
+	}
+	transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		return nil, io.EOF
+	})
+	h := testCodexModelsHandler(t, transport, time.Now().Add(-time.Minute), acc)
+	h.codexModels.store(codexModelsCacheEntry{
+		Body:        []byte(`{"data":[{"id":"cached"}]}`),
+		ContentType: "application/json",
+		FetchedAt:   time.Now().Add(-2 * time.Hour),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/backend-api/codex/models?client_version=0.106.0", nil)
+	routePlan := RoutePlan{
+		AccountType: AccountTypeCodex,
+		Provider:    h.registry.ForType(AccountTypeCodex),
+	}
+
+	rr := httptest.NewRecorder()
+	h.serveCodexModelsForTest(rr, req, "req-1", routePlan)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-Codex-Models-Cache"); got != "stale" {
+		t.Fatalf("cache header = %q", got)
+	}
+	if body := strings.TrimSpace(rr.Body.String()); body != `{"data":[{"id":"cached"}]}` {
+		t.Fatalf("body = %s", body)
+	}
+}
+
+func (h *proxyHandler) serveCodexModelsForTest(w http.ResponseWriter, r *http.Request, reqID string, routePlan RoutePlan) {
+	now := time.Now()
+	if cached, ok := h.codexModels.load(); ok {
+		age := now.Sub(cached.FetchedAt)
+		if age < codexModelsFreshTTL {
+			writeCodexModelsCacheResponse(w, cached, "hit")
+			return
+		}
+	}
+
+	refreshed, refreshErr := h.fetchCodexModels(r, reqID, routePlan)
+	if refreshErr == nil {
+		h.codexModels.store(refreshed)
+		writeCodexModelsCacheResponse(w, refreshed, "refresh")
+		return
+	}
+
+	if cached, ok := h.codexModels.load(); ok && now.Sub(cached.FetchedAt) < codexModelsMaxStaleTTL {
+		writeCodexModelsCacheResponse(w, cached, "stale")
+		return
+	}
+
+	http.Error(w, refreshErr.Error(), http.StatusBadGateway)
+}

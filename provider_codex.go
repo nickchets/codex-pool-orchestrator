@@ -62,6 +62,9 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 		if aj.LastHealthyAt != nil {
 			acc.LastHealthyAt = *aj.LastHealthyAt
 		}
+		if aj.DeadSince != nil {
+			acc.DeadSince = aj.DeadSince.UTC()
+		}
 		acc.HealthStatus = strings.TrimSpace(aj.HealthStatus)
 		acc.HealthError = strings.TrimSpace(aj.HealthError)
 		return acc, nil
@@ -96,6 +99,9 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 		acc.LastRefresh = *aj.LastRefresh
 	}
 	acc.Dead = aj.Dead
+	if aj.DeadSince != nil {
+		acc.DeadSince = aj.DeadSince.UTC()
+	}
 	return acc, nil
 }
 
@@ -198,7 +204,7 @@ func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transpor
 		}
 	}
 	acc.LastRefresh = time.Now().UTC()
-	acc.Dead = false
+	setAccountDeadStateLocked(acc, false, acc.LastRefresh)
 	acc.mu.Unlock()
 
 	return saveAccount(acc)

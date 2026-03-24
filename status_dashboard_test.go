@@ -3,11 +3,13 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +22,12 @@ func stubCodexLoopbackEnsure(t *testing.T) {
 	t.Cleanup(func() {
 		ensureCodexLoopbackCallbackServersForOperator = previous
 	})
+}
+
+func resetManagedGeminiOAuthSessions() {
+	managedGeminiOAuthSessions.Lock()
+	managedGeminiOAuthSessions.sessions = make(map[string]*managedGeminiOAuthSession)
+	managedGeminiOAuthSessions.Unlock()
 }
 
 func testCodexIDToken(t *testing.T, userID, accountID, email, subject string, exp time.Time) string {
@@ -763,6 +771,416 @@ func TestLocalOperatorCodexAPIKeyAddMarksQuotaKeyDead(t *testing.T) {
 	}
 }
 
+func TestLocalOperatorGeminiSeatAddStoresManagedSeat(t *testing.T) {
+	apiBase, err := url.Parse("https://api.example.com")
+	if err != nil {
+		t.Fatalf("parse api base: %v", err)
+	}
+	codex := NewCodexProvider(apiBase, apiBase, apiBase, apiBase)
+	claude := NewClaudeProvider(apiBase)
+	gemini := NewGeminiProvider(apiBase, apiBase)
+
+	poolDir := t.TempDir()
+	h := &proxyHandler{
+		cfg:      config{poolDir: poolDir},
+		pool:     newPoolState(nil, false),
+		registry: NewProviderRegistry(codex, claude, gemini),
+		refreshTransport: gitlabClaudeRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.String() != geminiOAuthTokenURL {
+				t.Fatalf("unexpected refresh URL: %s", req.URL.String())
+			}
+			return gitlabClaudeJSONResponse(http.StatusOK, `{"access_token":"fresh-token","expires_in":3600,"token_type":"Bearer","scope":"scope"}`), nil
+		}),
+	}
+
+	authJSON := `{"access_token":"seed-token","refresh_token":"refresh-token","expiry_date":1774353600000}`
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/gemini/account-add", strings.NewReader(`{"auth_json":`+strconv.Quote(authJSON)+`}`))
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode json: %v", err)
+	}
+	accountID, _ := payload["account_id"].(string)
+	if accountID == "" {
+		t.Fatalf("missing account_id: %+v", payload)
+	}
+	if payload["health_status"] != "healthy" {
+		t.Fatalf("unexpected health_status: %+v", payload)
+	}
+	if h.pool.count() != 1 {
+		t.Fatalf("pool count=%d", h.pool.count())
+	}
+	seatPath := filepath.Join(poolDir, managedGeminiSubdir, accountID+".json")
+	if _, err := os.Stat(seatPath); err != nil {
+		t.Fatalf("expected stored gemini seat file at %s: %v", seatPath, err)
+	}
+}
+
+func TestLocalOperatorGeminiSeatAddMarksUnauthorizedSeatDead(t *testing.T) {
+	apiBase, err := url.Parse("https://api.example.com")
+	if err != nil {
+		t.Fatalf("parse api base: %v", err)
+	}
+	codex := NewCodexProvider(apiBase, apiBase, apiBase, apiBase)
+	claude := NewClaudeProvider(apiBase)
+	gemini := NewGeminiProvider(apiBase, apiBase)
+
+	poolDir := t.TempDir()
+	h := &proxyHandler{
+		cfg:      config{poolDir: poolDir},
+		pool:     newPoolState(nil, false),
+		registry: NewProviderRegistry(codex, claude, gemini),
+		refreshTransport: gitlabClaudeRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return gitlabClaudeJSONResponse(http.StatusUnauthorized, `{"error":"invalid_grant"}`), nil
+		}),
+	}
+
+	authJSON := `{"access_token":"seed-token","refresh_token":"refresh-token","expiry_date":1774353600000}`
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/gemini/account-add", strings.NewReader(`{"auth_json":`+strconv.Quote(authJSON)+`}`))
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode json: %v", err)
+	}
+	if payload["health_status"] != "dead" {
+		t.Fatalf("unexpected health_status: %+v", payload)
+	}
+	if payload["dead"] != true {
+		t.Fatalf("expected dead=true, got %+v", payload)
+	}
+}
+
+func TestLocalOperatorGeminiSeatAddIgnoresProvidedRuntimeState(t *testing.T) {
+	apiBase, err := url.Parse("https://api.example.com")
+	if err != nil {
+		t.Fatalf("parse api base: %v", err)
+	}
+	codex := NewCodexProvider(apiBase, apiBase, apiBase, apiBase)
+	claude := NewClaudeProvider(apiBase)
+	gemini := NewGeminiProvider(apiBase, apiBase)
+
+	poolDir := t.TempDir()
+	h := &proxyHandler{
+		cfg:      config{poolDir: poolDir},
+		pool:     newPoolState(nil, false),
+		registry: NewProviderRegistry(codex, claude, gemini),
+		refreshTransport: gitlabClaudeRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			return gitlabClaudeJSONResponse(http.StatusTooManyRequests, `{"error":"rate limited"}`), nil
+		}),
+	}
+
+	authJSON := `{
+		"access_token":"seed-token",
+		"refresh_token":"refresh-token",
+		"expiry_date":1774353600000,
+		"dead":true,
+		"disabled":true,
+		"health_status":"dead",
+		"health_error":"stale external state",
+		"rate_limit_until":"2026-03-29T12:00:00Z"
+	}`
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/gemini/account-add", strings.NewReader(`{"auth_json":`+strconv.Quote(authJSON)+`}`))
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode json: %v", err)
+	}
+	if payload["health_status"] != "rate_limited" {
+		t.Fatalf("unexpected health_status: %+v", payload)
+	}
+	if payload["dead"] != false {
+		t.Fatalf("expected dead=false after sanitizing provided seat state, got %+v", payload)
+	}
+
+	accountID, _ := payload["account_id"].(string)
+	if accountID == "" {
+		t.Fatalf("missing account_id: %+v", payload)
+	}
+	seatPath := filepath.Join(poolDir, managedGeminiSubdir, accountID+".json")
+	saved, err := os.ReadFile(seatPath)
+	if err != nil {
+		t.Fatalf("read seat file: %v", err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(saved, &root); err != nil {
+		t.Fatalf("unmarshal seat file: %v", err)
+	}
+	if _, ok := root["disabled"]; ok {
+		t.Fatalf("expected provided disabled flag to be cleared: %s", string(saved))
+	}
+	if _, ok := root["dead"]; ok {
+		t.Fatalf("expected provided dead flag to be cleared for rate-limited seat: %s", string(saved))
+	}
+	if root["health_status"] != "rate_limited" {
+		t.Fatalf("saved health_status=%#v", root["health_status"])
+	}
+}
+
+func TestLocalOperatorGeminiSeatAddRejectsNullAuthJSON(t *testing.T) {
+	apiBase, err := url.Parse("https://api.example.com")
+	if err != nil {
+		t.Fatalf("parse api base: %v", err)
+	}
+	codex := NewCodexProvider(apiBase, apiBase, apiBase, apiBase)
+	claude := NewClaudeProvider(apiBase)
+	gemini := NewGeminiProvider(apiBase, apiBase)
+
+	h := &proxyHandler{
+		cfg:      config{poolDir: t.TempDir()},
+		pool:     newPoolState(nil, false),
+		registry: NewProviderRegistry(codex, claude, gemini),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/gemini/account-add", strings.NewReader(`{"auth_json":"null"}`))
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "auth_json must be a JSON object") {
+		t.Fatalf("unexpected body=%s", rr.Body.String())
+	}
+}
+
+func TestLocalOperatorGeminiOAuthStartAllowsLoopbackWithoutAdminHeader(t *testing.T) {
+	setGeminiOAuthTestProfiles(t)
+
+	h := &proxyHandler{
+		cfg: config{adminToken: "secret"},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/gemini/oauth-start", strings.NewReader(`{}`))
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode json: %v", err)
+	}
+	oauthURL, _ := payload["oauth_url"].(string)
+	if oauthURL == "" {
+		t.Fatalf("payload missing oauth_url: %+v", payload)
+	}
+	if !strings.Contains(oauthURL, "accounts.google.com") {
+		t.Fatalf("unexpected oauth_url=%q", oauthURL)
+	}
+	if _, ok := payload["state"].(string); !ok {
+		t.Fatalf("payload missing state: %+v", payload)
+	}
+}
+
+func TestManagedGeminiOAuthCallbackRejectsExpiredState(t *testing.T) {
+	resetManagedGeminiOAuthSessions()
+	t.Cleanup(resetManagedGeminiOAuthSessions)
+
+	managedGeminiOAuthSessions.Lock()
+	managedGeminiOAuthSessions.sessions["expired-state"] = &managedGeminiOAuthSession{
+		State:       "expired-state",
+		RedirectURI: "http://127.0.0.1:8989/operator/gemini/oauth-callback",
+		CreatedAt:   time.Now().Add(-managedGeminiOAuthSessionTTL - time.Minute).UTC(),
+	}
+	managedGeminiOAuthSessions.Unlock()
+
+	h := &proxyHandler{}
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/operator/gemini/oauth-callback?code=test-code&state=expired-state", nil)
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "missing or expired") {
+		t.Fatalf("unexpected body=%s", rr.Body.String())
+	}
+	managedGeminiOAuthSessions.Lock()
+	_, ok := managedGeminiOAuthSessions.sessions["expired-state"]
+	managedGeminiOAuthSessions.Unlock()
+	if ok {
+		t.Fatalf("expected expired state to be removed after callback attempt")
+	}
+}
+
+func TestManagedGeminiRedirectURIPreservesLoopbackFamily(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		want string
+	}{
+		{name: "ipv4", host: "127.0.0.1:8989", want: "http://127.0.0.1:8989/operator/gemini/oauth-callback"},
+		{name: "localhost", host: "localhost:8989", want: "http://localhost:8989/operator/gemini/oauth-callback"},
+		{name: "ipv6", host: "[::1]:8989", want: "http://[::1]:8989/operator/gemini/oauth-callback"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://example.com/operator/gemini/oauth-start", nil)
+			req.Host = tc.host
+			got, err := managedGeminiRedirectURI(req)
+			if err != nil {
+				t.Fatalf("managedGeminiRedirectURI() error = %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("managedGeminiRedirectURI() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLocalOperatorGeminiOAuthCallbackStoresManagedSeat(t *testing.T) {
+	setGeminiOAuthTestProfiles(t)
+
+	apiBase, err := url.Parse("https://api.example.com")
+	if err != nil {
+		t.Fatalf("parse api base: %v", err)
+	}
+	codex := NewCodexProvider(apiBase, apiBase, apiBase, apiBase)
+	claude := NewClaudeProvider(apiBase)
+	gemini := NewGeminiProvider(apiBase, apiBase)
+
+	poolDir := t.TempDir()
+	redirectURI := "http://127.0.0.1:8989/operator/gemini/oauth-callback"
+	h := &proxyHandler{
+		cfg:      config{poolDir: poolDir},
+		pool:     newPoolState(nil, false),
+		registry: NewProviderRegistry(codex, claude, gemini),
+		refreshTransport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.String() {
+			case geminiOAuthTokenURL:
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatalf("read request body: %v", err)
+				}
+				values, err := url.ParseQuery(string(body))
+				if err != nil {
+					t.Fatalf("parse form: %v", err)
+				}
+				switch values.Get("grant_type") {
+				case "authorization_code":
+					if values.Get("redirect_uri") != redirectURI {
+						t.Fatalf("redirect_uri=%q", values.Get("redirect_uri"))
+					}
+					if values.Get("client_id") != testGeminiOAuthGCloudClientID {
+						t.Fatalf("client_id=%q", values.Get("client_id"))
+					}
+					return jsonResponse(http.StatusOK, `{"access_token":"oauth-access","refresh_token":"oauth-refresh","token_type":"Bearer","scope":"scope","expires_in":3600}`), nil
+				case "refresh_token":
+					if values.Get("client_id") != testGeminiOAuthGCloudClientID {
+						t.Fatalf("refresh client_id=%q", values.Get("client_id"))
+					}
+					return jsonResponse(http.StatusOK, `{"access_token":"probe-access","expires_in":3600,"token_type":"Bearer","scope":"scope"}`), nil
+				default:
+					t.Fatalf("unexpected grant_type=%q", values.Get("grant_type"))
+				}
+			case managedGeminiOAuthUserInfoURL:
+				return jsonResponse(http.StatusOK, `{"email":"seat@example.com","name":"Seat Example"}`), nil
+			default:
+				t.Fatalf("unexpected request URL: %s", req.URL.String())
+			}
+			return nil, nil
+		}),
+	}
+
+	managedGeminiOAuthSessions.Lock()
+	managedGeminiOAuthSessions.sessions = map[string]*managedGeminiOAuthSession{
+		"state-1": {
+			State:        "state-1",
+			CodeVerifier: "verifier-1",
+			RedirectURI:  redirectURI,
+			ProfileID:    "gcloud",
+			ClientID:     testGeminiOAuthGCloudClientID,
+			ClientSecret: testGeminiOAuthGCloudSecret,
+			CreatedAt:    time.Now().UTC(),
+		},
+	}
+	managedGeminiOAuthSessions.Unlock()
+	t.Cleanup(func() {
+		managedGeminiOAuthSessions.Lock()
+		managedGeminiOAuthSessions.sessions = make(map[string]*managedGeminiOAuthSession)
+		managedGeminiOAuthSessions.Unlock()
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/operator/gemini/oauth-callback?code=test-code&state=state-1", nil)
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "Gemini seat added") {
+		t.Fatalf("unexpected body=%s", rr.Body.String())
+	}
+	if h.pool.count() != 1 {
+		t.Fatalf("pool count=%d", h.pool.count())
+	}
+
+	entries, err := os.ReadDir(filepath.Join(poolDir, managedGeminiSubdir))
+	if err != nil {
+		t.Fatalf("read gemini dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("unexpected gemini files: %+v", entries)
+	}
+	saved, err := os.ReadFile(filepath.Join(poolDir, managedGeminiSubdir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read saved seat: %v", err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(saved, &root); err != nil {
+		t.Fatalf("decode saved seat: %v", err)
+	}
+	if root["oauth_profile_id"] != "gcloud" {
+		t.Fatalf("saved oauth_profile_id=%#v", root["oauth_profile_id"])
+	}
+	if _, ok := root["client_id"]; ok {
+		t.Fatalf("expected saved seat to omit raw client_id: %#v", root["client_id"])
+	}
+	if root["operator_email"] != "seat@example.com" {
+		t.Fatalf("saved operator_email=%#v", root["operator_email"])
+	}
+}
+
 func TestLocalOperatorAccountDeleteRemovesManagedAPIKeyAndReloadsPool(t *testing.T) {
 	apiBase, err := url.Parse("https://api.openai.com")
 	if err != nil {
@@ -909,6 +1327,80 @@ func TestServeStatusPageReturnsJSONForFormatQuery(t *testing.T) {
 	}
 }
 
+func TestServeStatusPageIncludesQuarantineStatus(t *testing.T) {
+	now := time.Date(2026, 3, 19, 13, 0, 0, 0, time.UTC)
+	poolDir := t.TempDir()
+	quarantineDir := filepath.Join(poolDir, quarantineSubdir, "gemini")
+	if err := os.MkdirAll(quarantineDir, 0o755); err != nil {
+		t.Fatalf("mkdir quarantine dir: %v", err)
+	}
+
+	quarantinedPath := filepath.Join(quarantineDir, "seat-a.json")
+	if err := os.WriteFile(quarantinedPath, []byte(`{"dead":true}`), 0o600); err != nil {
+		t.Fatalf("write quarantined file: %v", err)
+	}
+	quarantinedAt := now.Add(-2 * time.Hour)
+	if err := os.Chtimes(quarantinedPath, quarantinedAt, quarantinedAt); err != nil {
+		t.Fatalf("chtimes quarantined file: %v", err)
+	}
+
+	h := &proxyHandler{
+		cfg:       config{poolDir: poolDir},
+		pool:      newPoolState(nil, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8989/status?format=json", nil)
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	rr := httptest.NewRecorder()
+	h.serveStatusPage(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var payload StatusData
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode json: %v", err)
+	}
+	if payload.Quarantine.Total != 1 {
+		t.Fatalf("quarantine total=%d", payload.Quarantine.Total)
+	}
+	if got := payload.Quarantine.Providers["gemini"]; got != 1 {
+		t.Fatalf("quarantine gemini count=%d", got)
+	}
+	if len(payload.Quarantine.Recent) != 1 {
+		t.Fatalf("recent quarantine entries=%d", len(payload.Quarantine.Recent))
+	}
+	if payload.Quarantine.Recent[0].ID != "seat-a" {
+		t.Fatalf("unexpected quarantine entry id=%q", payload.Quarantine.Recent[0].ID)
+	}
+	if payload.Quarantine.Recent[0].Provider != "gemini" {
+		t.Fatalf("unexpected quarantine provider=%q", payload.Quarantine.Recent[0].Provider)
+	}
+
+	htmlReq := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8989/status", nil)
+	htmlReq.Host = "127.0.0.1:8989"
+	htmlReq.RemoteAddr = "127.0.0.1:4242"
+	htmlRR := httptest.NewRecorder()
+	h.serveStatusPage(htmlRR, htmlReq)
+	if htmlRR.Code != http.StatusOK {
+		t.Fatalf("html status=%d body=%s", htmlRR.Code, htmlRR.Body.String())
+	}
+	body := htmlRR.Body.String()
+	for _, fragment := range []string{
+		"Quarantine",
+		"Quarantined files:",
+		"seat-a",
+		"Accounts that stay dead for more than 72 hours are moved out of the active pool automatically",
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("missing fragment %q in html body", fragment)
+		}
+	}
+}
+
 func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 	now := time.Date(2026, 3, 19, 13, 0, 0, 0, time.UTC)
 	account := &Account{
@@ -941,9 +1433,15 @@ func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 	for _, fragment := range []string{
 		"Start Codex OAuth",
 		"Fallback API Pool",
+		"Gemini Seat Pool",
+		"Start Gemini OAuth",
 		"Add API Key",
+		"Add Gemini Seat",
 		"openai-api-key-input",
+		"gemini-seat-json-input",
 		"/operator/codex/api-key-add",
+		"/operator/gemini/account-add",
+		"/operator/gemini/oauth-start",
 		"/operator/account-delete",
 		"deleteAccountFromStatus",
 		"account-action-status",
@@ -955,7 +1453,10 @@ func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 		"refreshes this page automatically when pool seat state changes",
 		"Waiting for pool seat state to change...",
 		"Waiting for pool seat state to change.",
+		"Waiting for the Gemini seat state to change...",
+		"Timed out waiting for the Gemini seat state to change.",
 		"codex-oauth-result",
+		"gemini_oauth_result",
 		"auth_expires_at",
 		"last_refresh_at",
 	} {
@@ -964,10 +1465,12 @@ func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 		}
 	}
 	for _, forbidden := range []string{
+		"Import Gemini",
 		"noopener noreferrer",
 		"auth_expires_in || ''",
 		"local_last_used || ''",
 		"local_tokens || ''",
+		"Waiting for the OAuth callback.",
 	} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("unexpected fragment %q in status body", forbidden)
@@ -1004,11 +1507,16 @@ func TestServeStatusPageHidesOperatorActionOutsideLoopback(t *testing.T) {
 	}
 	body := rr.Body.String()
 	for _, forbidden := range []string{
+		"Import Gemini",
 		"Start Codex OAuth",
 		"codex_pool_manager.py codex-oauth-start",
 		"/operator/codex/oauth-start",
 		"Fallback API Pool",
+		"Gemini Seat Pool",
+		"Start Gemini OAuth",
 		"/operator/codex/api-key-add",
+		"/operator/gemini/account-add",
+		"/operator/gemini/oauth-start",
 		"/operator/account-delete",
 	} {
 		if strings.Contains(body, forbidden) {

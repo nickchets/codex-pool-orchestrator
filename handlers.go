@@ -152,8 +152,7 @@ func (h *proxyHandler) resurrectAccount(w http.ResponseWriter, accountID string)
 			a.mu.Lock()
 			wasDead := a.Dead
 			wasRateLimited := !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(time.Now())
-			a.Dead = false
-			a.Penalty = 0
+			clearAccountDeadStateLocked(a, time.Now().UTC(), true)
 			a.RateLimitUntil = time.Time{}
 			a.mu.Unlock()
 			log.Printf("resurrected account %s (was_dead=%v, was_rate_limited=%v)", accountID, wasDead, wasRateLimited)

@@ -24,6 +24,7 @@ type StatusData struct {
 	PoolUsers            int                           `json:"pool_users,omitempty"`
 	OpenAIAPIPool        OpenAIAPIPoolStatus           `json:"openai_api_pool"`
 	GitLabClaudePool     GitLabClaudePoolStatus        `json:"gitlab_claude_pool"`
+	Quarantine           QuarantineStatus              `json:"quarantine,omitempty"`
 	PoolSummary          PoolDashboardSummary          `json:"pool_summary"`
 	CurrentSeat          *CurrentSeatStatus            `json:"current_seat,omitempty"`
 	ActiveSeat           *CurrentSeatStatus            `json:"active_seat,omitempty"`
@@ -147,6 +148,7 @@ type AccountStatus struct {
 	HealthError              string               `json:"health_error,omitempty"`
 	HealthCheckedAt          string               `json:"health_checked_at,omitempty"`
 	LastHealthyAt            string               `json:"last_healthy_at,omitempty"`
+	DeadSince                string               `json:"dead_since,omitempty"`
 	LocalLastUsed            string               `json:"local_last_used,omitempty"`
 	UsageObserved            string               `json:"usage_observed,omitempty"`
 	GitLabRateLimitName      string               `json:"gitlab_rate_limit_name,omitempty"`
@@ -367,6 +369,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 	if h.poolUsers != nil {
 		data.PoolUsers = len(h.poolUsers.List())
 	}
+	data.Quarantine = loadQuarantineStatus(h.cfg.poolDir, now)
 
 	providerSummary := make(map[string]PoolDashboardProviderSum)
 	workspaceGroups := make(map[string]*poolWorkspaceAccumulator)
@@ -456,6 +459,9 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		}
 		if !snapshot.LastHealthyAt.IsZero() {
 			status.LastHealthyAt = snapshot.LastHealthyAt.UTC().Format(time.RFC3339)
+		}
+		if !snapshot.DeadSince.IsZero() {
+			status.DeadSince = snapshot.DeadSince.UTC().Format(time.RFC3339)
 		}
 		status.HealthStatus = strings.TrimSpace(snapshot.HealthStatus)
 		status.HealthError = sanitizeStatusMessage(snapshot.HealthError)
@@ -965,6 +971,12 @@ const statusHTML = `<!DOCTYPE html>
             border-color: #58a6ff;
             box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.18);
         }
+        .action-textarea {
+            min-height: 140px;
+            resize: vertical;
+            width: 100%;
+            font-family: ui-monospace, SFMono-Regular, SF Mono, Menlo, Consolas, Liberation Mono, monospace;
+        }
         .result-block {
             margin-top: 14px;
             background: #0d1117;
@@ -1112,6 +1124,46 @@ const statusHTML = `<!DOCTYPE html>
             </div>
             <div id="gitlab-claude-token-add-status" class="muted" style="margin-top: 10px;"></div>
         </div>
+        <div class="operator-card">
+            <div class="operator-title">Gemini Seat Pool</div>
+            <div class="muted">
+                Starts a first-party Google OAuth flow for a managed Gemini seat, stores the seat locally, runs a refresh probe, and then reuses it with the normal sticky pool logic. Raw <code>oauth_creds.json</code> paste stays available only as a fallback.
+            </div>
+            <div class="result-block">
+                <div><strong>Seats:</strong> {{.GeminiCount}}</div>
+                <div><strong>Flow:</strong> first-party OAuth into the local Gemini pool</div>
+            </div>
+            <div class="action-row">
+                <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromStatus()">Start Gemini OAuth</button>
+            </div>
+            <div id="gemini-oauth-start-status" class="muted" style="margin-top: 10px;"></div>
+            <div id="gemini-oauth-start-result" class="result-block" style="display: none;">
+                <div><strong>OAuth URL</strong></div>
+                <div id="gemini-oauth-start-url" class="mono" style="word-break: break-all;"></div>
+                <div id="gemini-oauth-start-outcome" class="muted" style="margin-top: 10px;"></div>
+                <a id="gemini-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px;">Open OAuth Page</a>
+            </div>
+            <div class="muted" style="margin-top: 12px;">Fallback only: paste an existing Gemini <code>oauth_creds.json</code> below if you already have one.</div>
+            <div class="action-row">
+                <textarea id="gemini-seat-json-input" class="action-input action-textarea mono" autocomplete="off" spellcheck="false" placeholder='{"access_token":"...","refresh_token":"...","expiry_date":1774353600000}'></textarea>
+            </div>
+            <div class="action-row">
+                <button id="gemini-seat-add-btn" class="action-btn" onclick="addGeminiSeatFromStatus()">Add Gemini Seat</button>
+            </div>
+            <div id="gemini-seat-add-status" class="muted" style="margin-top: 10px;"></div>
+        </div>
+        {{if gt .Quarantine.Total 0}}
+        <div class="operator-card">
+            <div class="operator-title">Quarantine</div>
+            <div class="muted">
+                Accounts that stay dead for more than 72 hours are moved out of the active pool automatically so they stop inflating routing totals and recovery expectations.
+            </div>
+            <div class="result-block">
+                <div><strong>Quarantined files:</strong> {{.Quarantine.Total}}</div>
+                {{range .Quarantine.Recent}}<div><strong>{{.Provider}}:</strong> <span class="mono">{{clip .ID 24}}</span>{{if .QuarantinedAt}} · {{.QuarantinedAt}}{{end}}</div>{{end}}
+            </div>
+        </div>
+        {{end}}
         {{end}}
         <div class="operator-card seat-card">
             <div class="operator-title">Current Active Seat</div>
@@ -1338,7 +1390,8 @@ const statusHTML = `<!DOCTYPE html>
                 {{if .UsageObserved}}<br><small class="detail-line">usage {{.UsageObserved}}</small>{{end}}
                 {{if .GitLabRateLimitName}}<br><small class="detail-line" title="{{.GitLabRateLimitName}}{{if .GitLabRateLimitResetAt}} · reset {{.GitLabRateLimitResetAt}}{{end}}">gitlab api {{.GitLabRateLimitRemaining}}/{{.GitLabRateLimitLimit}}{{if .GitLabRateLimitResetIn}} · resets in {{.GitLabRateLimitResetIn}}{{end}}</small>{{end}}
                 {{if .GitLabQuotaExceededCount}}<br><small class="detail-line">quota backoff ×{{.GitLabQuotaExceededCount}}{{if .GitLabQuotaProbeIn}} · next probe {{.GitLabQuotaProbeIn}}{{end}}</small>{{end}}
-                {{if or .FallbackOnly (eq .PlanType "gitlab_duo")}}<br><small class="detail-line" title="{{sanitize .HealthError}}">health {{if .HealthStatus}}{{.HealthStatus}}{{else}}unknown{{end}}{{if .HealthError}} · {{clip (sanitize .HealthError) 88}}{{end}}</small>{{end}}
+                {{if or .FallbackOnly (eq .PlanType "gitlab_duo") (eq .Type "gemini")}}<br><small class="detail-line" title="{{sanitize .HealthError}}">health {{if .HealthStatus}}{{.HealthStatus}}{{else}}unknown{{end}}{{if .HealthError}} · {{clip (sanitize .HealthError) 88}}{{end}}</small>{{end}}
+                {{if .DeadSince}}<br><small class="detail-line">dead since {{.DeadSince}}</small>{{end}}
             </td>
             <td class="usage-cell">
                 {{remainingBar .Routing.PrimaryHeadroomPct}}<small>remaining {{pct .Routing.PrimaryHeadroomPct}}</small>
@@ -1442,8 +1495,13 @@ const statusHTML = `<!DOCTYPE html>
     {{if .LocalOperatorEnabled}}
     <script>
         const codexOAuthStatusKey = 'codex-oauth-status-snapshot';
+        const geminiOAuthStatusKey = 'gemini-oauth-status-snapshot';
         let codexOAuthPopup = null;
         let codexOAuthWatcher = null;
+        let geminiOAuthPopup = null;
+        let geminiOAuthWatcher = null;
+        let geminiOAuthDone = false;
+        let geminiOAuthMessageBound = false;
 
         function codexOAuthSnapshot(accounts) {
             const rows = Array.isArray(accounts) ? accounts : [];
@@ -1831,6 +1889,407 @@ const statusHTML = `<!DOCTYPE html>
                 status.textContent = 'Failed to add GitLab token: ' + (error && error.message ? error.message : error);
             } finally {
                 button.disabled = false;
+            }
+        }
+
+        async function addGeminiSeatFromStatus() {
+            const input = document.getElementById('gemini-seat-json-input');
+            const button = document.getElementById('gemini-seat-add-btn');
+            const status = document.getElementById('gemini-seat-add-status');
+            if (!input || !button || !status) {
+                return;
+            }
+
+            const authJSON = String(input.value || '').trim();
+            if (!authJSON) {
+                status.style.color = '#f85149';
+                status.textContent = 'Paste oauth_creds.json first.';
+                return;
+            }
+
+            button.disabled = true;
+            status.style.color = '#8b949e';
+            status.textContent = 'Saving Gemini seat and running refresh probe...';
+
+            try {
+                const response = await fetch('/operator/gemini/account-add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ auth_json: authJSON })
+                });
+                const text = await response.text();
+                let data = null;
+                try {
+                    data = text ? JSON.parse(text) : null;
+                } catch (parseError) {
+                    data = null;
+                }
+                if (!response.ok) {
+                    throw new Error((data && data.error) || text || 'Failed to add Gemini seat');
+                }
+
+                input.value = '';
+                const accountID = String((data && data.account_id) || 'gemini_seat');
+                const healthStatus = String((data && data.health_status) || 'unknown');
+                const healthError = String((data && data.health_error) || '').trim();
+                if (data && data.dead) {
+                    status.style.color = '#d29922';
+                    status.textContent = 'Stored ' + accountID + ', but it is currently marked dead' + (healthError ? ': ' + healthError : '.');
+                } else {
+                    status.style.color = '#3fb950';
+                    status.textContent = 'Stored ' + accountID + '. Health: ' + healthStatus + (healthError ? ' (' + healthError + ')' : '') + '. Reloading status...';
+                }
+                window.setTimeout(() => window.location.reload(), 900);
+            } catch (error) {
+                status.style.color = '#f85149';
+                status.textContent = 'Failed to add Gemini seat: ' + (error && error.message ? error.message : error);
+            } finally {
+                button.disabled = false;
+            }
+        }
+
+        function geminiOAuthSnapshot(accounts) {
+            const rows = Array.isArray(accounts) ? accounts : [];
+            const geminiRows = rows
+                .filter((acc) => acc && acc.type === 'gemini')
+                .map((acc) => [
+                    String(acc.id || ''),
+                    String(acc.type || ''),
+                    String(acc.account_id || ''),
+                    String(acc.workspace_id || ''),
+                    String(acc.oauth_profile_id || ''),
+                    String(acc.last_refresh_at || ''),
+                    String(acc.auth_expires_at || ''),
+                    String(acc.health_status || ''),
+                    String(acc.health_checked_at || ''),
+                    String(acc.last_healthy_at || ''),
+                    String(acc.rate_limit_until || ''),
+                    String(!!acc.disabled),
+                    String(!!acc.dead),
+                ].join('|'))
+                .sort();
+
+            return {
+                count: geminiRows.length,
+                signature: geminiRows.join('\n'),
+            };
+        }
+
+        function geminiOAuthDescribeOutcome(before, after, backendMode) {
+            const mode = String(backendMode || '').trim().toLowerCase();
+            if (mode === 'added') {
+                return 'Gemini OAuth completed. Added a new seat; refreshing status now.';
+            }
+            if (mode === 'refreshed') {
+                return 'Gemini OAuth completed. Refreshed an existing seat; refreshing status now.';
+            }
+            if (after.count > before.count) {
+                return 'Gemini OAuth completed. Added a new seat; refreshing status now.';
+            }
+            if (after.signature !== before.signature) {
+                return 'Gemini OAuth completed. Refreshed an existing seat; refreshing status now.';
+            }
+            return 'Gemini OAuth completed. Refreshing status now.';
+        }
+
+        async function geminiOAuthFetchStatusSnapshot() {
+            const response = await fetch('/status?format=json', {
+                headers: { 'Accept': 'application/json' }
+            });
+            if (!response.ok) {
+                throw new Error(await response.text());
+            }
+            return response.json();
+        }
+
+        function geminiOAuthReadPendingState() {
+            try {
+                const raw = sessionStorage.getItem(geminiOAuthStatusKey);
+                return raw ? JSON.parse(raw) : null;
+            } catch (error) {
+                return null;
+            }
+        }
+
+        function geminiOAuthClearPendingState() {
+            try {
+                sessionStorage.removeItem(geminiOAuthStatusKey);
+            } catch (error) {
+                // Ignore storage errors.
+            }
+        }
+
+        function geminiOAuthSetOutcome(message) {
+            const outcome = document.getElementById('gemini-oauth-start-outcome');
+            if (outcome) {
+                outcome.textContent = message;
+            }
+        }
+
+        function geminiOAuthPreparePopup() {
+            const popup = window.open('', 'gemini-oauth-popup');
+            if (!popup) {
+                return null;
+            }
+            try {
+                popup.document.open();
+                popup.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Preparing Gemini OAuth</title></head><body style="font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 24px;"><div style="max-width: 640px; margin: 64px auto; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 24px;">Opening Gemini OAuth session...</div></body></html>');
+                popup.document.close();
+                popup.focus();
+            } catch (error) {
+                // Ignore document writes that fail on hardened browsers.
+            }
+            return popup;
+        }
+
+        function geminiOAuthStopWatcher() {
+            if (geminiOAuthWatcher !== null) {
+                window.clearTimeout(geminiOAuthWatcher);
+                geminiOAuthWatcher = null;
+            }
+        }
+
+        function geminiOAuthClosePopup() {
+            if (geminiOAuthPopup && !geminiOAuthPopup.closed) {
+                try {
+                    geminiOAuthPopup.close();
+                } catch (error) {
+                    // Ignore close failures.
+                }
+            }
+            geminiOAuthPopup = null;
+        }
+
+        function geminiOAuthIsTrustedOrigin(origin) {
+            const value = String(origin || '').trim();
+            if (!value) {
+                return false;
+            }
+            try {
+                const current = new URL(window.location.origin);
+                const candidate = new URL(value);
+                const loopbackHosts = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+                return current.protocol === candidate.protocol &&
+                    String(current.port || '') === String(candidate.port || '') &&
+                    loopbackHosts.has(current.hostname) &&
+                    loopbackHosts.has(candidate.hostname);
+            } catch (error) {
+                return false;
+            }
+        }
+
+        function geminiOAuthSnapshotsEqual(beforeSnapshot, afterSnapshot) {
+            return beforeSnapshot.count === afterSnapshot.count && beforeSnapshot.signature === afterSnapshot.signature;
+        }
+
+        async function geminiOAuthFinalize(beforeSnapshot, backendMode, resultPayload) {
+            const button = document.getElementById('gemini-oauth-start-btn');
+            const status = document.getElementById('gemini-oauth-start-status');
+            const result = document.getElementById('gemini-oauth-start-result');
+            geminiOAuthDone = true;
+            geminiOAuthStopWatcher();
+            geminiOAuthClosePopup();
+
+            try {
+                const afterSnapshot = geminiOAuthSnapshot((await geminiOAuthFetchStatusSnapshot()).accounts);
+                const fallbackMessage = geminiOAuthDescribeOutcome(beforeSnapshot, afterSnapshot, backendMode);
+                const message = String((resultPayload && resultPayload.message) || fallbackMessage).trim() || fallbackMessage;
+                const healthError = String((resultPayload && resultPayload.health_error) || '').trim();
+                if (status) {
+                    status.style.color = (resultPayload && resultPayload.dead) ? '#d29922' : '#3fb950';
+                    status.textContent = message + (healthError ? ' (' + healthError + ')' : '');
+                }
+                geminiOAuthSetOutcome(message);
+                geminiOAuthClearPendingState();
+                window.setTimeout(() => {
+                    if (button) {
+                        button.disabled = false;
+                    }
+                    if (result) {
+                        result.style.display = 'block';
+                    }
+                    window.location.reload();
+                }, 850);
+            } catch (error) {
+                if (button) {
+                    button.disabled = false;
+                }
+                if (status) {
+                    status.style.color = '#f85149';
+                    status.textContent = 'Gemini OAuth completed, but status refresh failed: ' + (error && error.message ? error.message : error);
+                }
+                geminiOAuthSetOutcome('Refresh failed. Use the Open OAuth Page link or retry after clearing the popup blocker.');
+                geminiOAuthClearPendingState();
+            }
+        }
+
+        function geminiOAuthWatchStatusChange(beforeSnapshot, backendMode) {
+            const button = document.getElementById('gemini-oauth-start-btn');
+            const status = document.getElementById('gemini-oauth-start-status');
+            let attempts = 0;
+            const maxAttempts = 150;
+            const tick = async () => {
+                if (geminiOAuthWatcher === null) {
+                    return;
+                }
+                attempts += 1;
+                try {
+                    const afterSnapshot = geminiOAuthSnapshot((await geminiOAuthFetchStatusSnapshot()).accounts);
+                    if (!geminiOAuthSnapshotsEqual(beforeSnapshot, afterSnapshot)) {
+                        if (status) {
+                            status.style.color = '#3fb950';
+                            status.textContent = 'Gemini OAuth callback applied. Refreshing status now.';
+                        }
+                        void geminiOAuthFinalize(beforeSnapshot, backendMode, null);
+                        return;
+                    }
+                    if (status) {
+                        status.style.color = '#8b949e';
+                        status.textContent = 'Waiting for the Gemini seat state to change...';
+                    }
+                } catch (error) {
+                    if (status) {
+                        status.style.color = '#8b949e';
+                        status.textContent = 'Waiting for the Gemini seat state to change...';
+                    }
+                }
+                if (attempts >= maxAttempts) {
+                    geminiOAuthStopWatcher();
+                    geminiOAuthClosePopup();
+                    geminiOAuthClearPendingState();
+                    if (button) {
+                        button.disabled = false;
+                    }
+                    if (status) {
+                        status.style.color = '#d29922';
+                        status.textContent = 'Timed out waiting for the Gemini seat state to change. Use the Open OAuth Page link to retry.';
+                    }
+                    geminiOAuthSetOutcome('No Gemini seat state change was detected yet.');
+                    return;
+                }
+                geminiOAuthWatcher = window.setTimeout(tick, 2000);
+            };
+            if (status) {
+                status.style.color = '#8b949e';
+                status.textContent = 'Waiting for the Gemini seat state to change...';
+            }
+            geminiOAuthWatcher = window.setTimeout(tick, 2000);
+        }
+
+        function geminiOAuthEnsureMessageListener() {
+            if (geminiOAuthMessageBound) {
+                return;
+            }
+            geminiOAuthMessageBound = true;
+            window.addEventListener('message', (event) => {
+                if (!geminiOAuthIsTrustedOrigin(event && event.origin)) {
+                    return;
+                }
+                const data = event && event.data;
+                if (!data || data.type !== 'gemini_oauth_result') {
+                    return;
+                }
+
+                const button = document.getElementById('gemini-oauth-start-btn');
+                const status = document.getElementById('gemini-oauth-start-status');
+                const pendingState = geminiOAuthReadPendingState();
+                const beforeSnapshot = pendingState && pendingState.before ? pendingState.before : { count: 0, signature: '' };
+                const backendMode = (data && typeof data.created === 'boolean')
+                    ? (data.created ? 'added' : 'refreshed')
+                    : (pendingState && pendingState.backendMode ? pendingState.backendMode : '');
+
+                if (data && data.ok) {
+                    void geminiOAuthFinalize(beforeSnapshot, backendMode, data);
+                    return;
+                }
+
+                geminiOAuthDone = true;
+                geminiOAuthStopWatcher();
+                geminiOAuthClosePopup();
+                geminiOAuthClearPendingState();
+                if (button) {
+                    button.disabled = false;
+                }
+                if (!status) {
+                    return;
+                }
+
+                const message = String((data && data.message) || 'Gemini OAuth failed.').trim();
+                geminiOAuthSetOutcome(message);
+                status.style.color = '#f85149';
+                status.textContent = message || 'Gemini OAuth failed.';
+            }, false);
+        }
+
+        async function startGeminiOAuthFromStatus() {
+            const button = document.getElementById('gemini-oauth-start-btn');
+            const status = document.getElementById('gemini-oauth-start-status');
+            const result = document.getElementById('gemini-oauth-start-result');
+            const urlNode = document.getElementById('gemini-oauth-start-url');
+            const openLink = document.getElementById('gemini-oauth-start-open');
+            if (!button || !status || !result || !urlNode || !openLink) {
+                return;
+            }
+
+            geminiOAuthEnsureMessageListener();
+            geminiOAuthDone = false;
+            geminiOAuthStopWatcher();
+            geminiOAuthClosePopup();
+            geminiOAuthPopup = geminiOAuthPreparePopup();
+
+            button.disabled = true;
+            status.style.color = '#8b949e';
+            status.textContent = 'Starting Gemini OAuth session...';
+            result.style.display = 'none';
+            urlNode.textContent = '';
+            openLink.href = '#';
+            geminiOAuthSetOutcome('');
+
+            try {
+                const beforeSnapshot = geminiOAuthSnapshot((await geminiOAuthFetchStatusSnapshot()).accounts);
+                const response = await fetch('/operator/gemini/oauth-start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                if (!response.ok) {
+                    throw new Error(await response.text());
+                }
+
+                const data = await response.json();
+                if (!data || !data.oauth_url) {
+                    throw new Error('Missing oauth_url in response');
+                }
+
+                urlNode.textContent = data.oauth_url;
+                openLink.href = data.oauth_url;
+                result.style.display = 'block';
+                geminiOAuthSetOutcome('Waiting for the Gemini seat state to change.');
+                try {
+                    sessionStorage.setItem(geminiOAuthStatusKey, JSON.stringify({
+                        before: beforeSnapshot,
+                        backendMode: String(data.result_mode || data.result || ''),
+                    }));
+                } catch (error) {
+                    // Ignore storage failures on hardened browsers.
+                }
+                if (geminiOAuthPopup) {
+                    geminiOAuthPopup.location.href = data.oauth_url;
+                    status.style.color = '#3fb950';
+                    status.textContent = 'OAuth URL generated. Complete sign-in in the popup; this page will refresh when the Gemini seat is stored.';
+                } else {
+                    status.style.color = '#d29922';
+                    status.textContent = 'OAuth URL generated, but the popup was blocked. Open the page from the link below; this page will keep watching for the Gemini seat.';
+                }
+                geminiOAuthWatchStatusChange(beforeSnapshot, data.result_mode || data.result || '');
+            } catch (error) {
+                geminiOAuthStopWatcher();
+                geminiOAuthClosePopup();
+                geminiOAuthClearPendingState();
+                button.disabled = false;
+                status.style.color = '#f85149';
+                status.textContent = 'Failed to start Gemini OAuth: ' + (error && error.message ? error.message : error);
+                geminiOAuthSetOutcome('Retry after clearing the popup blocker or open the OAuth URL manually.');
             }
         }
 

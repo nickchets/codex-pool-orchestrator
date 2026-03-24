@@ -806,7 +806,7 @@ func TestApplyPreCopyUpstreamStatusDispositionTransientCodexAuthAddsPenalty(t *t
 	}
 }
 
-func TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededPersistsCooldown(t *testing.T) {
+func TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededMarksDead(t *testing.T) {
 	tmp := t.TempDir()
 	accFile := filepath.Join(tmp, "claude_gitlab_deadbeef.json")
 	if err := os.WriteFile(accFile, []byte(`{
@@ -851,31 +851,34 @@ func TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededPersistsCooldow
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if acc.Dead {
-		t.Fatal("expected gitlab account to remain live")
+	if !acc.Dead {
+		t.Fatal("expected gitlab account to be marked dead")
 	}
-	if acc.HealthStatus != "quota_exceeded" {
+	if acc.HealthStatus != "dead" {
 		t.Fatalf("health_status=%q", acc.HealthStatus)
 	}
-	if acc.RateLimitUntil.IsZero() {
-		t.Fatal("expected RateLimitUntil to be set")
+	if !acc.RateLimitUntil.IsZero() {
+		t.Fatalf("expected RateLimitUntil to stay clear, got %v", acc.RateLimitUntil)
 	}
-	if acc.GitLabQuotaExceededCount != 1 {
+	if acc.GitLabQuotaExceededCount != 0 {
 		t.Fatalf("gitlab_quota_exceeded_count=%d", acc.GitLabQuotaExceededCount)
 	}
 	saved, err := os.ReadFile(accFile)
 	if err != nil {
 		t.Fatalf("read auth file: %v", err)
 	}
-	if !strings.Contains(string(saved), "\"rate_limit_until\"") {
-		t.Fatalf("expected rate_limit_until in saved file: %s", string(saved))
+	if !strings.Contains(string(saved), "\"dead\": true") {
+		t.Fatalf("expected dead flag in saved file: %s", string(saved))
 	}
-	if !strings.Contains(string(saved), "\"gitlab_quota_exceeded_count\": 1") {
-		t.Fatalf("expected gitlab_quota_exceeded_count in saved file: %s", string(saved))
+	if strings.Contains(string(saved), "\"rate_limit_until\"") {
+		t.Fatalf("did not expect rate_limit_until in saved file: %s", string(saved))
+	}
+	if strings.Contains(string(saved), "\"gitlab_quota_exceeded_count\"") {
+		t.Fatalf("did not expect gitlab_quota_exceeded_count in saved file: %s", string(saved))
 	}
 }
 
-func TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededBackoffEscalates(t *testing.T) {
+func TestApplyManagedGitLabClaudeDispositionGitLabQuotaExceededMarksDeadWithoutCooldown(t *testing.T) {
 	acc := &Account{
 		ID:              "claude_gitlab_deadbeef",
 		Type:            AccountTypeClaude,
@@ -894,18 +897,18 @@ func TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededBackoffEscalate
 		[]byte(`{"error":"insufficient_credits","error_code":"USAGE_QUOTA_EXCEEDED"}`),
 	)
 
-	now1 := time.Date(2026, 3, 23, 10, 0, 0, 0, time.UTC)
-	applyManagedGitLabClaudeDisposition(acc, disposition, http.Header{}, now1)
-	if got := acc.RateLimitUntil.Sub(now1); got != 30*time.Minute {
-		t.Fatalf("first cooldown=%v", got)
+	now := time.Date(2026, 3, 23, 10, 0, 0, 0, time.UTC)
+	applyManagedGitLabClaudeDisposition(acc, disposition, http.Header{}, now)
+	if !acc.Dead {
+		t.Fatal("expected gitlab quota failure to mark account dead")
 	}
-
-	now2 := now1.Add(31 * time.Minute)
-	applyManagedGitLabClaudeDisposition(acc, disposition, http.Header{}, now2)
-	if got := acc.RateLimitUntil.Sub(now2); got != time.Hour {
-		t.Fatalf("second cooldown=%v", got)
+	if acc.HealthStatus != "dead" {
+		t.Fatalf("health_status=%q", acc.HealthStatus)
 	}
-	if acc.GitLabQuotaExceededCount != 2 {
+	if !acc.RateLimitUntil.IsZero() {
+		t.Fatalf("rate_limit_until=%v", acc.RateLimitUntil)
+	}
+	if acc.GitLabQuotaExceededCount != 0 {
 		t.Fatalf("gitlab_quota_exceeded_count=%d", acc.GitLabQuotaExceededCount)
 	}
 }

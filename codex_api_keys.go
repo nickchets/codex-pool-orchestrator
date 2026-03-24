@@ -212,7 +212,7 @@ func (h *proxyHandler) probeManagedCodexAPIKey(ctx context.Context, acc *Account
 	body = bodyForInspection(nil, body)
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		acc.mu.Lock()
-		acc.Dead = false
+		setAccountDeadStateLocked(acc, false, now)
 		acc.HealthStatus = "healthy"
 		acc.HealthError = ""
 		acc.HealthCheckedAt = now
@@ -311,13 +311,15 @@ func applyManagedOpenAIAPIDisposition(acc *Account, disposition managedOpenAIAPI
 	acc.HealthError = sanitizeStatusMessage(disposition.Reason)
 	switch {
 	case disposition.MarkDead:
-		acc.Dead = true
+		setAccountDeadStateLocked(acc, true, now)
 		acc.HealthStatus = "dead"
 		acc.Penalty += 100.0
 	case disposition.RateLimit:
+		setAccountDeadStateLocked(acc, false, now)
 		acc.HealthStatus = "rate_limited"
 		acc.Penalty += 1.0
 	default:
+		setAccountDeadStateLocked(acc, false, now)
 		acc.HealthStatus = "error"
 		acc.Penalty += 0.5
 	}

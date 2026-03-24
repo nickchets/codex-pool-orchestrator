@@ -216,13 +216,13 @@ func TestNeedsRefreshWhenGitLabClaudeGatewayStateMissing(t *testing.T) {
 
 func TestClassifyManagedGitLabClaudeErrorQuotaExceeded(t *testing.T) {
 	disposition := classifyManagedGitLabClaudeError(managedGitLabClaudeErrorSourceGatewayRequest, http.StatusPaymentRequired, http.Header{}, []byte(`{"message":"USAGE_QUOTA_EXCEEDED"}`))
-	if !disposition.RateLimit {
-		t.Fatalf("expected rate limit classification, got %+v", disposition)
+	if disposition.RateLimit {
+		t.Fatalf("did not expect rate limit classification, got %+v", disposition)
 	}
-	if disposition.MarkDead {
-		t.Fatalf("did not expect dead classification, got %+v", disposition)
+	if !disposition.MarkDead {
+		t.Fatalf("expected dead classification, got %+v", disposition)
 	}
-	if disposition.HealthStatus != "quota_exceeded" {
+	if disposition.HealthStatus != "dead" {
 		t.Fatalf("health_status=%q", disposition.HealthStatus)
 	}
 }
@@ -290,6 +290,15 @@ func TestClaudeProviderLoadsLegacyQuotaExceededAccountWithDefaultBackoffCount(t 
 	}
 	if acc.GitLabQuotaExceededCount != 1 {
 		t.Fatalf("gitlab_quota_exceeded_count=%d", acc.GitLabQuotaExceededCount)
+	}
+	if !acc.Dead {
+		t.Fatal("expected legacy quota-exceeded account to load dead")
+	}
+	if acc.HealthStatus != "dead" {
+		t.Fatalf("health_status=%q", acc.HealthStatus)
+	}
+	if !acc.RateLimitUntil.IsZero() {
+		t.Fatalf("rate_limit_until=%v", acc.RateLimitUntil)
 	}
 }
 

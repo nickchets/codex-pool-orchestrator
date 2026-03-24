@@ -209,12 +209,14 @@ func (sw *sseInterceptWriter) processEvent(event []byte) {
 
 	// Look for usage in the response
 	// OpenAI/Codex format: "usage":{"input_tokens":N,...}
+	// Codex token_count format: "type":"token_count" with "last_token_usage"
 	// Claude format: "type":"message_start" or "type":"message_delta" with usage
 	// Gemini format: "usageMetadata":{"promptTokenCount":N,...}
 	hasCodexUsage := bytes.Contains(event, []byte(`"usage":{"`)) && bytes.Contains(event, []byte(`"input_tokens":`))
+	hasCodexTokenCount := bytes.Contains(event, []byte(`"type":"token_count"`)) && bytes.Contains(event, []byte(`"last_token_usage":`))
 	hasClaudeUsage := (bytes.Contains(event, []byte(`"type":"message_start"`)) || bytes.Contains(event, []byte(`"type":"message_delta"`))) && bytes.Contains(event, []byte(`"usage":`))
 	hasGeminiUsage := bytes.Contains(event, []byte(`"usageMetadata":{"`)) && bytes.Contains(event, []byte(`"promptTokenCount":`))
-	if !hasCodexUsage && !hasClaudeUsage && !hasGeminiUsage {
+	if !hasCodexUsage && !hasCodexTokenCount && !hasClaudeUsage && !hasGeminiUsage {
 		return
 	}
 

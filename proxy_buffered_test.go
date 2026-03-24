@@ -540,7 +540,7 @@ func TestProxyBufferedTransientAuthFailureRetriesNextSeat(t *testing.T) {
 	}
 }
 
-func TestProxyBufferedGitLabClaude402QuotaExceededRetriesNextSeat(t *testing.T) {
+func TestProxyBufferedGitLabClaude402QuotaExceededMarksDeadAndRetriesNextSeat(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
 
 	var quotaCalls, liveCalls int
@@ -598,16 +598,16 @@ func TestProxyBufferedGitLabClaude402QuotaExceededRetriesNextSeat(t *testing.T) 
 		t.Fatalf("body = %q", string(body))
 	}
 	quotaState := snapshotProxyTestAccount(quotaAcc)
-	if quotaState.Dead {
-		t.Fatal("expected quota account to remain live")
+	if !quotaState.Dead {
+		t.Fatal("expected quota account to be marked dead")
 	}
-	if quotaState.HealthStatus != "quota_exceeded" {
+	if quotaState.HealthStatus != "dead" {
 		t.Fatalf("health_status=%q", quotaState.HealthStatus)
 	}
-	if quotaState.RateLimitUntil.IsZero() {
-		t.Fatal("expected quota account cooldown to be set")
+	if !quotaState.RateLimitUntil.IsZero() {
+		t.Fatalf("rate_limit_until=%v", quotaState.RateLimitUntil)
 	}
-	if quotaState.GitLabQuotaExceededCount != 1 {
+	if quotaState.GitLabQuotaExceededCount != 0 {
 		t.Fatalf("gitlab_quota_exceeded_count=%d", quotaState.GitLabQuotaExceededCount)
 	}
 	if quotaCalls != 1 || liveCalls != 1 {

@@ -71,8 +71,7 @@ func (h *proxyHandler) refreshUsageIfStale() {
 					a.mu.Lock()
 					if a.Dead {
 						log.Printf("resurrecting account %s after successful refresh", a.ID)
-						a.Dead = false
-						a.Penalty = 0
+						clearAccountDeadStateLocked(a, time.Now().UTC(), true)
 					}
 					a.mu.Unlock()
 					log.Printf("gemini refresh %s: success", a.ID)
@@ -100,8 +99,7 @@ func (h *proxyHandler) refreshUsageIfStale() {
 						a.mu.Lock()
 						if a.Dead {
 							log.Printf("resurrecting gitlab claude account %s after successful refresh", a.ID)
-							a.Dead = false
-							a.Penalty = 0
+							clearAccountDeadStateLocked(a, time.Now().UTC(), true)
 						}
 						a.mu.Unlock()
 					}
@@ -120,8 +118,7 @@ func (h *proxyHandler) refreshUsageIfStale() {
 					a.mu.Lock()
 					if a.Dead {
 						log.Printf("resurrecting account %s after successful refresh", a.ID)
-						a.Dead = false
-						a.Penalty = 0
+						clearAccountDeadStateLocked(a, time.Now().UTC(), true)
 					}
 					a.mu.Unlock()
 					if h.cfg.debug {
@@ -166,9 +163,9 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 			}
 			// If refresh token is permanently invalid, mark account as dead
 			if strings.Contains(errStr, "invalid_grant") || strings.Contains(errStr, "refresh_token_reused") {
+				now := time.Now().UTC()
 				a.mu.Lock()
-				a.Dead = true
-				a.Penalty += 100.0
+				markAccountDeadStateLocked(a, now, 100.0)
 				a.mu.Unlock()
 				log.Printf("marking account %s as dead: refresh token revoked/invalid", a.ID)
 				if err := saveAccount(a); err != nil {
@@ -185,8 +182,7 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 			a.mu.Lock()
 			if a.Dead {
 				log.Printf("resurrecting account %s after successful refresh", a.ID)
-				a.Dead = false
-				a.Penalty = 0
+				clearAccountDeadStateLocked(a, time.Now().UTC(), true)
 			}
 			a.mu.Unlock()
 		}
@@ -258,9 +254,9 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 					return nil
 				}
 				if strings.Contains(errStr, "invalid_grant") || strings.Contains(errStr, "refresh_token_reused") {
+					now := time.Now().UTC()
 					a.mu.Lock()
-					a.Dead = true
-					a.Penalty += 100.0
+					markAccountDeadStateLocked(a, now, 100.0)
 					a.mu.Unlock()
 					log.Printf("marking account %s as dead: refresh token revoked", a.ID)
 					if err := saveAccount(a); err != nil {
@@ -276,9 +272,9 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 			}
 		} else {
 			// No refresh token - mark as dead
+			now := time.Now().UTC()
 			a.mu.Lock()
-			a.Dead = true
-			a.Penalty += 100.0
+			markAccountDeadStateLocked(a, now, 100.0)
 			a.mu.Unlock()
 			log.Printf("marking account %s as dead: no refresh token and usage 401/403", a.ID)
 			if err := saveAccount(a); err != nil {
@@ -324,6 +320,7 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 	a.mu.Lock()
 	a.Usage = mergeUsage(a.Usage, whamSnap)
 	a.mu.Unlock()
+	persistUsageSnapshot(h.store, a)
 	return nil
 }
 
@@ -547,6 +544,7 @@ func (h *proxyHandler) fetchClaudeUsage(now time.Time, a *Account) error {
 	a.mu.Lock()
 	a.Usage = mergeUsage(a.Usage, snap)
 	a.mu.Unlock()
+	persistUsageSnapshot(h.store, a)
 
 	return nil
 }

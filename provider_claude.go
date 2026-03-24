@@ -69,8 +69,24 @@ func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, 
 		if cj.LastHealthyAt != nil {
 			acc.LastHealthyAt = *cj.LastHealthyAt
 		}
+		if cj.DeadSince != nil {
+			acc.DeadSince = cj.DeadSince.UTC()
+		}
 		if acc.GitLabQuotaExceededCount == 0 && acc.HealthStatus == "quota_exceeded" && !acc.RateLimitUntil.IsZero() {
 			acc.GitLabQuotaExceededCount = 1
+		}
+		if acc.HealthStatus == "quota_exceeded" {
+			acc.Dead = true
+			acc.HealthStatus = "dead"
+			acc.RateLimitUntil = time.Time{}
+			if acc.DeadSince.IsZero() {
+				switch {
+				case !acc.HealthCheckedAt.IsZero():
+					acc.DeadSince = acc.HealthCheckedAt.UTC()
+				case !acc.LastRefresh.IsZero():
+					acc.DeadSince = acc.LastRefresh.UTC()
+				}
+			}
 		}
 		if acc.HealthStatus == "" {
 			acc.HealthStatus = "unknown"

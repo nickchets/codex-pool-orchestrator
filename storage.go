@@ -11,14 +11,15 @@ import (
 )
 
 const (
-	bucketUsageRequests    = "usage_requests"
-	bucketAccountUsage     = "account_usage"
-	bucketPlanCapacity     = "plan_capacity"
-	bucketCapacitySamples  = "capacity_samples"
-	bucketUserUsage        = "user_usage"
-	bucketUserDailyUsage   = "user_daily_usage"
-	bucketUserHourlyUsage  = "user_hourly_usage"
-	bucketGlobalHourlyUsage = "global_hourly_usage"
+	bucketUsageRequests      = "usage_requests"
+	bucketAccountUsage       = "account_usage"
+	bucketAccountUsageStates = "account_usage_snapshots"
+	bucketPlanCapacity       = "plan_capacity"
+	bucketCapacitySamples    = "capacity_samples"
+	bucketUserUsage          = "user_usage"
+	bucketUserDailyUsage     = "user_daily_usage"
+	bucketUserHourlyUsage    = "user_hourly_usage"
+	bucketGlobalHourlyUsage  = "global_hourly_usage"
 )
 
 // UserUsage tracks aggregate token usage per user.
@@ -53,8 +54,8 @@ type UserDailyUsage struct {
 
 // UserHourlyUsage tracks per-hour per-provider token usage.
 type UserHourlyUsage struct {
-	Hour            string `json:"hour"`          // "2025-02-05T14" (ISO hour)
-	AccountType     string `json:"account_type"`  // "claude", "codex", "gemini"
+	Hour            string `json:"hour"`         // "2025-02-05T14" (ISO hour)
+	AccountType     string `json:"account_type"` // "claude", "codex", "gemini"
 	InputTokens     int64  `json:"input_tokens"`
 	CachedTokens    int64  `json:"cached_tokens"`
 	OutputTokens    int64  `json:"output_tokens"`
@@ -102,7 +103,7 @@ func newUsageStore(path string, retentionDays int) (*usageStore, error) {
 		return nil, err
 	}
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range []string{bucketUsageRequests, bucketAccountUsage, bucketPlanCapacity, bucketCapacitySamples, bucketUserUsage, bucketUserDailyUsage, bucketUserHourlyUsage, bucketGlobalHourlyUsage} {
+		for _, bucket := range []string{bucketUsageRequests, bucketAccountUsage, bucketAccountUsageStates, bucketPlanCapacity, bucketCapacitySamples, bucketUserUsage, bucketUserDailyUsage, bucketUserHourlyUsage, bucketGlobalHourlyUsage} {
 			if _, e := tx.CreateBucketIfNotExists([]byte(bucket)); e != nil {
 				return e
 			}
@@ -479,6 +480,37 @@ func (s *usageStore) loadAllAccountUsage() (map[string]AccountUsage, error) {
 			var agg AccountUsage
 			if err := json.Unmarshal(v, &agg); err == nil {
 				out[string(k)] = agg
+			}
+			return nil
+		})
+	})
+	return out, err
+}
+
+func (s *usageStore) saveAccountUsageSnapshot(accountID string, snapshot UsageSnapshot) error {
+	if s == nil || s.db == nil || strings.TrimSpace(accountID) == "" {
+		return nil
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		return err
+	}
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte(bucketAccountUsageStates)).Put([]byte(accountID), raw)
+	})
+}
+
+func (s *usageStore) loadAllAccountUsageSnapshots() (map[string]UsageSnapshot, error) {
+	out := make(map[string]UsageSnapshot)
+	if s == nil || s.db == nil {
+		return out, nil
+	}
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(bucketAccountUsageStates))
+		return b.ForEach(func(k, v []byte) error {
+			var snapshot UsageSnapshot
+			if err := json.Unmarshal(v, &snapshot); err == nil {
+				out[string(k)] = snapshot
 			}
 			return nil
 		})

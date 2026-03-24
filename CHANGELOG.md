@@ -9,6 +9,27 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.6.0] - 2026-03-24
+
+### Added
+- Managed Gemini operator onboarding on both `/` and `/status`, including loopback OAuth start/callback handling, popup/manual-open recovery, and raw `oauth_creds.json` fallback paste flow.
+- Explicit long-dead-seat quarantine handling and operator visibility for quarantined accounts across status JSON, status HTML, and the landing overview.
+- Persistent Codex usage snapshots with restore-time reload support, plus a local cached `/backend-api/codex/models` path to reduce fragile upstream metadata round-trips.
+- Additional focused regression coverage for Gemini persistence, Codex usage restore/rotation, quarantine visibility, and fallback/request-path behavior.
+
+### Changed
+- The local landing page now mirrors real operator truth from `/status?format=json` instead of acting like a separate setup-only surface. It exposes live `Codex`, `Claude`, and `Gemini` dashboards, cleanup status, operator actions, and deletion controls in one place.
+- Codex routing now keeps one active local seat until threshold, restores usage state across restart more truthfully, honors local cooldown windows, and avoids retry-path active-seat poisoning.
+- Codex fallback operation is now explicitly operator-visible: fallback API keys are health-probed, displayed separately from local seats, and proven to take live traffic when local Codex seats are temporarily unavailable.
+- Managed Gemini and GitLab Claude state handling now round-trips more of the operator-visible runtime fields across save/load/reload boundaries.
+
+### Fixed
+- Codex seats no longer forget recent quota state on restart and immediately drift back onto already-burned accounts because of stale or missing usage snapshots.
+- Local Codex seats that hit live cooldown now leave fresh rotation instead of remaining eligible behind a debug-only bypass.
+- The active Codex lease is no longer rewritten by retry-only fallthrough candidates that never actually won a successful request.
+- The landing/dashboard surfaces no longer hide quarantine and dead-seat cleanup truth behind `/status` only.
+- Managed Gemini OAuth client credentials are no longer hardcoded in the repository; the operator flow now expects them from the local service environment.
+
 ## [0.5.1] - 2026-03-23
 
 ### Changed

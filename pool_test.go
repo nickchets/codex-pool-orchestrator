@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -24,6 +25,58 @@ func TestPenaltyDecay(t *testing.T) {
 	scoreAccount(a, now)
 	if a.Penalty >= 1.0 {
 		t.Fatalf("penalty should decay")
+	}
+}
+
+func TestLoadAccountsQuarantinesLongDeadAccount(t *testing.T) {
+	apiBase, err := url.Parse("https://api.example.com")
+	if err != nil {
+		t.Fatalf("parse api base: %v", err)
+	}
+	registry := NewProviderRegistry(
+		NewCodexProvider(apiBase, apiBase, apiBase, apiBase),
+		NewClaudeProvider(apiBase),
+		NewGeminiProvider(apiBase, apiBase),
+	)
+
+	poolDir := t.TempDir()
+	codexDir := filepath.Join(poolDir, "codex")
+	if err := os.MkdirAll(codexDir, 0o755); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+
+	deadSince := time.Now().Add(-longDeadAccountQuarantineAfter - time.Hour).UTC().Format(time.RFC3339)
+	authPath := filepath.Join(codexDir, "dead-seat.json")
+	payload := `{"tokens":{"access_token":"access","refresh_token":"refresh"},"dead":true,"dead_since":"` + deadSince + `"}`
+	if err := os.WriteFile(authPath, []byte(payload), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	accounts, err := loadPool(poolDir, registry)
+	if err != nil {
+		t.Fatalf("loadPool: %v", err)
+	}
+	if len(accounts) != 0 {
+		t.Fatalf("expected long-dead account to be quarantined, got %d accounts", len(accounts))
+	}
+	if _, err := os.Stat(authPath); !os.IsNotExist(err) {
+		t.Fatalf("expected source file to be moved, stat err=%v", err)
+	}
+
+	quarantinedPath := filepath.Join(poolDir, quarantineSubdir, "codex", "dead-seat.json")
+	if _, err := os.Stat(quarantinedPath); err != nil {
+		t.Fatalf("expected quarantined file at %s: %v", quarantinedPath, err)
+	}
+
+	status := loadQuarantineStatus(poolDir, time.Now().UTC())
+	if status.Total != 1 {
+		t.Fatalf("quarantine total=%d", status.Total)
+	}
+	if got := status.Providers["codex"]; got != 1 {
+		t.Fatalf("quarantine codex count=%d", got)
+	}
+	if len(status.Recent) != 1 || status.Recent[0].ID != "dead-seat" {
+		t.Fatalf("unexpected recent quarantine entries: %+v", status.Recent)
 	}
 }
 
@@ -215,6 +268,236 @@ func TestCandidateStopsReusingMostRecentlyUsedSeatAtExactPrimaryThreshold(t *tes
 	}
 }
 
+func TestCandidateStopsReusingMostRecentlyUsedSeatAtExactSecondaryThreshold(t *testing.T) {
+	now := time.Now()
+	sticky := &Account{
+		ID:       "sticky",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		LastUsed: now.Add(-15 * time.Second),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.20,
+			SecondaryUsedPercent: 0.90,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	healthy := &Account{
+		ID:       "healthy",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.20,
+			SecondaryUsedPercent: 0.10,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{sticky, healthy}, false)
+
+	got := p.candidate("", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != "healthy" {
+		t.Fatalf("expected sticky seat at exact secondary threshold to be bypassed, got %+v", got)
+	}
+}
+
+func TestCandidateKeepsActiveCodexSeatWhileEligible(t *testing.T) {
+	now := time.Now()
+	active := &Account{
+		ID:       "active",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.25,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	betterScore := &Account{
+		ID:       "better-score",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.05,
+			SecondaryUsedPercent: 0.05,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{active, betterScore}, false)
+	p.activeCodexID = active.ID
+
+	got := p.candidate("", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != "active" {
+		t.Fatalf("expected active codex seat to be reused before LastUsed is populated, got %+v", got)
+	}
+}
+
+func TestCandidateDropsActiveCodexSeatAtExactPrimaryThreshold(t *testing.T) {
+	now := time.Now()
+	active := &Account{
+		ID:       "active",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.90,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(30 * time.Minute),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	healthy := &Account{
+		ID:       "healthy",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{active, healthy}, false)
+	p.activeCodexID = active.ID
+
+	got := p.candidate("", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != "healthy" {
+		t.Fatalf("expected exact-threshold active seat to rotate, got %+v", got)
+	}
+	if p.activeCodexID != "healthy" {
+		t.Fatalf("expected active codex seat to move to healthy, got %q", p.activeCodexID)
+	}
+}
+
+func TestCandidateDropsActiveCodexSeatAtExactSecondaryThreshold(t *testing.T) {
+	now := time.Now()
+	active := &Account{
+		ID:       "active",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.20,
+			SecondaryUsedPercent: 0.90,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	healthy := &Account{
+		ID:       "healthy",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{active, healthy}, false)
+	p.activeCodexID = active.ID
+
+	got := p.candidate("", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != "healthy" {
+		t.Fatalf("expected exact-threshold secondary active seat to rotate, got %+v", got)
+	}
+	if p.activeCodexID != "healthy" {
+		t.Fatalf("expected active codex seat to move to healthy, got %q", p.activeCodexID)
+	}
+}
+
+func TestCandidateActiveManagedAPIFallbackDoesNotStealEligibleCodexSeat(t *testing.T) {
+	now := time.Now()
+	local := &Account{
+		ID:       "local-pro",
+		Type:     AccountTypeCodex,
+		PlanType: "pro",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	api := &Account{
+		ID:           "openai-api-key",
+		Type:         AccountTypeCodex,
+		PlanType:     "api",
+		AuthMode:     accountAuthModeAPIKey,
+		HealthStatus: "healthy",
+	}
+	p := newPoolState([]*Account{local, api}, false)
+	p.activeAPIID = api.ID
+
+	got := p.candidate("", nil, AccountTypeCodex, "pro")
+	if got == nil || got.ID != "local-pro" {
+		t.Fatalf("expected eligible local codex seat to win over active api fallback, got %+v", got)
+	}
+}
+
+func TestPeekCandidateDoesNotClaimActiveCodexSeat(t *testing.T) {
+	now := time.Now()
+	a := &Account{
+		ID:       "seat-a",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{a}, false)
+
+	got := p.peekCandidate(AccountTypeCodex, "")
+	if got == nil || got.ID != "seat-a" {
+		t.Fatalf("expected peek candidate seat-a, got %+v", got)
+	}
+	if p.activeCodexID != "" {
+		t.Fatalf("peekCandidate should not mutate activeCodexID, got %q", p.activeCodexID)
+	}
+}
+
+func TestRoutingStateReentersAfterSecondaryResetWithFreshUsage(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	acc := &Account{
+		ID:       "seat-a",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.96,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(-10 * time.Minute),
+			RetrievedAt:          now.Add(-30 * time.Minute),
+			Source:               "headers",
+		},
+	}
+
+	applyUsageSnapshot(acc, &UsageSnapshot{
+		PrimaryUsedPercent:   0.12,
+		SecondaryUsedPercent: 0.06,
+		RetrievedAt:          now,
+		Source:               "token_count",
+	})
+
+	acc.mu.Lock()
+	snapshot := acc.Usage
+	acc.mu.Unlock()
+	if !snapshot.SecondaryResetAt.IsZero() {
+		t.Fatalf("expected stale secondary reset to be cleared, got %v", snapshot.SecondaryResetAt)
+	}
+
+	state := routingStateLocked(acc, now.Add(time.Second), AccountTypeCodex, "")
+	if !state.Eligible {
+		t.Fatalf("expected account to re-enter after reset, got %+v", state)
+	}
+	if state.SecondaryUsed != 0.06 {
+		t.Fatalf("secondary_used=%v", state.SecondaryUsed)
+	}
+}
+
 func TestRoutingStateReentersAfterReset(t *testing.T) {
 	now := time.Now()
 	resetAccount := &Account{
@@ -326,6 +609,114 @@ func TestRoutingStateBlocksRateLimitedManagedOpenAIAPIKey(t *testing.T) {
 	}
 	if routing.BlockReason != "rate_limited" {
 		t.Fatalf("block_reason=%q", routing.BlockReason)
+	}
+}
+
+func TestRoutingStateBlocksRateLimitedLocalCodexSeat(t *testing.T) {
+	now := time.Now()
+	seat := &Account{
+		ID:             "codex-seat",
+		Type:           AccountTypeCodex,
+		PlanType:       "team",
+		RateLimitUntil: now.Add(2 * time.Minute),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.30,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+
+	seat.mu.Lock()
+	routing := routingStateLocked(seat, now, AccountTypeCodex, "")
+	seat.mu.Unlock()
+
+	if routing.Eligible {
+		t.Fatalf("expected rate-limited local codex seat to be blocked")
+	}
+	if routing.BlockReason != "rate_limited" {
+		t.Fatalf("block_reason=%q", routing.BlockReason)
+	}
+	if routing.CodexRateLimitBypass {
+		t.Fatalf("expected local codex cooldown to stop bypassing rate limits")
+	}
+}
+
+func TestCandidateSkipsRateLimitedLocalCodexSeat(t *testing.T) {
+	now := time.Now()
+	cooling := &Account{
+		ID:             "cooling",
+		Type:           AccountTypeCodex,
+		PlanType:       "team",
+		RateLimitUntil: now.Add(2 * time.Minute),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	healthy := &Account{
+		ID:       "healthy",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{cooling, healthy}, false)
+	p.activeCodexID = cooling.ID
+
+	got := p.candidate("", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != "healthy" {
+		t.Fatalf("expected candidate to skip rate-limited local codex seat, got %+v", got)
+	}
+	if p.activeCodexID != "healthy" {
+		t.Fatalf("expected active codex seat to move to healthy, got %q", p.activeCodexID)
+	}
+}
+
+func TestCandidateRetryPathDoesNotMoveActiveCodexSeat(t *testing.T) {
+	now := time.Now()
+	active := &Account{
+		ID:       "active",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.20,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	healthy := &Account{
+		ID:       "healthy",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		LastUsed: now.Add(-time.Minute),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.10,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{active, healthy}, false)
+	p.activeCodexID = active.ID
+
+	p.mu.Lock()
+	got := p.candidateAtLocked(now, "", map[string]bool{"active": true}, AccountTypeCodex, "", true)
+	activeID := p.activeCodexID
+	p.mu.Unlock()
+
+	if got == nil || got.ID != "healthy" {
+		t.Fatalf("expected retry path to choose healthy seat, got %+v", got)
+	}
+	if activeID != "active" {
+		t.Fatalf("expected retry path to keep prior active seat, got %q", activeID)
 	}
 }
 

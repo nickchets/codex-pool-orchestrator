@@ -6,22 +6,104 @@
 
 ### DOING
 
-_(empty — truthful idle handoff; successor cards are hydrated in `NEXT`)_
+#### REPO-CPO-ALIGN-P1-T43: Separate Gemini onboarding lanes from provider-specific automation
+1. Split the current Gemini operator contract into explicit lanes so `/` and `/status` stop mixing managed Gemini OAuth seat onboarding with provider-specific automation/import behavior.
+2. Remove borrowed antigravity semantics from the default Gemini dashboard flow and replace them with first-party pool concepts: managed Gemini seats, optional generic API pool, and any future automation as a separate operator lane.
+3. Keep the slice bounded to operator/UI/router behavior first, then re-verify that the resulting Gemini dashboard still reflects truthful pool state instead of button-driven side effects.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestLocalOperatorGeminiSeatAddStoresManagedSeat|TestLocalOperatorGeminiOAuthStartAllowsLoopbackWithoutAdminHeader|TestManagedGeminiOAuthCallbackStoresManagedSeat|TestServeStatusPageIncludesOperatorActionForLocalLoopback|TestServeStatusPageHidesOperatorActionOutsideLoopback|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction|TestBuildPoolDashboardData.*' ./...`
 
 ### NEXT
 
-#### REPO-CPO-REFAC-P1-T31: Share the websocket reverse-proxy execution shell
-1. Collapse the duplicated websocket reverse-proxy execution shell so pooled and passthrough lanes share the common `ReverseProxy` serve/error/status plumbing while still injecting their own rewrite/modify behavior.
-2. Preserve path-specific semantics exactly: pooled websocket must keep auth overwrite and subprotocol bearer replacement, while passthrough must preserve original auth and Claude OAuth `beta=true` query behavior.
-3. Keep the new pre-copy status helper and pooled success finalizers untouched; this slice is only about sharing the common execution shell after `T30`.
+#### REPO-CPO-ALIGN-P1-T44: Reconcile Gemini pool truth after the operator split
+1. Make the Gemini dashboard summarize the actual pool composition after the operator split: managed seats, generic API-style fallback lanes if enabled, and automation/import lanes if configured.
+2. Ensure account rows, counters, and operator actions use the same source-of-truth field names across `/status?format=json`, `/status`, and the landing page.
+3. Lock the slice with targeted dashboard/status regressions and one live smoke against the running service once the UI split lands.
 
-**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 120s -run "TestFinalizeWebSocketSuccessState.*|TestProxyWebSocketPoolRewritesAuthAndPinsSession|TestProxyWebSocketPoolAcceptsAuthFromSubprotocol|TestProxyWebSocketManagedAPI5xxPreservesFullErrorBodyAndRecordsFallback|TestProxyWebSocketManagedAPICompressed429ClassifiesQuotaAndPreservesBody|TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat|TestProxyWebSocketPassthroughPreservesAuthorization" ./...`
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestServeStatusPageReturnsJSONForFormatQuery|TestServeStatusPage|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction|TestBuildPoolDashboardData.*|TestGeminiProviderLoadAccountLoadsPersistedState' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="gemini")|{id,eligible:(.routing.eligible//false),block_reason:(.routing.block_reason//null),managed:(.managed//false),health_status:(.health_status//null)}]}'`
 
 ### BLOCKED
 
 _(none)_
 
 ### DONE
+
+#### REPO-CPO-VERIFY-P1-T41: Controlled live threshold and API-fallback cutover proof
+1. Temporarily exclude every currently eligible local Codex seat from the live pool, then verify the API fallback lane becomes the only remaining eligible Codex path.
+2. Send one short pooled Codex request while the local seats are excluded and confirm the request still completes successfully through the fallback lane.
+3. Restore every touched seat file and reload the pool back into normal operation, with before/after operator evidence proving both the cutover and the recovery.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_t41_before.json && AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && timeout 60s curl -sS -N -o /tmp/cpo_t41_responses.sse -w '%{http_code}' http://127.0.0.1:8989/v1/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","input":[{"role":"user","content":[{"type":"input_text","text":"Reply with exactly OK."}]}],"store":false,"stream":true}' && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_t41_after.json`
+
+#### REPO-CPO-BUG-P1-T42: Honor local Codex cooldowns and stop retry-path active-seat poisoning
+1. Make local Codex seat cooldowns (`RateLimitUntil`) actually block fresh routing instead of only incrementing penalty while the selector still treats the seat as eligible.
+2. Keep the active Codex lease stable across retry fallthrough: first-attempt selection may establish stickiness, but retry candidates must not overwrite the active seat pointer for future traffic.
+3. Lock the slice with focused selector regressions, rebuild the binary, and restart the local user service on the updated selector logic.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestRoutingStateBlocksRateLimitedLocalCodexSeat|TestCandidateSkipsRateLimitedLocalCodexSeat|TestCandidateRetryPathDoesNotMoveActiveCodexSeat|TestRoutingStateBlocksRateLimitedManagedOpenAIAPIKey|TestCandidateDropsActiveCodexSeatAtExactPrimaryThreshold|TestCandidateDropsActiveCodexSeatAtExactSecondaryThreshold' ./... && go build ./... && go build -o /home/lap/.local/bin/codex-pool . && systemctl --user restart codex-pool.service && curl -fsS http://127.0.0.1:8989/healthz`
+
+#### REPO-CPO-VERIFY-P1-T40: Live-smoke Codex seat stickiness on the running pool
+1. Capture a before/after live `/status?format=json` snapshot around a minimal pooled Codex request so the running service proves the active seat remains sticky instead of distributing traffic round-robin.
+2. Confirm the request completes through the local Codex seat lane without unexpectedly cutting over to the API fallback path on a healthy local-seat run.
+3. Keep the slice observational and cheap: one short pooled request plus the minimum JSON/SSE artifacts needed to prove live selector behavior after `T39`.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_t40_before.json && AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && timeout 60s curl -sS -N -o /tmp/cpo_t40_responses.sse -w '%{http_code}' http://127.0.0.1:8989/v1/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","input":[{"role":"user","content":[{"type":"input_text","text":"Reply with exactly OK."}]}],"store":false,"stream":true}' && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_t40_after.json`
+
+#### REPO-CPO-BUG-P1-T39: Fix Codex quota freshness across reset rollover and restart
+1. Stop carrying expired Codex reset timestamps forward when fresh `token_count` usage arrives without reset metadata, so post-reset burn cannot masquerade as `0%` until a later WHAM/header refresh.
+2. Let restore-time `Totals` repair a stale persisted usage snapshot when the totals are newer, instead of trusting an older snapshot just because `Usage.RetrievedAt` is non-zero.
+3. Lock the weekly-routing edge explicitly: active-seat reuse and most-recently-used fallback must both drop at the exact secondary threshold, and re-entry must resume cleanly after a fresh reset.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestApplyUsageSnapshotDoesNotCarryExpiredResetAcrossTokenCount|TestRestorePersistedUsageStatePrefersNewerTotalsWhenSnapshotStale|TestCandidateStopsReusingMostRecentlyUsedSeatAtExactSecondaryThreshold|TestCandidateDropsActiveCodexSeatAtExactSecondaryThreshold|TestRoutingStateReentersAfterSecondaryResetWithFreshUsage' ./... && go build ./...`
+
+#### REPO-CPO-ALIGN-P2-T38: Project cleanup truth onto the local landing dashboards
+1. Consume the existing quarantine and dead-seat visibility data from `/status?format=json` on `/` so the operator dashboard stops hiding long-dead-seat cleanup state.
+2. Keep `/status` as the dense deep-ops view, but make the landing summarize the same cleanup truth instead of forcing operators to switch surfaces for that one class of state.
+3. Keep the slice narrow: no new cleanup policy, only render/use the already-verified quarantine and dead-state data on the landing with targeted template regressions.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestServeStatusPageIncludesQuarantineStatus|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction' ./...`
+
+#### REPO-CPO-BUG-P2-T34: Quarantine long-dead seats and keep cleanup truth visible
+1. Extend dead-seat cleanup beyond temporary cooldowns so permanently bad managed seats stop inflating pool totals and recovery expectations after long failure windows.
+2. Surface cleanup truth explicitly in `/status` and dashboard data instead of forcing operators to infer it from stale `dead` or health fields.
+3. Keep this slice operational only: no broader provider redesign, just deterministic cleanup/recovery state for existing Codex, Gemini, and GitLab Claude seats.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestLoadAccountsQuarantinesLongDeadAccount|TestServeStatusPageIncludesQuarantineStatus|TestServeStatusPageReturnsJSONForFormatQuery|TestBuildPoolDashboardData.*|TestReloadAccountsPreservesRuntimeState|TestGeminiProviderLoadAccountLoadsPersistedState' ./... && curl -fsS http://127.0.0.1:8989/status?format=json >/tmp/cpo_status_t34.json`
+
+#### REPO-CPO-ALIGN-P1-T37: Align the legacy Gemini operator/dashboard/docs slice
+1. Reconcile `/status`, the local landing page, and `README.md` into one truthful Gemini onboarding contract instead of today’s mixed messaging between managed `/status` OAuth, fallback paste flow, and stale manual file-copy guidance.
+2. Harden the operator flow itself: enforce expiring OAuth state, make the loopback redirect family consistent with the route/browser trust contract, and make popup/manual-open completion refresh the dashboard truthfully.
+3. Add missing negative auth and UX regression coverage for `/operator/gemini/*`, including loopback-only checks and fallback/manual-open behavior.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestLocalOperatorGeminiSeatAddStoresManagedSeat|TestLocalOperatorGeminiSeatAddMarksUnauthorizedSeatDead|TestLocalOperatorGeminiSeatAddIgnoresProvidedRuntimeState|TestLocalOperatorGeminiSeatAddRejectsNullAuthJSON|TestLocalOperatorGeminiOAuthStartAllowsLoopbackWithoutAdminHeader|TestLocalOperatorGeminiOAuthCallbackStoresManagedSeat|TestManagedGeminiOAuthCallbackRejectsExpiredState|TestManagedGeminiRedirectURIPreservesLoopbackFamily|TestServeStatusPageIncludesOperatorActionForLocalLoopback|TestServeStatusPageHidesOperatorActionOutsideLoopback|TestLocalOperatorGemini|TestServeStatusPage|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction' ./...`
+
+#### REPO-CPO-PLAN-P1-T35: Hydrate the legacy dirty-tree alignment plan through repo-local bureaucracy
+1. Inventory the pre-existing unmanaged changes instead of mixing them into the just-finished Codex routing bugfix, and split them into coherent backend/runtime vs operator/dashboard/docs tracks.
+2. Pull targeted risk findings and verify hooks out of specialist audits so the next work can execute as bounded cards rather than one vague “clean up the old changes” bucket.
+3. Reorder the repo-local board so the active successor set reflects the real dirty-tree pressure now: Gemini runtime alignment, Gemini operator/docs alignment, then the remaining Codex cold-start hardening.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && git status --short --branch && git diff --stat -- README.md frontend_setup_scripts_test.go router.go status.go status_dashboard_test.go templates/local_landing.html provider_gemini.go gemini_operator.go provider_gemini_test.go`
+
+#### REPO-CPO-ALIGN-P1-T36: Align the legacy Gemini provider/runtime slice
+1. Turn the pre-existing Gemini backend changes into one coherent runtime contract: persisted OAuth profile and health state survive reloads, and multi-client refresh fallback continues across `400 invalid_grant` / `invalid_client` as well as `401/403`.
+2. Keep the managed Gemini seat file format backward-compatible while proving that saved runtime state, recovery state, and client-profile hints round-trip truthfully through load/save/recovery flows.
+3. Keep this slice backend-only: the remaining Gemini work now sits in operator/dashboard/docs behavior, not provider/runtime drift.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestGeminiProviderLoadAccountLoadsPersistedState|TestGeminiProviderLoadAccountLoadsOAuthProfileID|TestSaveGeminiAccountPersistsStateFields|TestSaveGeminiAccountPersistsOAuthProfileID|TestFinalizeProxyResponsePersistsHealthyGeminiRecovery|TestFinalizeProxyResponsePersistsHealthyGeminiStateFromUnknown|TestFinalizeProxyResponsePersistsHealthyGeminiTimestampsWhenAlreadyHealthy|TestFinalizeWebSocketSuccessStatePersistsHealthyGeminiState|TestGeminiProviderRefreshTokenFallsBackToGCloudClient|TestGeminiProviderRefreshTokenFallsBackOn400InvalidGrant|TestGeminiProviderRefreshTokenFallsBackOn400InvalidClient|TestReloadAccountsKeepsGeminiPersistedProfileAndHealthState' ./...`
+
+#### REPO-CPO-BUG-P1-T32: Restore truthful Codex seat routing across restarts and concurrent load
+1. Wire persisted usage snapshots plus `Totals -> Usage` bridge into cold start so restart-time routing does not forget weekly/5h headroom and re-admit already-exhausted seats.
+2. Apply live Codex `token_count` snapshots to `a.Usage` during streamed responses and persist them, so the selector sees updated 5h/weekly limits before the response fully completes.
+3. Replace recency-only Codex reuse with an explicit active-seat lease for unpinned work: hold one local seat until its 5h or weekly headroom drops below `10%`, then rotate to the next eligible local seat or API fallback.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run "TestRestorePersistedUsageState.*|TestWrapUsageInterceptWriterAppliesCodexSnapshot|TestReloadAccountsPreservesRuntimeState|TestParseCodexUsageDelta.*|TestUpdateUsageFromBody.*|TestCandidate.*|TestRoutingState.*|TestBuildPoolDashboardDataSelectsCurrentSeatFromInflightAndLastUsed|TestBuildPoolDashboardDataSeparatesLastUsedAndBestEligibleWhenIdle" ./... && go build ./...`
+
+#### REPO-CPO-BUG-P1-T33: Harden cold start and low-risk Codex metadata paths
+1. Soft-gate pooled Codex traffic for the initial cold-start window when local seat usage snapshots are still missing, while allowing the metadata lane to operate through restored state and cache.
+2. Serve `/backend-api/codex/models` through a local cache/refresh path so Codex metadata stops depending on fragile upstream round-trips during normal CLI use.
+3. Keep the new usage-state restore/lease behavior untouched while hardening only the remaining cold-start and metadata edges.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestRestorePersistedUsageState.*|TestPeekCandidateDoesNotClaimActiveCodexSeat|TestCodexWarmState.*|TestServeCodexModels.*|TestBuildWhamUsageURLKeepsBackendAPI|TestCodexProviderUpstreamURLBackendAPIPathUsesWhamBase|TestCodexProviderNormalizePathBackendAPIPathStripsPrefix|TestStatusJSONIncludesUsageRouting|TestStatusJSONIncludesAPIKeyStats|TestProxyBufferedRetryable5xxRetriesNextSeat' ./... && go build -o /home/lap/.local/bin/codex-pool . && systemctl --user restart codex-pool.service && curl -fsS http://127.0.0.1:8989/healthz`
 
 #### REPO-CPO-REFAC-P1-T30: Extract the pooled websocket reverse-proxy shell
 1. Collapse the remaining pooled websocket reverse-proxy contour so rewrite/error/status capture wiring no longer lives as one large inline literal inside `proxyRequestWebSocket`.

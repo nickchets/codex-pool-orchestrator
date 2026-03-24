@@ -199,6 +199,36 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.handleOperatorClaudeGitLabTokenAdd(w, r)
 		return
+	case "/operator/gemini/account-add":
+		if !h.checkLocalOperatorAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleOperatorGeminiSeatAdd(w, r)
+		return
+	case "/operator/gemini/oauth-start":
+		if !h.checkLocalOperatorAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleOperatorGeminiOAuthStart(w, r)
+		return
+	case "/operator/gemini/oauth-callback":
+		if !h.checkLocalOperatorAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleOperatorGeminiOAuthCallback(w, r)
+		return
 	case "/operator/account-delete":
 		if !h.checkLocalOperatorAuth(w, r) {
 			return

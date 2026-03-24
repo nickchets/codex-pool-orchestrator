@@ -255,6 +255,10 @@ func buildGitLabClaudeAuthJSON(a *Account) (ClaudeAuthJSON, error) {
 	if !a.RateLimitUntil.IsZero() {
 		root.RateLimitUntil = a.RateLimitUntil.UTC()
 	}
+	if !a.DeadSince.IsZero() {
+		value := a.DeadSince.UTC()
+		root.DeadSince = &value
+	}
 	if !a.LastRefresh.IsZero() {
 		value := a.LastRefresh.UTC()
 		root.LastRefresh = &value
@@ -506,7 +510,7 @@ func refreshGitLabClaudeAccess(ctx context.Context, acc *Account, transport http
 	acc.UpstreamBaseURL = firstNonEmpty(strings.TrimSpace(payload.BaseURL), defaultGitLabClaudeGatewayURL)
 	acc.ExtraHeaders = headersCopy
 	acc.ExpiresAt = expiresAt
-	acc.Dead = false
+	setAccountDeadStateLocked(acc, false, now)
 	acc.RateLimitUntil = time.Time{}
 	acc.HealthStatus = "healthy"
 	acc.HealthError = ""
@@ -528,9 +532,8 @@ func classifyManagedGitLabClaudeError(source managedGitLabClaudeErrorSource, sta
 		strings.Contains(lower, "quota exceeded"),
 		strings.Contains(lower, "insufficient_credits"),
 		strings.Contains(lower, "insufficient credits"):
-		disposition.RateLimit = true
-		disposition.HealthStatus = "quota_exceeded"
-		disposition.Cooldown = managedGitLabClaudeQuotaExceededInitialWait
+		disposition.MarkDead = true
+		disposition.HealthStatus = "dead"
 	case statusCode == http.StatusTooManyRequests:
 		disposition.RateLimit = true
 		disposition.HealthStatus = "rate_limited"
@@ -585,7 +588,7 @@ func applyManagedGitLabClaudeDisposition(acc *Account, disposition managedGitLab
 		if acc.RateLimitUntil.Before(until) {
 			acc.RateLimitUntil = until
 		}
-		acc.Dead = false
+		setAccountDeadStateLocked(acc, false, now)
 		if strings.TrimSpace(disposition.HealthStatus) != "" {
 			acc.HealthStatus = disposition.HealthStatus
 		} else if strings.Contains(strings.ToLower(reason), "quota") {
@@ -598,7 +601,7 @@ func applyManagedGitLabClaudeDisposition(acc *Account, disposition managedGitLab
 	}
 
 	if disposition.MarkDead {
-		acc.Dead = true
+		setAccountDeadStateLocked(acc, true, now)
 		acc.HealthStatus = firstNonEmpty(strings.TrimSpace(disposition.HealthStatus), "dead")
 		acc.RateLimitUntil = time.Time{}
 		acc.Penalty += 100.0

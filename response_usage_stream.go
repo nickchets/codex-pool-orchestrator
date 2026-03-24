@@ -48,7 +48,17 @@ func (h *proxyHandler) wrapUsageInterceptWriter(
 				return
 			}
 
-			ru := provider.ParseUsage(obj)
+			var ru *RequestUsage
+			if provider.Type() == AccountTypeCodex {
+				delta := parseCodexUsageDelta(obj)
+				if delta.Snapshot != nil {
+					applyUsageSnapshot(acc, delta.Snapshot)
+					persistUsageSnapshot(h.store, acc)
+				}
+				ru = delta.Usage
+			} else {
+				ru = provider.ParseUsage(obj)
+			}
 			if ru == nil {
 				return
 			}
