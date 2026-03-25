@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestWrapUsageInterceptWriterAppliesCodexSnapshot(t *testing.T) {
@@ -33,6 +34,7 @@ func TestWrapUsageInterceptWriterAppliesCodexSnapshot(t *testing.T) {
 		provider,
 		acc,
 		"user-1",
+		nil,
 		0,
 		0,
 		&managedStreamFailed,
@@ -64,5 +66,55 @@ func TestWrapUsageInterceptWriterAppliesCodexSnapshot(t *testing.T) {
 	}
 	if snapshot.PrimaryUsedPercent != 0.25 || snapshot.SecondaryUsedPercent != 0.50 {
 		t.Fatalf("snapshot=%+v", snapshot)
+	}
+}
+
+func TestWrapUsageInterceptWriterRecordsTraceEvents(t *testing.T) {
+	store, err := newUsageStore(filepath.Join(t.TempDir(), "usage.db"), 7)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	baseURL, err := url.Parse("https://example.com")
+	if err != nil {
+		t.Fatalf("parse base url: %v", err)
+	}
+
+	h := &proxyHandler{store: store}
+	provider := NewClaudeProvider(baseURL)
+	acc := &Account{ID: "claude-seat", Type: AccountTypeClaude}
+	trace := &requestTrace{
+		cfg:       requestTraceConfig{packets: true},
+		reqID:     "req-trace",
+		startedAt: time.Now(),
+	}
+	managedStreamFailed := false
+	var managedStreamFailureOnce sync.Once
+	var forwarded bytes.Buffer
+
+	writer := h.wrapUsageInterceptWriter(
+		"req-trace",
+		&forwarded,
+		provider,
+		acc,
+		"user-1",
+		trace,
+		0,
+		0,
+		&managedStreamFailed,
+		&managedStreamFailureOnce,
+	)
+
+	chunk := []byte("event: message\ndata: {\"type\":\"message_start\",\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":4}}\n\nevent: message\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":3}}\n\n")
+	if _, err := writer.Write(chunk); err != nil {
+		t.Fatalf("write sse chunk: %v", err)
+	}
+
+	if trace.sseEvents != 2 {
+		t.Fatalf("sse_events=%d", trace.sseEvents)
+	}
+	if trace.usageEvents != 1 {
+		t.Fatalf("usage_events=%d", trace.usageEvents)
 	}
 }

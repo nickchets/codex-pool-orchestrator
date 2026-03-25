@@ -30,6 +30,12 @@ func resetManagedGeminiOAuthSessions() {
 	managedGeminiOAuthSessions.Unlock()
 }
 
+func resetAntigravityGeminiOAuthSessions() {
+	antigravityGeminiOAuthSessions.Lock()
+	antigravityGeminiOAuthSessions.sessions = make(map[string]*antigravityGeminiOAuthSession)
+	antigravityGeminiOAuthSessions.Unlock()
+}
+
 func testCodexIDToken(t *testing.T, userID, accountID, email, subject string, exp time.Time) string {
 	t.Helper()
 	payload := map[string]any{
@@ -289,6 +295,110 @@ func TestBuildPoolDashboardDataSeparatesGeminiOperatorLanes(t *testing.T) {
 	}
 	if data.Accounts[0].OperatorSource == "" || data.Accounts[1].OperatorSource == "" {
 		t.Fatalf("operator sources missing: %+v", data.Accounts)
+	}
+}
+
+func TestBuildPoolDashboardDataLeavesLegacyGeminiOperatorSourceUnsetWithoutProvenance(t *testing.T) {
+	now := time.Date(2026, 3, 24, 10, 5, 0, 0, time.UTC)
+	legacy := &Account{
+		ID:       "gemini_legacy",
+		Type:     AccountTypeGemini,
+		PlanType: "gemini",
+		AuthMode: accountAuthModeOAuth,
+	}
+
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{legacy}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	data := h.buildPoolDashboardData(now)
+	if len(data.Accounts) != 1 {
+		t.Fatalf("accounts=%d", len(data.Accounts))
+	}
+	if data.Accounts[0].OperatorSource != "" {
+		t.Fatalf("operator_source=%q, want empty for legacy Gemini seat without explicit provenance", data.Accounts[0].OperatorSource)
+	}
+	if data.GeminiOperator.ManagedSeatCount != 0 || data.GeminiOperator.ImportedSeatCount != 0 {
+		t.Fatalf("unexpected Gemini operator counts: %+v", data.GeminiOperator)
+	}
+}
+
+func TestBuildPoolDashboardDataCountsAntigravityGeminiImports(t *testing.T) {
+	now := time.Date(2026, 3, 24, 10, 6, 0, 0, time.UTC)
+	imported := &Account{
+		ID:               "gemini_antigravity",
+		Type:             AccountTypeGemini,
+		PlanType:         "gemini",
+		AuthMode:         accountAuthModeOAuth,
+		OperatorSource:   geminiOperatorSourceAntigravityImport,
+		OperatorEmail:    "ag@example.com",
+		AntigravityEmail: "ag@example.com",
+		HealthStatus:     "imported",
+	}
+
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{imported}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	data := h.buildPoolDashboardData(now)
+	if data.GeminiOperator.ImportedSeatCount != 1 {
+		t.Fatalf("imported_seat_count=%d", data.GeminiOperator.ImportedSeatCount)
+	}
+	if len(data.Accounts) != 1 {
+		t.Fatalf("accounts=%d", len(data.Accounts))
+	}
+	if data.Accounts[0].OperatorSource != "antigravity import" {
+		t.Fatalf("operator_source=%q", data.Accounts[0].OperatorSource)
+	}
+	if data.Accounts[0].Email != "ag@example.com" {
+		t.Fatalf("email=%q", data.Accounts[0].Email)
+	}
+}
+
+func TestBuildPoolDashboardDataIncludesGeminiProviderTruth(t *testing.T) {
+	now := time.Date(2026, 3, 24, 10, 7, 0, 0, time.UTC)
+	seat := &Account{
+		ID:                         "gemini_antigravity",
+		Type:                       AccountTypeGemini,
+		PlanType:                   "gemini",
+		AuthMode:                   accountAuthModeOAuth,
+		OperatorSource:             geminiOperatorSourceAntigravityImport,
+		GeminiSubscriptionTierID:   "standard-tier",
+		GeminiSubscriptionTierName: "Standard",
+		GeminiValidationReasonCode: "ACCOUNT_NEEDS_WORKSPACE",
+		GeminiValidationMessage:    "Workspace validation required",
+		GeminiValidationURL:        "https://example.com/validate",
+		GeminiProviderCheckedAt:    time.Date(2026, 3, 24, 10, 5, 0, 0, time.UTC),
+	}
+
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{seat}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	data := h.buildPoolDashboardData(now)
+	if len(data.Accounts) != 1 {
+		t.Fatalf("accounts=%d", len(data.Accounts))
+	}
+	if data.Accounts[0].ProviderSubscriptionTier != "standard-tier" {
+		t.Fatalf("provider_subscription_tier=%q", data.Accounts[0].ProviderSubscriptionTier)
+	}
+	if data.Accounts[0].ProviderSubscriptionName != "Standard" {
+		t.Fatalf("provider_subscription_name=%q", data.Accounts[0].ProviderSubscriptionName)
+	}
+	if data.Accounts[0].ProviderValidationCode != "ACCOUNT_NEEDS_WORKSPACE" {
+		t.Fatalf("provider_validation_code=%q", data.Accounts[0].ProviderValidationCode)
+	}
+	if data.Accounts[0].ProviderValidationMessage != "Workspace validation required" {
+		t.Fatalf("provider_validation_message=%q", data.Accounts[0].ProviderValidationMessage)
+	}
+	if data.Accounts[0].ProviderValidationURL != "https://example.com/validate" {
+		t.Fatalf("provider_validation_url=%q", data.Accounts[0].ProviderValidationURL)
+	}
+	if data.Accounts[0].ProviderCheckedAt != "2026-03-24T10:05:00Z" {
+		t.Fatalf("provider_checked_at=%q", data.Accounts[0].ProviderCheckedAt)
 	}
 }
 
@@ -884,6 +994,83 @@ func TestLocalOperatorGeminiSeatAddStoresManagedSeat(t *testing.T) {
 	}
 }
 
+func TestLocalOperatorGeminiSeatAddAcceptsAntigravityAccountWrapper(t *testing.T) {
+	apiBase, err := url.Parse("https://api.example.com")
+	if err != nil {
+		t.Fatalf("parse api base: %v", err)
+	}
+	codex := NewCodexProvider(apiBase, apiBase, apiBase, apiBase)
+	claude := NewClaudeProvider(apiBase)
+	gemini := NewGeminiProvider(apiBase, apiBase)
+
+	poolDir := t.TempDir()
+	h := &proxyHandler{
+		cfg:      config{poolDir: poolDir},
+		pool:     newPoolState(nil, false),
+		registry: NewProviderRegistry(codex, claude, gemini),
+		refreshTransport: gitlabClaudeRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			t.Fatalf("antigravity import should not refresh during add")
+			return nil, nil
+		}),
+	}
+
+	authJSON := `{
+		"id":"ag-1",
+		"email":"ag@example.com",
+		"name":"AG User",
+		"proxy_disabled":false,
+		"validation_blocked":false,
+		"quota":{"is_forbidden":false},
+		"token":{
+			"access_token":"seed-token",
+			"refresh_token":"refresh-token",
+			"expiry_timestamp":1774396800,
+			"token_type":"Bearer",
+			"project_id":"project-1"
+		}
+	}`
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/gemini/import-oauth-creds", strings.NewReader(`{"auth_json":`+strconv.Quote(authJSON)+`}`))
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode json: %v", err)
+	}
+	if payload["health_status"] != "imported" {
+		t.Fatalf("unexpected health_status: %+v", payload)
+	}
+	accountID, _ := payload["account_id"].(string)
+	seatPath := filepath.Join(poolDir, managedGeminiSubdir, accountID+".json")
+	saved, err := os.ReadFile(seatPath)
+	if err != nil {
+		t.Fatalf("read seat file: %v", err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(saved, &root); err != nil {
+		t.Fatalf("unmarshal seat file: %v", err)
+	}
+	if root["operator_source"] != geminiOperatorSourceAntigravityImport {
+		t.Fatalf("operator_source=%#v", root["operator_source"])
+	}
+	if root["oauth_profile_id"] != geminiOAuthAntigravityProfileID {
+		t.Fatalf("oauth_profile_id=%#v", root["oauth_profile_id"])
+	}
+	if root["antigravity_account_id"] != "ag-1" {
+		t.Fatalf("antigravity_account_id=%#v", root["antigravity_account_id"])
+	}
+	if root["operator_email"] != "ag@example.com" {
+		t.Fatalf("operator_email=%#v", root["operator_email"])
+	}
+}
+
 func TestLocalOperatorGeminiSeatAddMarksUnauthorizedSeatDead(t *testing.T) {
 	setGeminiOAuthTestProfiles(t)
 
@@ -1070,6 +1257,73 @@ func TestLocalOperatorGeminiOAuthStartAllowsLoopbackWithoutAdminHeader(t *testin
 	}
 }
 
+func TestLocalOperatorGeminiAntigravityOAuthStartAllowsLoopbackWithoutAdminHeader(t *testing.T) {
+	resetAntigravityGeminiOAuthSessions()
+	t.Cleanup(resetAntigravityGeminiOAuthSessions)
+
+	h := &proxyHandler{
+		cfg: config{adminToken: "secret"},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/gemini/antigravity/oauth-start", strings.NewReader(`{}`))
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode json: %v", err)
+	}
+	oauthURL, _ := payload["oauth_url"].(string)
+	if oauthURL == "" {
+		t.Fatalf("payload missing oauth_url: %+v", payload)
+	}
+	parsed, err := url.Parse(oauthURL)
+	if err != nil {
+		t.Fatalf("parse oauth_url: %v", err)
+	}
+	query := parsed.Query()
+	if got := query.Get("client_id"); got != geminiOAuthAntigravityClientID {
+		t.Fatalf("client_id=%q", got)
+	}
+	if got := query.Get("redirect_uri"); got != "http://localhost:8989/oauth-callback" {
+		t.Fatalf("redirect_uri=%q", got)
+	}
+	if got := query.Get("response_type"); got != "code" {
+		t.Fatalf("response_type=%q", got)
+	}
+	if got := query.Get("access_type"); got != "offline" {
+		t.Fatalf("access_type=%q", got)
+	}
+	if got := query.Get("prompt"); got != "consent" {
+		t.Fatalf("prompt=%q", got)
+	}
+	scopes := map[string]struct{}{}
+	for _, scope := range strings.Fields(query.Get("scope")) {
+		scopes[scope] = struct{}{}
+	}
+	for _, scope := range []string{
+		"https://www.googleapis.com/auth/cloud-platform",
+		"https://www.googleapis.com/auth/userinfo.email",
+		"https://www.googleapis.com/auth/userinfo.profile",
+		"https://www.googleapis.com/auth/cclog",
+		"https://www.googleapis.com/auth/experimentsandconfigs",
+	} {
+		if _, ok := scopes[scope]; !ok {
+			t.Fatalf("missing scope %q in %q", scope, query.Get("scope"))
+		}
+	}
+	if _, ok := payload["state"].(string); !ok {
+		t.Fatalf("payload missing state: %+v", payload)
+	}
+}
+
 func TestManagedGeminiOAuthCallbackRejectsExpiredState(t *testing.T) {
 	resetManagedGeminiOAuthSessions()
 	t.Cleanup(resetManagedGeminiOAuthSessions)
@@ -1098,6 +1352,39 @@ func TestManagedGeminiOAuthCallbackRejectsExpiredState(t *testing.T) {
 	managedGeminiOAuthSessions.Lock()
 	_, ok := managedGeminiOAuthSessions.sessions["expired-state"]
 	managedGeminiOAuthSessions.Unlock()
+	if ok {
+		t.Fatalf("expected expired state to be removed after callback attempt")
+	}
+}
+
+func TestAntigravityGeminiOAuthCallbackRejectsExpiredState(t *testing.T) {
+	resetAntigravityGeminiOAuthSessions()
+	t.Cleanup(resetAntigravityGeminiOAuthSessions)
+
+	antigravityGeminiOAuthSessions.Lock()
+	antigravityGeminiOAuthSessions.sessions["expired-state"] = &antigravityGeminiOAuthSession{
+		State:       "expired-state",
+		RedirectURI: "http://localhost:8989/oauth-callback",
+		CreatedAt:   time.Now().Add(-antigravityOAuthSessionTTL - time.Minute).UTC(),
+	}
+	antigravityGeminiOAuthSessions.Unlock()
+
+	h := &proxyHandler{}
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/oauth-callback?code=test-code&state=expired-state", nil)
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "missing or expired") {
+		t.Fatalf("unexpected body=%s", rr.Body.String())
+	}
+	antigravityGeminiOAuthSessions.Lock()
+	_, ok := antigravityGeminiOAuthSessions.sessions["expired-state"]
+	antigravityGeminiOAuthSessions.Unlock()
 	if ok {
 		t.Fatalf("expected expired state to be removed after callback attempt")
 	}
@@ -1244,6 +1531,197 @@ func TestLocalOperatorGeminiOAuthCallbackStoresManagedSeat(t *testing.T) {
 	}
 	if root["operator_email"] != "seat@example.com" {
 		t.Fatalf("saved operator_email=%#v", root["operator_email"])
+	}
+}
+
+func TestLocalOperatorGeminiAntigravityOAuthCallbackStoresImportedSeat(t *testing.T) {
+	resetAntigravityGeminiOAuthSessions()
+	t.Cleanup(resetAntigravityGeminiOAuthSessions)
+
+	apiBase, err := url.Parse("https://api.example.com")
+	if err != nil {
+		t.Fatalf("parse api base: %v", err)
+	}
+	codex := NewCodexProvider(apiBase, apiBase, apiBase, apiBase)
+	claude := NewClaudeProvider(apiBase)
+	gemini := NewGeminiProvider(apiBase, apiBase)
+
+	poolDir := t.TempDir()
+	redirectURI := "http://localhost:8989/oauth-callback"
+	h := &proxyHandler{
+		cfg:      config{poolDir: poolDir},
+		pool:     newPoolState(nil, false),
+		registry: NewProviderRegistry(codex, claude, gemini),
+		refreshTransport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.String() {
+			case geminiOAuthTokenURL:
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatalf("read request body: %v", err)
+				}
+				values, err := url.ParseQuery(string(body))
+				if err != nil {
+					t.Fatalf("parse form: %v", err)
+				}
+				if values.Get("grant_type") != "authorization_code" {
+					t.Fatalf("grant_type=%q", values.Get("grant_type"))
+				}
+				if values.Get("redirect_uri") != redirectURI {
+					t.Fatalf("redirect_uri=%q", values.Get("redirect_uri"))
+				}
+				if values.Get("client_id") != geminiOAuthAntigravityClientID {
+					t.Fatalf("client_id=%q", values.Get("client_id"))
+				}
+				return jsonResponse(http.StatusOK, `{"access_token":"oauth-access","refresh_token":"oauth-refresh","token_type":"Bearer","scope":"scope","expires_in":3600}`), nil
+			case managedGeminiOAuthUserInfoURL:
+				return jsonResponse(http.StatusOK, `{"email":"seat@example.com","name":"Seat Example"}`), nil
+			case "https://api.example.com/v1internal:onboardUser":
+				return jsonResponse(http.StatusOK, `{"done":true,"response":{"cloudaicompanionProject":{"id":"psyched-sphere-vj8c5"}}}`), nil
+			case "https://api.example.com/v1internal:loadCodeAssist":
+				return jsonResponse(http.StatusOK, `{"cloudaicompanionProject":"psyched-sphere-vj8c5","currentTier":{"id":"standard-tier","name":"Standard"}}`), nil
+			default:
+				t.Fatalf("unexpected request URL: %s", req.URL.String())
+			}
+			return nil, nil
+		}),
+	}
+
+	antigravityGeminiOAuthSessions.Lock()
+	antigravityGeminiOAuthSessions.sessions = map[string]*antigravityGeminiOAuthSession{
+		"state-1": {
+			State:       "state-1",
+			RedirectURI: redirectURI,
+			CreatedAt:   time.Now().UTC(),
+		},
+	}
+	antigravityGeminiOAuthSessions.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/oauth-callback?code=test-code&state=state-1", nil)
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "Antigravity Gemini seat added") {
+		t.Fatalf("unexpected body=%s", rr.Body.String())
+	}
+	if h.pool.count() != 1 {
+		t.Fatalf("pool count=%d", h.pool.count())
+	}
+
+	entries, err := os.ReadDir(filepath.Join(poolDir, managedGeminiSubdir))
+	if err != nil {
+		t.Fatalf("read gemini dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("unexpected gemini files: %+v", entries)
+	}
+	saved, err := os.ReadFile(filepath.Join(poolDir, managedGeminiSubdir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("read saved seat: %v", err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(saved, &root); err != nil {
+		t.Fatalf("decode saved seat: %v", err)
+	}
+	if root["operator_source"] != geminiOperatorSourceAntigravityImport {
+		t.Fatalf("saved operator_source=%#v", root["operator_source"])
+	}
+	if root["oauth_profile_id"] != geminiOAuthAntigravityProfileID {
+		t.Fatalf("saved oauth_profile_id=%#v", root["oauth_profile_id"])
+	}
+	if _, ok := root["client_id"]; ok {
+		t.Fatalf("expected saved client_id to be dropped once oauth_profile_id is persisted: %#v", root["client_id"])
+	}
+	if root["antigravity_project_id"] != "psyched-sphere-vj8c5" {
+		t.Fatalf("saved antigravity_project_id=%#v", root["antigravity_project_id"])
+	}
+	if root["antigravity_source"] != "browser_oauth" {
+		t.Fatalf("saved antigravity_source=%#v", root["antigravity_source"])
+	}
+	if root["operator_email"] != "seat@example.com" {
+		t.Fatalf("saved operator_email=%#v", root["operator_email"])
+	}
+	if root["gemini_subscription_tier_id"] != "standard-tier" {
+		t.Fatalf("saved gemini_subscription_tier_id=%#v", root["gemini_subscription_tier_id"])
+	}
+	if root["gemini_subscription_tier_name"] != "Standard" {
+		t.Fatalf("saved gemini_subscription_tier_name=%#v", root["gemini_subscription_tier_name"])
+	}
+	if _, ok := root["gemini_provider_checked_at"]; !ok {
+		t.Fatalf("expected gemini_provider_checked_at to be persisted: %#v", root)
+	}
+}
+
+func TestLocalOperatorGeminiAntigravityOAuthCallbackBootstrapsOnboardBeforeLoadCodeAssist(t *testing.T) {
+	resetAntigravityGeminiOAuthSessions()
+	t.Cleanup(resetAntigravityGeminiOAuthSessions)
+
+	apiBase, err := url.Parse("https://api.example.com")
+	if err != nil {
+		t.Fatalf("parse api base: %v", err)
+	}
+	codex := NewCodexProvider(apiBase, apiBase, apiBase, apiBase)
+	claude := NewClaudeProvider(apiBase)
+	gemini := NewGeminiProvider(apiBase, apiBase)
+
+	poolDir := t.TempDir()
+	redirectURI := "http://localhost:8989/oauth-callback"
+	var calls []string
+	h := &proxyHandler{
+		cfg:      config{poolDir: poolDir},
+		pool:     newPoolState(nil, false),
+		registry: NewProviderRegistry(codex, claude, gemini),
+		refreshTransport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			switch req.URL.String() {
+			case geminiOAuthTokenURL:
+				return jsonResponse(http.StatusOK, `{"access_token":"oauth-access","refresh_token":"oauth-refresh","token_type":"Bearer","scope":"scope","expires_in":3600}`), nil
+			case managedGeminiOAuthUserInfoURL:
+				return jsonResponse(http.StatusOK, `{"email":"seat@example.com","name":"Seat Example"}`), nil
+			case "https://api.example.com/v1internal:onboardUser":
+				calls = append(calls, "onboard")
+				body, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatalf("read onboard body: %v", err)
+				}
+				if !strings.Contains(string(body), `"tierId":"standard-tier"`) {
+					t.Fatalf("unexpected onboard payload=%s", string(body))
+				}
+				return jsonResponse(http.StatusOK, `{"done":true,"response":{"cloudaicompanionProject":{"id":"psyched-sphere-vj8c5"}}}`), nil
+			case "https://api.example.com/v1internal:loadCodeAssist":
+				calls = append(calls, "load")
+				return jsonResponse(http.StatusOK, `{"cloudaicompanionProject":"psyched-sphere-vj8c5"}`), nil
+			default:
+				t.Fatalf("unexpected request URL: %s", req.URL.String())
+			}
+			return nil, nil
+		}),
+	}
+
+	antigravityGeminiOAuthSessions.Lock()
+	antigravityGeminiOAuthSessions.sessions = map[string]*antigravityGeminiOAuthSession{
+		"state-1": {
+			State:       "state-1",
+			RedirectURI: redirectURI,
+			CreatedAt:   time.Now().UTC(),
+		},
+	}
+	antigravityGeminiOAuthSessions.Unlock()
+
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/oauth-callback?code=test-code&state=state-1", nil)
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if len(calls) == 0 || calls[0] != "onboard" {
+		t.Fatalf("call order=%v, want onboard first", calls)
 	}
 }
 
@@ -1501,8 +1979,8 @@ func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 	for _, fragment := range []string{
 		"Start Codex OAuth",
 		"Fallback API Pool",
-		"Managed Gemini OAuth",
-		"Start Managed Gemini OAuth",
+		"Antigravity Gemini Auth",
+		"Start Antigravity Gemini Auth",
 		"Manual Gemini Import",
 		"Add API Key",
 		"Import oauth_creds.json",
@@ -1510,7 +1988,7 @@ func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 		"gemini-seat-json-input",
 		"/operator/codex/api-key-add",
 		"/operator/gemini/import-oauth-creds",
-		"/operator/gemini/oauth-start",
+		"/operator/gemini/antigravity/oauth-start",
 		"/operator/account-delete",
 		"deleteAccountFromStatus",
 		"account-action-status",
@@ -1522,8 +2000,8 @@ func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 		"refreshes this page automatically when pool seat state changes",
 		"Waiting for pool seat state to change...",
 		"Waiting for pool seat state to change.",
-		"Waiting for the Gemini seat state to change...",
-		"Timed out waiting for the Gemini seat state to change.",
+		"Waiting for the Antigravity Gemini seat state to change...",
+		"Timed out waiting for the Antigravity Gemini seat state to change.",
 		"codex-oauth-result",
 		"gemini_oauth_result",
 		"auth_expires_at",
@@ -1580,12 +2058,12 @@ func TestServeStatusPageHidesOperatorActionOutsideLoopback(t *testing.T) {
 		"codex_pool_manager.py codex-oauth-start",
 		"/operator/codex/oauth-start",
 		"Fallback API Pool",
-		"Managed Gemini OAuth",
-		"Start Managed Gemini OAuth",
+		"Antigravity Gemini Auth",
+		"Start Antigravity Gemini Auth",
 		"Manual Gemini Import",
 		"/operator/codex/api-key-add",
 		"/operator/gemini/import-oauth-creds",
-		"/operator/gemini/oauth-start",
+		"/operator/gemini/antigravity/oauth-start",
 		"/operator/account-delete",
 	} {
 		if strings.Contains(body, forbidden) {

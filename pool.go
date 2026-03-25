@@ -33,6 +33,7 @@ const (
 const (
 	geminiOperatorSourceManagedOAuth       = "managed_oauth"
 	geminiOperatorSourceManualImport       = "manual_import"
+	geminiOperatorSourceAntigravityImport  = "antigravity_import"
 	geminiOperatorSourceManualImportLegacy = "manual_import_legacy"
 )
 
@@ -131,6 +132,22 @@ func routingStateLocked(a *Account, now time.Time, accountType AccountType, requ
 		state.BlockReason = "missing_gateway_state"
 		return state
 	}
+	if a.Type == AccountTypeGemini {
+		switch {
+		case a.AntigravityProxyDisabled:
+			state.Eligible = false
+			state.BlockReason = "proxy_disabled"
+			return state
+		case a.AntigravityValidationBlocked:
+			state.Eligible = false
+			state.BlockReason = "validation_blocked"
+			return state
+		case a.AntigravityQuotaForbidden:
+			state.Eligible = false
+			state.BlockReason = "quota_forbidden"
+			return state
+		}
+	}
 	if !a.RateLimitUntil.IsZero() && a.RateLimitUntil.After(now) {
 		state.Eligible = false
 		state.BlockReason = "rate_limited"
@@ -169,10 +186,29 @@ type Account struct {
 	RefreshToken string
 	IDToken      string
 	// Optional provider OAuth client metadata for providers that support multiple public clients.
-	OAuthProfileID    string
-	OAuthClientID     string
-	OAuthClientSecret string
-	OperatorSource    string
+	OAuthProfileID                  string
+	OAuthClientID                   string
+	OAuthClientSecret               string
+	OperatorSource                  string
+	OperatorEmail                   string
+	AntigravitySource               string
+	AntigravityAccountID            string
+	AntigravityEmail                string
+	AntigravityName                 string
+	AntigravityProjectID            string
+	AntigravityFile                 string
+	AntigravityCurrent              bool
+	AntigravityProxyDisabled        bool
+	AntigravityValidationBlocked    bool
+	AntigravityQuotaForbidden       bool
+	AntigravityQuotaForbiddenReason string
+	AntigravityQuota                map[string]any
+	GeminiSubscriptionTierID        string
+	GeminiSubscriptionTierName      string
+	GeminiValidationReasonCode      string
+	GeminiValidationMessage         string
+	GeminiValidationURL             string
+	GeminiProviderCheckedAt         time.Time
 	// AccountID corresponds to Codex `auth.json` field `tokens.account_id`.
 	// Codex uses this value as the `ChatGPT-Account-ID` header.
 	AccountID string
@@ -234,13 +270,35 @@ func normalizeGeminiOperatorSource(source, profileID string, accountType Account
 		return geminiOperatorSourceManagedOAuth
 	case geminiOperatorSourceManualImport:
 		return geminiOperatorSourceManualImport
+	case geminiOperatorSourceAntigravityImport:
+		return geminiOperatorSourceAntigravityImport
 	case geminiOperatorSourceManualImportLegacy:
 		return geminiOperatorSourceManualImportLegacy
 	}
 	if strings.TrimSpace(profileID) != "" {
 		return geminiOperatorSourceManagedOAuth
 	}
-	return geminiOperatorSourceManualImportLegacy
+	return ""
+}
+
+func storedGeminiOperatorSource(source, profileID string, accountType AccountType) string {
+	if accountType != AccountTypeGemini {
+		return ""
+	}
+	switch strings.TrimSpace(source) {
+	case geminiOperatorSourceManagedOAuth:
+		return geminiOperatorSourceManagedOAuth
+	case geminiOperatorSourceManualImport:
+		return geminiOperatorSourceManualImport
+	case geminiOperatorSourceAntigravityImport:
+		return geminiOperatorSourceAntigravityImport
+	case geminiOperatorSourceManualImportLegacy:
+		return geminiOperatorSourceManualImportLegacy
+	}
+	if strings.TrimSpace(profileID) != "" {
+		return geminiOperatorSourceManagedOAuth
+	}
+	return ""
 }
 
 func codexAccountCountsAgainstQuota(a *Account) bool {
@@ -373,25 +431,43 @@ type TokenData struct {
 // GeminiAuthJSON is the format for Gemini oauth_creds.json files.
 // Files should be named gemini_*.json in the pool folder.
 type GeminiAuthJSON struct {
-	AccessToken     string     `json:"access_token"`
-	RefreshToken    string     `json:"refresh_token"`
-	TokenType       string     `json:"token_type"`
-	Scope           string     `json:"scope"`
-	OAuthProfileID  string     `json:"oauth_profile_id,omitempty"`
-	ClientID        string     `json:"client_id,omitempty"`
-	ClientSecret    string     `json:"client_secret,omitempty"`
-	OperatorSource  string     `json:"operator_source,omitempty"`
-	ExpiryDate      int64      `json:"expiry_date"`  // Unix timestamp in milliseconds
-	PlanType        string     `json:"plan_type"`    // e.g., "ultra", "gemini"
-	LastRefresh     string     `json:"last_refresh"` // RFC3339 timestamp of last refresh attempt
-	LastHealthyAt   *time.Time `json:"last_healthy_at,omitempty"`
-	HealthCheckedAt *time.Time `json:"health_checked_at,omitempty"`
-	DeadSince       *time.Time `json:"dead_since,omitempty"`
-	HealthStatus    string     `json:"health_status,omitempty"`
-	HealthError     string     `json:"health_error,omitempty"`
-	RateLimitUntil  *time.Time `json:"rate_limit_until,omitempty"`
-	Disabled        bool       `json:"disabled,omitempty"`
-	Dead            bool       `json:"dead,omitempty"`
+	AccessToken                  string         `json:"access_token"`
+	RefreshToken                 string         `json:"refresh_token"`
+	TokenType                    string         `json:"token_type"`
+	Scope                        string         `json:"scope"`
+	OAuthProfileID               string         `json:"oauth_profile_id,omitempty"`
+	ClientID                     string         `json:"client_id,omitempty"`
+	ClientSecret                 string         `json:"client_secret,omitempty"`
+	OperatorSource               string         `json:"operator_source,omitempty"`
+	OperatorEmail                string         `json:"operator_email,omitempty"`
+	OperatorName                 string         `json:"operator_name,omitempty"`
+	ExpiryDate                   int64          `json:"expiry_date"`  // Unix timestamp in milliseconds
+	PlanType                     string         `json:"plan_type"`    // e.g., "ultra", "gemini"
+	LastRefresh                  string         `json:"last_refresh"` // RFC3339 timestamp of last refresh attempt
+	LastHealthyAt                *time.Time     `json:"last_healthy_at,omitempty"`
+	HealthCheckedAt              *time.Time     `json:"health_checked_at,omitempty"`
+	DeadSince                    *time.Time     `json:"dead_since,omitempty"`
+	HealthStatus                 string         `json:"health_status,omitempty"`
+	HealthError                  string         `json:"health_error,omitempty"`
+	RateLimitUntil               *time.Time     `json:"rate_limit_until,omitempty"`
+	Disabled                     bool           `json:"disabled,omitempty"`
+	Dead                         bool           `json:"dead,omitempty"`
+	AntigravitySource            string         `json:"antigravity_source,omitempty"`
+	AntigravityAccountID         string         `json:"antigravity_account_id,omitempty"`
+	AntigravityEmail             string         `json:"antigravity_email,omitempty"`
+	AntigravityName              string         `json:"antigravity_name,omitempty"`
+	AntigravityProjectID         string         `json:"antigravity_project_id,omitempty"`
+	AntigravityFile              string         `json:"antigravity_file,omitempty"`
+	AntigravityCurrent           bool           `json:"antigravity_current,omitempty"`
+	AntigravityProxyDisabled     bool           `json:"antigravity_proxy_disabled,omitempty"`
+	AntigravityValidationBlocked bool           `json:"antigravity_validation_blocked,omitempty"`
+	AntigravityQuota             map[string]any `json:"antigravity_quota,omitempty"`
+	GeminiSubscriptionTierID     string         `json:"gemini_subscription_tier_id,omitempty"`
+	GeminiSubscriptionTierName   string         `json:"gemini_subscription_tier_name,omitempty"`
+	GeminiValidationReasonCode   string         `json:"gemini_validation_reason_code,omitempty"`
+	GeminiValidationMessage      string         `json:"gemini_validation_message,omitempty"`
+	GeminiValidationURL          string         `json:"gemini_validation_url,omitempty"`
+	GeminiProviderCheckedAt      *time.Time     `json:"gemini_provider_checked_at,omitempty"`
 }
 
 // ClaudeAuthJSON is the format for Claude auth files.
@@ -1283,12 +1359,33 @@ func saveGeminiAccount(a *Account) error {
 			delete(root, "client_secret")
 		}
 	}
-	operatorSource := strings.TrimSpace(a.OperatorSource)
+	operatorSource := storedGeminiOperatorSource(a.OperatorSource, a.OAuthProfileID, a.Type)
 	if operatorSource != "" {
 		root["operator_source"] = operatorSource
 	} else {
 		delete(root, "operator_source")
 	}
+	setJSONField(root, "operator_email", strings.TrimSpace(a.OperatorEmail), strings.TrimSpace(a.OperatorEmail) != "")
+	setJSONField(root, "antigravity_source", strings.TrimSpace(a.AntigravitySource), strings.TrimSpace(a.AntigravitySource) != "")
+	setJSONField(root, "antigravity_account_id", strings.TrimSpace(a.AntigravityAccountID), strings.TrimSpace(a.AntigravityAccountID) != "")
+	setJSONField(root, "antigravity_email", strings.TrimSpace(a.AntigravityEmail), strings.TrimSpace(a.AntigravityEmail) != "")
+	setJSONField(root, "antigravity_name", strings.TrimSpace(a.AntigravityName), strings.TrimSpace(a.AntigravityName) != "")
+	setJSONField(root, "antigravity_project_id", strings.TrimSpace(a.AntigravityProjectID), strings.TrimSpace(a.AntigravityProjectID) != "")
+	setJSONField(root, "antigravity_file", strings.TrimSpace(a.AntigravityFile), strings.TrimSpace(a.AntigravityFile) != "")
+	setJSONField(root, "antigravity_current", true, a.AntigravityCurrent)
+	setJSONField(root, "antigravity_proxy_disabled", true, a.AntigravityProxyDisabled)
+	setJSONField(root, "antigravity_validation_blocked", true, a.AntigravityValidationBlocked)
+	if len(a.AntigravityQuota) > 0 {
+		root["antigravity_quota"] = a.AntigravityQuota
+	} else {
+		delete(root, "antigravity_quota")
+	}
+	setJSONField(root, "gemini_subscription_tier_id", strings.TrimSpace(a.GeminiSubscriptionTierID), strings.TrimSpace(a.GeminiSubscriptionTierID) != "")
+	setJSONField(root, "gemini_subscription_tier_name", strings.TrimSpace(a.GeminiSubscriptionTierName), strings.TrimSpace(a.GeminiSubscriptionTierName) != "")
+	setJSONField(root, "gemini_validation_reason_code", strings.TrimSpace(a.GeminiValidationReasonCode), strings.TrimSpace(a.GeminiValidationReasonCode) != "")
+	setJSONField(root, "gemini_validation_message", strings.TrimSpace(a.GeminiValidationMessage), strings.TrimSpace(a.GeminiValidationMessage) != "")
+	setJSONField(root, "gemini_validation_url", strings.TrimSpace(a.GeminiValidationURL), strings.TrimSpace(a.GeminiValidationURL) != "")
+	setJSONTimeField(root, "gemini_provider_checked_at", a.GeminiProviderCheckedAt)
 	if !a.ExpiresAt.IsZero() {
 		root["expiry_date"] = a.ExpiresAt.UnixMilli()
 	}

@@ -8,6 +8,25 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.7.0] - 2026-03-25
+
+### Добавлено
+- Antigravity-backed Gemini onboarding на `/` и `/status`: browser OAuth start/callback, нормализация импорта Antigravity account JSON, bootstrap Code Assist project и сохранение provider-truth полей, нужных для маршрутизации.
+- Facade для pooled Gemini `/v1beta/models/*:generateContent|streamGenerateContent`, который переписывает поддержанные запросы в Code Assist `v1internal` lane для импортированных Antigravity-backed seat’ов.
+- Сквозная Claude request-trace корреляция от wrapper до pool: trace headers, счетчики SSE/usage events, детекция `chunk_gap` и явная диагностика idle-timeout.
+- Focused regression coverage для Gemini provider persistence, Antigravity onboarding, dashboard/operator JSON truth, setup scripts, facade transforms и request-trace поведения.
+
+### Изменено
+- Setup scripts для Gemini CLI теперь удерживают клиент в external API key mode через `GEMINI_API_KEY` и `GOOGLE_GEMINI_BASE_URL`, а не через прежнюю OAuth-bypass схему env-переменных.
+- Gemini seat persistence и routing теперь сохраняют provenance/operator source и provider block-state поля: `proxy_disabled`, `validation_blocked`, quota-forbidden state, subscription tier и validation metadata.
+- `/status`, `/status?format=json` и landing теперь описывают Gemini seat’ы с Antigravity import provenance и provider-truth полями вместо того, чтобы сводить все non-managed seat’ы к одной generic manual-import lane.
+- Явные operator force-refresh path теперь обходят Gemini per-account refresh throttle, когда оператор действительно просит реальный refresh.
+
+### Исправлено
+- Gemini `v1beta` запросы больше не попадают на импортированные seat’ы без Antigravity project ID, который обязателен для Code Assist facade.
+- Детекция idle SSE timeout теперь сохраняет реальный timeout state вместо того, чтобы растворяться в generic downstream `context canceled`.
+- Local Claude tracing теперь можно коррелировать end-to-end без утечки wrapper-only headers в upstream.
+
 ## [0.6.1] - 2026-03-24
 
 ### Изменено

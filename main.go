@@ -44,6 +44,11 @@ type config struct {
 	debug                bool
 	logBodies            bool
 	bodyLogLimit         int64
+	traceRequests        bool
+	tracePackets         bool
+	tracePayloads        bool
+	tracePayloadLimit    int
+	traceStallGap        time.Duration
 	maxInMemoryBodyBytes int64
 	flushInterval        time.Duration
 	usageRefresh         time.Duration
@@ -118,6 +123,20 @@ func buildConfig() config {
 	if v := getenv("PROXY_BODY_LOG_LIMIT", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n > 0 {
 			cfg.bodyLogLimit = n
+		}
+	}
+	cfg.traceRequests = getenv("PROXY_TRACE_REQUESTS", "0") == "1"
+	cfg.tracePackets = getenv("PROXY_TRACE_PACKETS", "0") == "1"
+	cfg.tracePayloads = getenv("PROXY_TRACE_PAYLOADS", "0") == "1"
+	cfg.tracePayloadLimit = 512
+	if v := getenv("PROXY_TRACE_PAYLOAD_LIMIT", ""); v != "" {
+		if n, err := parseInt64(v); err == nil && n > 0 {
+			cfg.tracePayloadLimit = int(n)
+		}
+	}
+	if v := getenv("PROXY_TRACE_STALL_GAP_MS", ""); v != "" {
+		if ms, err := parseInt64(v); err == nil && ms > 0 {
+			cfg.traceStallGap = time.Duration(ms) * time.Millisecond
 		}
 	}
 	cfg.maxInMemoryBodyBytes = 16 * 1024 * 1024 // 16 MiB
@@ -317,8 +336,8 @@ func main() {
 	} else {
 		log.Printf("WARNING: no admin token configured")
 	}
-	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v)",
-		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout)
+	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, trace_requests=%v, trace_packets=%v, trace_payloads=%v, trace_stall_gap=%v)",
+		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.traceRequests, cfg.tracePackets, cfg.tracePayloads, cfg.traceStallGap)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
@@ -1140,6 +1159,7 @@ func (h *proxyHandler) runBufferedAttemptContour(
 	reqID string,
 	routePlan RoutePlan,
 ) (*bufferedAttemptSuccess, bool) {
+	trace := requestTraceFromContext(ctx)
 	attempts := h.cfg.maxAttempts
 	if attempts <= 0 {
 		attempts = 1
@@ -1158,15 +1178,17 @@ func (h *proxyHandler) runBufferedAttemptContour(
 	var lastStatus int
 
 	for attempt := 1; attempt <= attempts; attempt++ {
-		acc := h.pool.candidate(routePlan.Shape.ConversationID, exclude, routePlan.AccountType, routePlan.RequiredPlan)
+		acc := h.candidateSupportingPath(routePlan.Shape.ConversationID, exclude, routePlan.AccountType, routePlan.RequiredPlan, routePlan.Provider, r.URL.Path)
 		if acc == nil {
 			writeBufferedUnavailableAccountError(w, lastErr, routePlan.AccountType, routePlan.RequiredPlan, routePlan.Shape.RequestedModel)
 			return nil, true
 		}
-		exclude[acc.ID] = true
 
 		atomic.AddInt64(&acc.Inflight, 1)
 		atomic.AddInt64(&h.inflight, 1)
+		if trace != nil {
+			trace.noteRoute(routePlan, acc, routePlan.TargetBase, "buffered", attempt, attempts)
+		}
 
 		resp, sampleBuf, refreshFailed, err := h.tryOnce(ctx, r, bodyBytes, routePlan.TargetBase, routePlan.Provider, acc, reqID)
 
@@ -1199,10 +1221,40 @@ func (h *proxyHandler) runBufferedAttemptContour(
 	return nil, true
 }
 
+func (h *proxyHandler) candidateSupportingPath(conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string, provider Provider, path string) *Account {
+	if h == nil || h.pool == nil {
+		return nil
+	}
+	if exclude == nil {
+		exclude = map[string]bool{}
+	}
+
+	attempts := h.pool.count()
+	if accountType != "" {
+		if n := h.pool.countByType(accountType); n > 0 {
+			attempts = n
+		}
+	}
+
+	for attempt := 0; attempt < attempts; attempt++ {
+		acc := h.pool.candidate(conversationID, exclude, accountType, requiredPlan)
+		if acc == nil {
+			return nil
+		}
+		exclude[acc.ID] = true
+		if providerSupportsPathForAccount(provider, path, acc) {
+			return acc
+		}
+	}
+
+	return nil
+}
+
 func (h *proxyHandler) deliverCopiedProxyResponse(
 	w http.ResponseWriter,
 	cancel context.CancelFunc,
 	reqID string,
+	trace *requestTrace,
 	provider Provider,
 	acc *Account,
 	userID string,
@@ -1235,6 +1287,9 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 	respContentType := resp.Header.Get("Content-Type")
 	// Use provider's SSE detection logic.
 	isSSE := provider.DetectsSSE(opts.requestPath, respContentType)
+	if trace != nil {
+		trace.noteResponse(resp.StatusCode, resp, isSSE)
+	}
 	if opts.flushAfterWrite && !isSSE && flusher != nil {
 		flusher.Flush()
 	}
@@ -1249,6 +1304,7 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 		fw = &flushWriter{w: w, f: flusher, flushInterval: h.cfg.flushInterval}
 		writer = fw
 	}
+	writer = newTraceWriter(writer, trace)
 	managedStreamFailed := false
 	var managedStreamFailureOnce sync.Once
 
@@ -1276,6 +1332,7 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 			provider,
 			acc,
 			userID,
+			trace,
 			headerPrimaryPct,
 			headerSecondaryPct,
 			&managedStreamFailed,
@@ -1286,7 +1343,13 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 	// Wrap response body with idle timeout to kill zombie SSE connections.
 	var idleReader *idleTimeoutReader
 	if isSSE && h.cfg.streamIdleTimeout > 0 {
-		idleReader = newIdleTimeoutReader(resp.Body, h.cfg.streamIdleTimeout, cancel)
+		var onIdleTimeout func()
+		if trace != nil {
+			onIdleTimeout = func() {
+				trace.noteIdleTimeout(h.cfg.streamIdleTimeout)
+			}
+		}
+		idleReader = newIdleTimeoutReader(resp.Body, h.cfg.streamIdleTimeout, cancel, onIdleTimeout)
 		resp.Body = idleReader
 	}
 
@@ -1302,13 +1365,14 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 	if sampleBuf != nil {
 		respSample = sampleBuf.Bytes()
 	}
-	return h.finalizeCopiedProxyResponse(reqID, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, opts.initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, copyErr, idleReader != nil, start, opts.debugLabel)
+	return h.finalizeCopiedProxyResponse(reqID, trace, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, opts.initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, copyErr, idleReader != nil, start, opts.debugLabel)
 }
 
 func (h *proxyHandler) deliverBufferedAttemptSuccess(
 	w http.ResponseWriter,
 	cancel context.CancelFunc,
 	reqID string,
+	trace *requestTrace,
 	provider Provider,
 	attemptSuccess *bufferedAttemptSuccess,
 	requestPath string,
@@ -1323,6 +1387,7 @@ func (h *proxyHandler) deliverBufferedAttemptSuccess(
 		w,
 		cancel,
 		reqID,
+		trace,
 		provider,
 		attemptSuccess.acc,
 		userID,
@@ -1343,6 +1408,7 @@ func (h *proxyHandler) deliverStreamedProxyResponse(
 	w http.ResponseWriter,
 	cancel context.CancelFunc,
 	reqID string,
+	trace *requestTrace,
 	requestPath string,
 	provider Provider,
 	acc *Account,
@@ -1355,6 +1421,7 @@ func (h *proxyHandler) deliverStreamedProxyResponse(
 		w,
 		cancel,
 		reqID,
+		trace,
 		provider,
 		acc,
 		userID,
@@ -1372,6 +1439,10 @@ func (h *proxyHandler) deliverStreamedProxyResponse(
 func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqID string) {
 	start := time.Now()
 	admission := h.resolveProxyAdmission(r, reqID)
+	trace := requestTraceFromContext(r.Context())
+	if trace != nil {
+		trace.noteAdmission(admission)
+	}
 	if admission.Kind == AdmissionKindPassthrough {
 		h.proxyPassthrough(w, r, reqID, admission.ProviderType, start)
 		return
@@ -1501,7 +1572,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		return
 	}
 
-	if !h.deliverBufferedAttemptSuccess(w, cancel, reqID, provider, attemptSuccess, r.URL.Path, userID, conversationID, start) {
+	if !h.deliverBufferedAttemptSuccess(w, cancel, reqID, trace, provider, attemptSuccess, r.URL.Path, userID, conversationID, start) {
 		return
 	}
 	return
@@ -1515,7 +1586,7 @@ func (h *proxyHandler) proxyRequestWebSocket(w http.ResponseWriter, r *http.Requ
 	provider := routePlan.Provider
 	targetBase := routePlan.TargetBase
 
-	acc := h.pool.candidate(conversationID, map[string]bool{}, accountType, routePlan.RequiredPlan)
+	acc := h.candidateSupportingPath(conversationID, map[string]bool{}, accountType, routePlan.RequiredPlan, provider, r.URL.Path)
 	if acc == nil {
 		http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
 		return
@@ -1617,6 +1688,7 @@ func (h *proxyHandler) servePooledWebSocketProxy(
 			pr.Out.URL.RawQuery = outURL.RawQuery
 			pr.Out.Host = targetBase.Host
 			pr.Out.Header = cloneHeader(pr.In.Header)
+			stripLocalTraceHeaders(pr.Out.Header)
 
 			// Always overwrite client-provided auth for pooled accounts.
 			pr.Out.Header.Del("Authorization")
@@ -1731,6 +1803,7 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 			pr.Out.URL.RawQuery = outURL.RawQuery
 			pr.Out.Host = targetBase.Host
 			pr.Out.Header = cloneHeader(pr.In.Header)
+			stripLocalTraceHeaders(pr.Out.Header)
 			removeConflictingProxyHeaders(pr.Out.Header)
 
 			if providerType == AccountTypeClaude && pr.Out.Header.Get("anthropic-version") == "" {
@@ -1771,12 +1844,13 @@ func (h *proxyHandler) proxyPassthroughWebSocket(
 
 func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Request, reqID string, routePlan RoutePlan) {
 	start := time.Now()
+	trace := requestTraceFromContext(r.Context())
 	accountType := routePlan.AccountType
 	userID := routePlan.Admission.UserID
 	provider := routePlan.Provider
 	targetBase := routePlan.TargetBase
 
-	acc := h.pool.candidate(routePlan.Shape.ConversationID, map[string]bool{}, accountType, routePlan.RequiredPlan)
+	acc := h.candidateSupportingPath(routePlan.Shape.ConversationID, map[string]bool{}, accountType, routePlan.RequiredPlan, provider, r.URL.Path)
 	if acc == nil {
 		http.Error(w, fmt.Sprintf("no live %s accounts", accountType), http.StatusServiceUnavailable)
 		return
@@ -1826,6 +1900,9 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	targetBase = providerUpstreamURLForAccount(provider, r.URL.Path, acc)
+	if trace != nil {
+		trace.noteRoute(routePlan, acc, targetBase, "streamed", 1, 1)
+	}
 
 	outURL := new(url.URL)
 	*outURL = *r.URL
@@ -1864,6 +1941,8 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	outReq.Header = cloneHeader(r.Header)
 	removeHopByHopHeaders(outReq.Header)
 	removeConflictingProxyHeaders(outReq.Header)
+	stripLocalTraceHeaders(outReq.Header)
+	stripLocalTraceHeaders(outReq.Header)
 	if r.ContentLength >= 0 {
 		outReq.ContentLength = r.ContentLength
 	}
@@ -1902,6 +1981,9 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 
 	resp, err := h.transport.RoundTrip(outReq)
 	if err != nil {
+		if trace != nil {
+			trace.noteTransportError("streamed_roundtrip", acc, err)
+		}
 		acc.mu.Lock()
 		acc.Penalty += 0.2
 		acc.mu.Unlock()
@@ -1919,7 +2001,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	if statusHandling.NeedStatusBody && !isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 		log.Printf("[%s] account %s got %d from %s, body=%s", reqID, acc.ID, resp.StatusCode, outReq.URL.Host, safeText(statusHandling.InspectedBody))
 	}
-	if !h.deliverStreamedProxyResponse(w, cancel, reqID, r.URL.Path, provider, acc, userID, resp, statusHandling.NeedStatusBody, start) {
+	if !h.deliverStreamedProxyResponse(w, cancel, reqID, trace, r.URL.Path, provider, acc, userID, resp, statusHandling.NeedStatusBody, start) {
 		return
 	}
 }
@@ -1988,7 +2070,7 @@ func parseRetryAfter(h http.Header) (time.Duration, bool) {
 	return 0, false
 }
 
-func (h *proxyHandler) finalizeCopiedProxyResponse(reqID string, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte, copyErr error, logStreamError bool, start time.Time, debugLabel string) bool {
+func (h *proxyHandler) finalizeCopiedProxyResponse(reqID string, trace *requestTrace, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte, copyErr error, logStreamError bool, start time.Time, debugLabel string) bool {
 	if acc == nil {
 		return false
 	}
@@ -2002,12 +2084,18 @@ func (h *proxyHandler) finalizeCopiedProxyResponse(reqID string, provider Provid
 		if logStreamError {
 			log.Printf("[%s] SSE stream error (account=%s): %v", reqID, acc.ID, copyErr)
 		}
+		if trace != nil {
+			trace.noteFinish(statusCode, isSSE, managedStreamFailed, copyErr)
+		}
 		return false
 	}
 
 	h.finalizeProxyResponse(reqID, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample)
 	if h.metrics != nil {
 		h.metrics.inc(strconv.Itoa(statusCode), acc.ID)
+	}
+	if trace != nil {
+		trace.noteFinish(statusCode, isSSE, managedStreamFailed, nil)
 	}
 	if h.cfg.debug {
 		log.Printf("[%s] %s status=%d account=%s duration_ms=%d", reqID, debugLabel, statusCode, acc.ID, time.Since(start).Milliseconds())
@@ -2267,6 +2355,7 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 	outReq.Header = cloneHeader(r.Header)
 	removeHopByHopHeaders(outReq.Header)
 	removeConflictingProxyHeaders(outReq.Header)
+	stripLocalTraceHeaders(outReq.Header)
 
 	// For Claude, ensure required headers are set
 	if providerType == AccountTypeClaude {
@@ -2322,7 +2411,9 @@ func (h *proxyHandler) proxyPassthrough(w http.ResponseWriter, r *http.Request, 
 	// Wrap response body with idle timeout to kill zombie SSE connections.
 	var idleReader *idleTimeoutReader
 	if isSSE && h.cfg.streamIdleTimeout > 0 {
-		idleReader = newIdleTimeoutReader(resp.Body, h.cfg.streamIdleTimeout, cancel)
+		idleReader = newIdleTimeoutReader(resp.Body, h.cfg.streamIdleTimeout, cancel, func() {
+			log.Printf("[%s] passthrough SSE idle timeout after %v", reqID, h.cfg.streamIdleTimeout)
+		})
 		defer idleReader.Close()
 	}
 
@@ -2424,7 +2515,9 @@ func (h *proxyHandler) proxyPassthroughStreamed(w http.ResponseWriter, r *http.R
 	// Wrap response body with idle timeout to kill zombie SSE connections.
 	var idleReader *idleTimeoutReader
 	if isSSE && h.cfg.streamIdleTimeout > 0 {
-		idleReader = newIdleTimeoutReader(resp.Body, h.cfg.streamIdleTimeout, cancel)
+		idleReader = newIdleTimeoutReader(resp.Body, h.cfg.streamIdleTimeout, cancel, func() {
+			log.Printf("[%s] passthrough streamed SSE idle timeout after %v", reqID, h.cfg.streamIdleTimeout)
+		})
 		defer idleReader.Close()
 	}
 
@@ -2456,6 +2549,7 @@ func (h *proxyHandler) tryOnce(
 	if acc == nil {
 		return nil, nil, false, errors.New("nil account")
 	}
+	trace := requestTraceFromContext(ctx)
 	refreshFailed := false // Track if refresh was attempted but failed
 
 	if !h.cfg.disableRefresh && h.needsRefresh(acc) {
@@ -2476,7 +2570,17 @@ func (h *proxyHandler) tryOnce(
 		return nil, nil, false, err
 	}
 
+	facadeReq, err := maybeBuildGeminiCodeAssistFacadeRequest(provider, in.URL.Path, bodyBytes, acc, reqID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+
+	requestBody := bodyBytes
 	targetBase = providerUpstreamURLForAccount(provider, in.URL.Path, acc)
+	if facadeReq != nil {
+		targetBase = facadeReq.targetBase
+		requestBody = facadeReq.body
+	}
 
 	outURL := new(url.URL)
 	*outURL = *in.URL
@@ -2484,6 +2588,9 @@ func (h *proxyHandler) tryOnce(
 	outURL.Host = targetBase.Host
 	// Use provider's NormalizePath method for path handling
 	outURL.Path = singleJoin(targetBase.Path, providerNormalizePathForAccount(provider, in.URL.Path, acc))
+	if facadeReq != nil {
+		outURL.Path = singleJoin(targetBase.Path, facadeReq.path)
+	}
 
 	// For Claude OAuth tokens, add beta=true query param (required for OAuth to work)
 	if provider.Type() == AccountTypeClaude && strings.HasPrefix(acc.AccessToken, "sk-ant-oat") {
@@ -2494,8 +2601,8 @@ func (h *proxyHandler) tryOnce(
 
 	buildReq := func() (*http.Request, error) {
 		var body io.Reader
-		if len(bodyBytes) > 0 {
-			body = bytes.NewReader(bodyBytes)
+		if len(requestBody) > 0 {
+			body = bytes.NewReader(requestBody)
 		}
 		outReq, err := http.NewRequestWithContext(ctx, in.Method, outURL.String(), body)
 		if err != nil {
@@ -2506,6 +2613,7 @@ func (h *proxyHandler) tryOnce(
 		outReq.Header = cloneHeader(in.Header)
 		removeHopByHopHeaders(outReq.Header)
 		removeConflictingProxyHeaders(outReq.Header)
+		stripLocalTraceHeaders(outReq.Header)
 
 		// Always overwrite client-provided auth; the proxy is the single source of truth.
 		outReq.Header.Del("Authorization")
@@ -2555,6 +2663,9 @@ func (h *proxyHandler) tryOnce(
 
 	resp, err := h.transport.RoundTrip(outReq)
 	if err != nil {
+		if trace != nil {
+			trace.noteTransportError("buffered_roundtrip", acc, err)
+		}
 		acc.mu.Lock()
 		acc.Penalty += 0.2
 		acc.mu.Unlock()
@@ -2575,7 +2686,7 @@ func (h *proxyHandler) tryOnce(
 		acc.mu.Unlock()
 		if hasRefresh {
 			_ = resp.Body.Close()
-			if err := h.refreshAccount(ctx, acc); err == nil {
+			if err := h.refreshAccountForced(ctx, acc); err == nil {
 				outReq, err = buildReq()
 				if err != nil {
 					return nil, nil, false, err
@@ -2587,6 +2698,9 @@ func (h *proxyHandler) tryOnce(
 				}
 				resp, err = h.transport.RoundTrip(outReq)
 				if err != nil {
+					if trace != nil {
+						trace.noteTransportError("buffered_roundtrip_after_refresh", acc, err)
+					}
 					acc.mu.Lock()
 					acc.Penalty += 0.2
 					acc.mu.Unlock()
@@ -2628,6 +2742,13 @@ func (h *proxyHandler) tryOnce(
 		} else {
 			// No refresh token available - can't recover from 401/403
 			refreshFailed = true
+		}
+	}
+
+	if facadeReq != nil {
+		if err := maybeTransformGeminiCodeAssistFacadeResponse(in.URL.Path, resp); err != nil {
+			_ = resp.Body.Close()
+			return nil, nil, false, err
 		}
 	}
 
@@ -2689,7 +2810,32 @@ const refreshPerAccountInterval = 15 * time.Minute
 
 const defaultRateLimitBackoff = 30 * time.Second
 
+func shouldPersistFailedRefreshAttempt(err error) bool {
+	if err == nil {
+		return true
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch {
+	case strings.Contains(msg, "no configured gemini oauth client"):
+		return false
+	case strings.Contains(msg, "client_secret is missing"):
+		return false
+	case strings.Contains(msg, "invalid_client"):
+		return false
+	default:
+		return true
+	}
+}
+
 func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
+	return h.refreshAccountWithPolicy(ctx, a, false)
+}
+
+func (h *proxyHandler) refreshAccountForced(ctx context.Context, a *Account) error {
+	return h.refreshAccountWithPolicy(ctx, a, true)
+}
+
+func (h *proxyHandler) refreshAccountWithPolicy(ctx context.Context, a *Account, force bool) error {
 	if a == nil {
 		return errors.New("nil account")
 	}
@@ -2715,17 +2861,17 @@ func (h *proxyHandler) refreshAccount(ctx context.Context, a *Account) error {
 		close(call.done)
 	}()
 
-	err := h.refreshAccountOnce(ctx, a)
+	err := h.refreshAccountOnce(ctx, a, force)
 	call.err = err
 	return err
 }
 
-func (h *proxyHandler) refreshAccountOnce(ctx context.Context, a *Account) error {
+func (h *proxyHandler) refreshAccountOnce(ctx context.Context, a *Account, force bool) error {
 	// Per-account rate limiting (persisted to disk via LastRefresh)
 	a.mu.Lock()
 	sinceLastRefresh := time.Since(a.LastRefresh)
 	skipPerAccountThrottle := isGitLabClaudeAccount(a)
-	if !skipPerAccountThrottle && !a.LastRefresh.IsZero() && sinceLastRefresh < refreshPerAccountInterval {
+	if !force && !skipPerAccountThrottle && !a.LastRefresh.IsZero() && sinceLastRefresh < refreshPerAccountInterval {
 		a.mu.Unlock()
 		return fmt.Errorf("account refresh rate limited (%s), wait %v", a.ID, refreshPerAccountInterval-sinceLastRefresh)
 	}
@@ -2749,13 +2895,15 @@ func (h *proxyHandler) refreshAccountOnce(ctx context.Context, a *Account) error
 	}
 	err := provider.RefreshToken(ctx, a, h.refreshTransport)
 
-	a.mu.Lock()
-	a.LastRefresh = time.Now().UTC()
-	a.mu.Unlock()
+	if err == nil || shouldPersistFailedRefreshAttempt(err) {
+		a.mu.Lock()
+		a.LastRefresh = time.Now().UTC()
+		a.mu.Unlock()
+	}
 
 	// Always save to disk after refresh (success or failure)
 	// - On success: persist the new access token
-	// - On failure: persist LastRefresh to prevent retrying for 1 hour
+	// - On failure: persist LastRefresh only for retry-worthy failures
 	if saveErr := saveAccount(a); saveErr != nil {
 		log.Printf("warning: failed to save account %s after refresh: %v", a.ID, saveErr)
 	}

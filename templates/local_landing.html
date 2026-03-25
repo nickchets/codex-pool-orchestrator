@@ -1115,16 +1115,16 @@ brew install claude-code</pre>
                     <div class="surface-header">
                         <div>
                             <h3>Operator Actions</h3>
-                            <p>Managed Gemini OAuth and manual <code>oauth_creds.json</code> imports are separate lanes here.</p>
+                            <p>Antigravity Gemini browser auth and manual imports land in the same Gemini seat pool here.</p>
                         </div>
                     </div>
                     <div class="action-stack">
                         <div class="action-card">
                             <p>
-                                Managed Gemini OAuth creates first-party seats through a local Google OAuth flow.
-                                This lane is shown only when the service has a configured Gemini OAuth client.
+                                Antigravity Gemini browser auth mirrors the original sign-in flow, resolves the Code Assist project automatically,
+                                and stores the result as an Antigravity-backed Gemini seat in this pool.
                             </p>
-                            <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromWeb()">Start Managed Gemini OAuth</button>
+                            <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromWeb()">Start Antigravity Gemini Auth</button>
                             <div id="gemini-oauth-start-status" class="status-line"></div>
                             <div id="gemini-managed-oauth-note" class="status-line"></div>
                             <div id="gemini-oauth-start-result" style="display: none; margin-top: 16px;">
@@ -1133,7 +1133,7 @@ brew install claude-code</pre>
                                     <pre id="gemini-oauth-start-url"></pre>
                                 </div>
                                 <div id="gemini-oauth-start-outcome" class="status-line"></div>
-                                <a id="gemini-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px; color: var(--accent); font-weight: 700; text-decoration: none;">Open OAuth Page</a>
+                                <a id="gemini-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px; color: var(--accent); font-weight: 700; text-decoration: none;">Open Antigravity Auth Page</a>
                             </div>
                         </div>
 
@@ -1245,9 +1245,9 @@ brew install gemini-cli</pre>
 python3 -m webbrowser '{{.BaseURL}}/'
 # Or the raw operator dashboard
 python3 -m webbrowser '{{.BaseURL}}/status'
-# Then click: Start Managed Gemini OAuth
+# Then click: Start Antigravity Gemini Auth
 
-# If you already have a real Gemini oauth_creds.json:
+# If you already have a real Gemini oauth_creds.json or Antigravity account JSON:
 # import it into the Gemini manual-import field on / or /status.</pre>
                             </div>
                         </div>
@@ -1623,24 +1623,24 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                     tone: 'neutral',
                 },
                 {
+                    label: 'Antigravity Seats',
+                    value: formatNumber(geminiOperator.imported_seat_count || 0),
+                    detail: 'Antigravity-backed seats in the shared Gemini pool, including browser auth and manual imports.',
+                    tone: (geminiOperator.imported_seat_count || 0) > 0 ? 'success' : 'neutral',
+                },
+                {
+                    label: 'Managed Fallback',
+                    value: geminiOperator.managed_oauth_available ? 'configured' : 'off',
+                    detail: geminiOperator.managed_oauth_available
+                        ? ('Hidden service-owned Gemini OAuth fallback via ' + String(geminiOperator.managed_oauth_profile || 'configured') + '.')
+                        : 'Primary browser auth does not depend on service-owned Gemini OAuth credentials.',
+                    tone: geminiOperator.managed_oauth_available ? 'success' : 'neutral',
+                },
+                {
                     label: 'Managed Seats',
                     value: formatNumber(geminiOperator.managed_seat_count || 0),
-                    detail: 'Seats created through the managed Gemini OAuth lane.',
-                    tone: (geminiOperator.managed_seat_count || 0) > 0 ? 'success' : 'neutral',
-                },
-                {
-                    label: 'Imported Seats',
-                    value: formatNumber(geminiOperator.imported_seat_count || 0),
-                    detail: 'Existing oauth_creds.json imports sharing the same Gemini seat pool.',
-                    tone: (geminiOperator.imported_seat_count || 0) > 0 ? 'warning' : 'neutral',
-                },
-                {
-                    label: 'Managed OAuth',
-                    value: geminiOperator.managed_oauth_available ? 'ready' : 'off',
-                    detail: geminiOperator.managed_oauth_available
-                        ? ('Configured profile: ' + String(geminiOperator.managed_oauth_profile || 'configured'))
-                        : String(geminiOperator.managed_oauth_note || 'Managed Gemini OAuth is not configured on this service.'),
-                    tone: geminiOperator.managed_oauth_available ? 'success' : 'warning',
+                    detail: 'Legacy first-party seats created through the hidden managed OAuth fallback lane.',
+                    tone: (geminiOperator.managed_seat_count || 0) > 0 ? 'warning' : 'neutral',
                 },
             ]);
         }
@@ -1701,22 +1701,21 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             if (!startButton || !note) {
                 return;
             }
+            startButton.style.display = '';
+            startButton.disabled = false;
             if (operator.managed_oauth_available) {
-                startButton.style.display = '';
-                startButton.disabled = false;
-                note.textContent = 'Managed Gemini OAuth is configured' + (operator.managed_oauth_profile ? ' via ' + operator.managed_oauth_profile + '.' : '.');
+                note.textContent = 'Antigravity browser auth is primary here. Managed Gemini OAuth fallback is also configured' + (operator.managed_oauth_profile ? ' via ' + operator.managed_oauth_profile + '.' : '.');
                 note.className = 'status-line success';
                 return;
             }
-            startButton.style.display = 'none';
             if (status) {
                 status.textContent = '';
             }
-            if (result) {
+            if (result && !geminiOAuthDone) {
                 result.style.display = 'none';
             }
-            note.textContent = String(operator.managed_oauth_note || 'Managed Gemini OAuth is not configured on this service.');
-            note.className = 'status-line warn';
+            note.textContent = 'Antigravity browser auth is primary on this local dashboard. Manual import remains available if you already have oauth_creds.json or Antigravity account JSON.';
+            note.className = 'status-line';
         }
 
         function renderWorkspaceTable(provider, data) {
@@ -1993,7 +1992,7 @@ export ANTHROPIC_API_KEY="local-pool"`;
 echo "Config written. Add or refresh a Gemini seat from:"
 echo "  ${BASE_URL}/"
 echo "  ${BASE_URL}/status"
-echo 'Then click: Start Managed Gemini OAuth'`;
+echo 'Then click: Start Antigravity Gemini Auth'`;
 
             document.getElementById('gemini-config').textContent =
 `{
@@ -2470,18 +2469,18 @@ echo 'Then click: Start Managed Gemini OAuth'`;
         function geminiOAuthDescribeOutcome(before, after, backendMode) {
             const mode = String(backendMode || '').trim().toLowerCase();
             if (mode === 'added') {
-                return 'Gemini OAuth completed. Added a new seat; refreshing status now.';
+                return 'Antigravity Gemini auth completed. Added a new seat; refreshing status now.';
             }
             if (mode === 'refreshed') {
-                return 'Gemini OAuth completed. Refreshed an existing seat; refreshing status now.';
+                return 'Antigravity Gemini auth completed. Refreshed an existing seat; refreshing status now.';
             }
             if (after.count > before.count) {
-                return 'Gemini OAuth completed. Added a new seat; refreshing status now.';
+                return 'Antigravity Gemini auth completed. Added a new seat; refreshing status now.';
             }
             if (after.signature !== before.signature) {
-                return 'Gemini OAuth completed. Refreshed an existing seat; refreshing status now.';
+                return 'Antigravity Gemini auth completed. Refreshed an existing seat; refreshing status now.';
             }
-            return 'Gemini OAuth completed. Refreshing status now.';
+            return 'Antigravity Gemini auth completed. Refreshing status now.';
         }
 
         function geminiOAuthReadPendingState() {
@@ -2515,7 +2514,7 @@ echo 'Then click: Start Managed Gemini OAuth'`;
             }
             try {
                 popup.document.open();
-                popup.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Preparing Gemini OAuth</title></head><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 24px;"><div style="max-width: 640px; margin: 64px auto; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 24px;">Opening Gemini OAuth session...</div></body></html>`);
+                popup.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Preparing Antigravity Gemini Auth</title></head><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 24px;"><div style="max-width: 640px; margin: 64px auto; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 24px;">Opening Antigravity Gemini auth session...</div></body></html>`);
                 popup.document.close();
                 popup.focus();
             } catch (error) {
@@ -2598,9 +2597,9 @@ echo 'Then click: Start Managed Gemini OAuth'`;
                 }
                 if (status) {
                     status.style.color = 'var(--danger)';
-                    status.textContent = 'Gemini OAuth completed, but status refresh failed: ' + (error && error.message ? error.message : error);
+                    status.textContent = 'Antigravity Gemini auth completed, but status refresh failed: ' + (error && error.message ? error.message : error);
                 }
-                geminiOAuthSetOutcome('Refresh failed. Use the Open OAuth Page link or retry after clearing the popup blocker.');
+                geminiOAuthSetOutcome('Refresh failed. Use the Open Antigravity Auth Page link or retry after clearing the popup blocker.');
                 geminiOAuthClearPendingState();
             }
         }
@@ -2620,19 +2619,19 @@ echo 'Then click: Start Managed Gemini OAuth'`;
                     if (!geminiOAuthSnapshotsEqual(beforeSnapshot, afterSnapshot)) {
                         if (status) {
                             status.style.color = 'var(--success)';
-                            status.textContent = 'Gemini OAuth callback applied. Refreshing status now.';
+                            status.textContent = 'Antigravity Gemini auth callback applied. Refreshing status now.';
                         }
                         void geminiOAuthFinalize(beforeSnapshot, backendMode, null);
                         return;
                     }
                     if (status) {
                         status.style.color = 'var(--muted)';
-                        status.textContent = 'Waiting for the Gemini seat state to change...';
+                        status.textContent = 'Waiting for the Antigravity Gemini seat state to change...';
                     }
                 } catch (error) {
                     if (status) {
                         status.style.color = 'var(--muted)';
-                        status.textContent = 'Waiting for the Gemini seat state to change...';
+                        status.textContent = 'Waiting for the Antigravity Gemini seat state to change...';
                     }
                 }
                 if (attempts >= maxAttempts) {
@@ -2644,16 +2643,16 @@ echo 'Then click: Start Managed Gemini OAuth'`;
                     }
                     if (status) {
                         status.style.color = 'var(--warning)';
-                        status.textContent = 'Timed out waiting for the Gemini seat state to change. Use the Open OAuth Page link to retry.';
+                        status.textContent = 'Timed out waiting for the Antigravity Gemini seat state to change. Use the Open Antigravity Auth Page link to retry.';
                     }
-                    geminiOAuthSetOutcome('No Gemini seat state change was detected yet.');
+                    geminiOAuthSetOutcome('No Antigravity Gemini seat state change was detected yet.');
                     return;
                 }
                 geminiOAuthWatcher = window.setTimeout(tick, 2000);
             };
             if (status) {
                 status.style.color = 'var(--muted)';
-                status.textContent = 'Waiting for the Gemini seat state to change...';
+                status.textContent = 'Waiting for the Antigravity Gemini seat state to change...';
             }
             geminiOAuthWatcher = window.setTimeout(tick, 2000);
         }
@@ -2696,10 +2695,10 @@ echo 'Then click: Start Managed Gemini OAuth'`;
                     return;
                 }
 
-                const message = String((data && data.message) || 'Gemini OAuth failed.').trim();
+                const message = String((data && data.message) || 'Antigravity Gemini auth failed.').trim();
                 geminiOAuthSetOutcome(message);
                 status.style.color = 'var(--danger)';
-                status.textContent = message || 'Gemini OAuth failed.';
+                status.textContent = message || 'Antigravity Gemini auth failed.';
             }, false);
         }
 
@@ -2721,7 +2720,7 @@ echo 'Then click: Start Managed Gemini OAuth'`;
 
             button.disabled = true;
             status.style.color = 'var(--muted)';
-            status.textContent = 'Starting Gemini OAuth session...';
+            status.textContent = 'Starting Antigravity Gemini auth session...';
             result.style.display = 'none';
             urlNode.textContent = '';
             openLink.href = '#';
@@ -2729,7 +2728,7 @@ echo 'Then click: Start Managed Gemini OAuth'`;
 
             try {
                 const beforeSnapshot = geminiOAuthSnapshot((await codexOAuthFetchStatusSnapshot()).accounts);
-                const response = await fetch('/operator/gemini/oauth-start', {
+                const response = await fetch('/operator/gemini/antigravity/oauth-start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({})
@@ -2748,9 +2747,9 @@ echo 'Then click: Start Managed Gemini OAuth'`;
                 result.style.display = 'block';
                 status.style.color = geminiOAuthPopup ? 'var(--success)' : 'var(--warning)';
                 status.textContent = geminiOAuthPopup
-                    ? 'OAuth URL generated. Complete sign-in in the popup; this page will refresh when Gemini seat state changes.'
-                    : 'OAuth URL generated, but the popup was blocked. Open the page from the link below.';
-                geminiOAuthSetOutcome(geminiOAuthPopup ? 'Waiting for the Gemini seat state to change.' : 'Open the OAuth URL manually.');
+                    ? 'Antigravity auth URL generated. Complete sign-in in the popup; this page will refresh when Gemini seat state changes.'
+                    : 'Antigravity auth URL generated, but the popup was blocked. Open the page from the link below.';
+                geminiOAuthSetOutcome(geminiOAuthPopup ? 'Waiting for the Antigravity Gemini seat state to change.' : 'Open the Antigravity auth URL manually.');
                 try {
                     sessionStorage.setItem(geminiOAuthStatusKey, JSON.stringify({
                         before: beforeSnapshot,
@@ -2771,8 +2770,8 @@ echo 'Then click: Start Managed Gemini OAuth'`;
                 geminiOAuthClearPendingState();
                 button.disabled = false;
                 status.style.color = 'var(--danger)';
-                status.textContent = 'Failed to start Gemini OAuth: ' + (error && error.message ? error.message : error);
-                geminiOAuthSetOutcome('Retry after clearing the popup blocker or open the OAuth URL manually.');
+                status.textContent = 'Failed to start Antigravity Gemini auth: ' + (error && error.message ? error.message : error);
+                geminiOAuthSetOutcome('Retry after clearing the popup blocker or open the Antigravity auth URL manually.');
             }
         }
 

@@ -71,3 +71,5 @@ Optional git metadata may be attached in release automation only, for example:
 - `0.5.0`: request-planning refactor wave, GitLab Claude pool lane, dashboard-first operator landing, and GitLab health-truth hardening
 - `0.5.1`: proxy response-handling seam cleanup across buffered, streamed, and websocket lanes with expanded regression coverage and text-first operator docs cleanup
 - `0.6.0`: Gemini operator onboarding, quarantine visibility, persistent Codex usage restore/models cache, and live-proven fallback/cooldown routing hardening
+- `0.6.1`: Gemini operator lane split, explicit source labels, and honest managed-OAuth degradation when local Gemini client credentials are absent
+- `0.7.0`: Antigravity Gemini onboarding/import, pooled Gemini Code Assist facade, provider-truth routing for imported Gemini seats, and end-to-end Claude trace observability

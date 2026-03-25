@@ -20,11 +20,13 @@ func TestProxyStreamedRequestClaude(t *testing.T) {
 
 	receivedCh := make(chan int64, 1)
 	keyCh := make(chan string, 1)
+	traceHeaderCh := make(chan string, 1)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		receivedCh <- int64(len(body))
 		keyCh <- r.Header.Get("X-Api-Key")
+		traceHeaderCh <- r.Header.Get(localTraceHeaderID)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ok":true}`))
@@ -63,6 +65,7 @@ func TestProxyStreamedRequestClaude(t *testing.T) {
 	}
 	req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken(getPoolJWTSecret(), "streamed-claude-user"))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(localTraceHeaderID, "trace-123")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -90,6 +93,15 @@ func TestProxyStreamedRequestClaude(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for upstream header")
+	}
+
+	select {
+	case got := <-traceHeaderCh:
+		if got != "" {
+			t.Fatalf("expected local trace header to be stripped, got %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for upstream local trace header")
 	}
 }
 

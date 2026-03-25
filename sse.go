@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -13,21 +14,24 @@ import (
 // zombie SSE connections where the upstream stops sending data but never
 // closes the TCP connection.
 type idleTimeoutReader struct {
-	rc      io.ReadCloser
-	timeout time.Duration
-	timer   *time.Timer
-	done    chan struct{}
-	cancel  func() // cancel the request context
-	closed  bool
+	rc        io.ReadCloser
+	timeout   time.Duration
+	timer     *time.Timer
+	done      chan struct{}
+	cancel    func() // cancel the request context
+	onTimeout func()
+	timedOut  atomic.Bool
+	closed    bool
 }
 
-func newIdleTimeoutReader(rc io.ReadCloser, timeout time.Duration, cancel func()) *idleTimeoutReader {
+func newIdleTimeoutReader(rc io.ReadCloser, timeout time.Duration, cancel func(), onTimeout func()) *idleTimeoutReader {
 	r := &idleTimeoutReader{
-		rc:      rc,
-		timeout: timeout,
-		timer:   time.NewTimer(timeout),
-		done:    make(chan struct{}),
-		cancel:  cancel,
+		rc:        rc,
+		timeout:   timeout,
+		timer:     time.NewTimer(timeout),
+		done:      make(chan struct{}),
+		cancel:    cancel,
+		onTimeout: onTimeout,
 	}
 	go r.watchdog()
 	return r
@@ -38,6 +42,10 @@ func (r *idleTimeoutReader) watchdog() {
 	case <-r.timer.C:
 		// Idle timeout expired - cancel the request context which will
 		// cause the Read to return with a context error.
+		r.timedOut.Store(true)
+		if r.onTimeout != nil {
+			r.onTimeout()
+		}
 		r.cancel()
 	case <-r.done:
 		r.timer.Stop()
@@ -51,14 +59,10 @@ func (r *idleTimeoutReader) Read(p []byte) (int, error) {
 		r.timer.Reset(r.timeout)
 	}
 	if err != nil {
-		// Wrap context.Canceled with a more descriptive message
-		if err.Error() == "context canceled" || err.Error() == "context deadline exceeded" {
-			// Check if our timer fired (as opposed to a client disconnect)
-			select {
-			case <-r.timer.C:
-				return n, fmt.Errorf("SSE stream idle for %v, closing", r.timeout)
-			default:
-			}
+		// Wrap context.Canceled with a more descriptive message when the
+		// idle watchdog fired, rather than a downstream disconnect.
+		if r.timedOut.Load() && (err.Error() == "context canceled" || err.Error() == "context deadline exceeded") {
+			return n, fmt.Errorf("SSE stream idle for %v, closing", r.timeout)
 		}
 	}
 	return n, err

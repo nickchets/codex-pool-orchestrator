@@ -111,6 +111,120 @@ func TestGeminiProviderLoadAccountLoadsOAuthProfileID(t *testing.T) {
 	}
 }
 
+func TestGeminiProviderLoadAccountLeavesLegacyOperatorSourceUnsetWithoutProfileID(t *testing.T) {
+	raw := []byte(`{
+		"access_token": "access-token",
+		"refresh_token": "refresh-token",
+		"client_id": "legacy-client",
+		"client_secret": "legacy-secret",
+		"expiry_date": 1774353600000
+	}`)
+
+	acc, err := (&GeminiProvider{}).LoadAccount("gemini_legacy.json", "/tmp/gemini_legacy.json", raw)
+	if err != nil {
+		t.Fatalf("LoadAccount error: %v", err)
+	}
+	if acc == nil {
+		t.Fatal("expected Gemini account")
+	}
+	if acc.OperatorSource != "" {
+		t.Fatalf("OperatorSource = %q, want empty for legacy seat without explicit provenance", acc.OperatorSource)
+	}
+}
+
+func TestGeminiProviderLoadAccountInfersManagedOAuthFromOperatorEmail(t *testing.T) {
+	raw := []byte(`{
+		"access_token": "access-token",
+		"refresh_token": "refresh-token",
+		"operator_email": "seat@example.com"
+	}`)
+
+	acc, err := (&GeminiProvider{}).LoadAccount("gemini_managed_legacy.json", "/tmp/gemini_managed_legacy.json", raw)
+	if err != nil {
+		t.Fatalf("LoadAccount error: %v", err)
+	}
+	if acc == nil {
+		t.Fatal("expected Gemini account")
+	}
+	if acc.OperatorSource != geminiOperatorSourceManagedOAuth {
+		t.Fatalf("OperatorSource = %q", acc.OperatorSource)
+	}
+}
+
+func TestGeminiProviderLoadAccountLoadsAntigravityFields(t *testing.T) {
+	raw := []byte(`{
+		"access_token": "access-token",
+		"refresh_token": "refresh-token",
+		"antigravity_source": "antigravity_tools",
+		"antigravity_account_id": "ag-1",
+		"antigravity_email": "ag@example.com",
+		"antigravity_name": "AG User",
+		"antigravity_project_id": "project-1",
+		"antigravity_proxy_disabled": true,
+		"antigravity_validation_blocked": true,
+		"gemini_subscription_tier_id": "standard-tier",
+		"gemini_subscription_tier_name": "Standard",
+		"gemini_validation_reason_code": "ACCOUNT_NEEDS_WORKSPACE",
+		"gemini_validation_message": "Workspace validation required",
+		"gemini_validation_url": "https://example.com/validate",
+		"gemini_provider_checked_at": "2026-03-24T12:00:00Z",
+		"antigravity_quota": {
+			"is_forbidden": true,
+			"forbidden_reason": "quota exhausted"
+		}
+	}`)
+
+	acc, err := (&GeminiProvider{}).LoadAccount("gemini_ag.json", "/tmp/gemini_ag.json", raw)
+	if err != nil {
+		t.Fatalf("LoadAccount error: %v", err)
+	}
+	if acc == nil {
+		t.Fatal("expected Gemini account")
+	}
+	if acc.OperatorSource != geminiOperatorSourceAntigravityImport {
+		t.Fatalf("OperatorSource = %q", acc.OperatorSource)
+	}
+	if acc.OAuthProfileID != geminiOAuthAntigravityProfileID {
+		t.Fatalf("OAuthProfileID = %q", acc.OAuthProfileID)
+	}
+	if acc.OperatorEmail != "ag@example.com" {
+		t.Fatalf("OperatorEmail = %q", acc.OperatorEmail)
+	}
+	if acc.AntigravityAccountID != "ag-1" {
+		t.Fatalf("AntigravityAccountID = %q", acc.AntigravityAccountID)
+	}
+	if !acc.AntigravityProxyDisabled {
+		t.Fatal("expected AntigravityProxyDisabled to load")
+	}
+	if !acc.AntigravityValidationBlocked {
+		t.Fatal("expected AntigravityValidationBlocked to load")
+	}
+	if !acc.AntigravityQuotaForbidden {
+		t.Fatal("expected AntigravityQuotaForbidden to load")
+	}
+	if acc.AntigravityQuotaForbiddenReason != "quota exhausted" {
+		t.Fatalf("AntigravityQuotaForbiddenReason = %q", acc.AntigravityQuotaForbiddenReason)
+	}
+	if acc.GeminiSubscriptionTierID != "standard-tier" {
+		t.Fatalf("GeminiSubscriptionTierID = %q", acc.GeminiSubscriptionTierID)
+	}
+	if acc.GeminiSubscriptionTierName != "Standard" {
+		t.Fatalf("GeminiSubscriptionTierName = %q", acc.GeminiSubscriptionTierName)
+	}
+	if acc.GeminiValidationReasonCode != "ACCOUNT_NEEDS_WORKSPACE" {
+		t.Fatalf("GeminiValidationReasonCode = %q", acc.GeminiValidationReasonCode)
+	}
+	if acc.GeminiValidationMessage != "Workspace validation required" {
+		t.Fatalf("GeminiValidationMessage = %q", acc.GeminiValidationMessage)
+	}
+	if acc.GeminiValidationURL != "https://example.com/validate" {
+		t.Fatalf("GeminiValidationURL = %q", acc.GeminiValidationURL)
+	}
+	if got := acc.GeminiProviderCheckedAt.UTC().Format(time.RFC3339); got != "2026-03-24T12:00:00Z" {
+		t.Fatalf("GeminiProviderCheckedAt = %q", got)
+	}
+}
+
 func TestSaveGeminiAccountPersistsStateFields(t *testing.T) {
 	accFile := filepath.Join(t.TempDir(), "gemini_state.json")
 	if err := os.WriteFile(accFile, []byte(`{
@@ -231,6 +345,94 @@ func TestSaveGeminiAccountPersistsOAuthProfileID(t *testing.T) {
 	}
 	if _, ok := root["client_secret"]; ok {
 		t.Fatalf("expected client_secret to be dropped: %s", string(saved))
+	}
+}
+
+func TestSaveGeminiAccountPersistsAntigravityFields(t *testing.T) {
+	accFile := filepath.Join(t.TempDir(), "gemini_antigravity_state.json")
+	if err := os.WriteFile(accFile, []byte(`{
+		"access_token": "old-access",
+		"refresh_token": "old-refresh"
+	}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	acc := &Account{
+		ID:                           "gemini_antigravity",
+		Type:                         AccountTypeGemini,
+		File:                         accFile,
+		AccessToken:                  "new-access",
+		RefreshToken:                 "new-refresh",
+		OperatorSource:               geminiOperatorSourceAntigravityImport,
+		OperatorEmail:                "ag@example.com",
+		AntigravitySource:            "antigravity_tools",
+		AntigravityAccountID:         "ag-1",
+		AntigravityEmail:             "ag@example.com",
+		AntigravityName:              "AG User",
+		AntigravityProjectID:         "project-1",
+		AntigravityCurrent:           true,
+		AntigravityProxyDisabled:     true,
+		AntigravityValidationBlocked: true,
+		GeminiSubscriptionTierID:     "standard-tier",
+		GeminiSubscriptionTierName:   "Standard",
+		GeminiValidationReasonCode:   "ACCOUNT_NEEDS_WORKSPACE",
+		GeminiValidationMessage:      "Workspace validation required",
+		GeminiValidationURL:          "https://example.com/validate",
+		GeminiProviderCheckedAt:      time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC),
+		AntigravityQuota: map[string]any{
+			"is_forbidden":     true,
+			"forbidden_reason": "quota exhausted",
+		},
+	}
+
+	if err := saveGeminiAccount(acc); err != nil {
+		t.Fatalf("saveGeminiAccount error: %v", err)
+	}
+
+	var root map[string]any
+	saved, err := os.ReadFile(accFile)
+	if err != nil {
+		t.Fatalf("read auth file: %v", err)
+	}
+	if err := json.Unmarshal(saved, &root); err != nil {
+		t.Fatalf("unmarshal saved file: %v", err)
+	}
+	if root["operator_source"] != geminiOperatorSourceAntigravityImport {
+		t.Fatalf("operator_source = %#v", root["operator_source"])
+	}
+	if root["operator_email"] != "ag@example.com" {
+		t.Fatalf("operator_email = %#v", root["operator_email"])
+	}
+	if root["antigravity_account_id"] != "ag-1" {
+		t.Fatalf("antigravity_account_id = %#v", root["antigravity_account_id"])
+	}
+	if root["antigravity_proxy_disabled"] != true {
+		t.Fatalf("antigravity_proxy_disabled = %#v", root["antigravity_proxy_disabled"])
+	}
+	if root["antigravity_validation_blocked"] != true {
+		t.Fatalf("antigravity_validation_blocked = %#v", root["antigravity_validation_blocked"])
+	}
+	if root["gemini_subscription_tier_id"] != "standard-tier" {
+		t.Fatalf("gemini_subscription_tier_id = %#v", root["gemini_subscription_tier_id"])
+	}
+	if root["gemini_subscription_tier_name"] != "Standard" {
+		t.Fatalf("gemini_subscription_tier_name = %#v", root["gemini_subscription_tier_name"])
+	}
+	if root["gemini_validation_reason_code"] != "ACCOUNT_NEEDS_WORKSPACE" {
+		t.Fatalf("gemini_validation_reason_code = %#v", root["gemini_validation_reason_code"])
+	}
+	if root["gemini_validation_message"] != "Workspace validation required" {
+		t.Fatalf("gemini_validation_message = %#v", root["gemini_validation_message"])
+	}
+	if root["gemini_validation_url"] != "https://example.com/validate" {
+		t.Fatalf("gemini_validation_url = %#v", root["gemini_validation_url"])
+	}
+	if root["gemini_provider_checked_at"] != "2026-03-24T12:00:00Z" {
+		t.Fatalf("gemini_provider_checked_at = %#v", root["gemini_provider_checked_at"])
+	}
+	quota, _ := root["antigravity_quota"].(map[string]any)
+	if quota["forbidden_reason"] != "quota exhausted" {
+		t.Fatalf("antigravity quota = %#v", root["antigravity_quota"])
 	}
 }
 
@@ -510,12 +712,265 @@ func TestGeminiProviderRefreshTokenFallsBackToGCloudClient(t *testing.T) {
 	}
 }
 
+func TestGeminiProviderRefreshTokenKeepsAntigravityProfile(t *testing.T) {
+	setGeminiOAuthTestProfiles(t)
+
+	accFile := filepath.Join(t.TempDir(), "gemini_refresh_antigravity.json")
+	raw := []byte(`{
+		"access_token":"seed-access",
+		"refresh_token":"seed-refresh",
+		"oauth_profile_id":"antigravity_public",
+		"operator_source":"antigravity_import",
+		"antigravity_project_id":"project-1",
+		"antigravity_source":"browser_oauth"
+	}`)
+	if err := os.WriteFile(accFile, raw, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	acc, err := (&GeminiProvider{}).LoadAccount("gemini_refresh_antigravity.json", accFile, raw)
+	if err != nil {
+		t.Fatalf("LoadAccount error: %v", err)
+	}
+	if acc == nil {
+		t.Fatal("expected Gemini account")
+	}
+
+	var calls int
+	transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		values, err := url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		if values.Get("client_id") != geminiOAuthAntigravityClientID {
+			t.Fatalf("client_id=%q", values.Get("client_id"))
+		}
+		if values.Get("client_secret") != "" {
+			t.Fatalf("client_secret=%q", values.Get("client_secret"))
+		}
+		return jsonResponse(http.StatusOK, `{"access_token":"fresh-access","expires_in":3600,"token_type":"Bearer","scope":"scope"}`), nil
+	})
+
+	if err := (&GeminiProvider{}).RefreshToken(context.Background(), acc, transport); err != nil {
+		t.Fatalf("RefreshToken error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls=%d", calls)
+	}
+	if acc.AccessToken != "fresh-access" {
+		t.Fatalf("AccessToken=%q", acc.AccessToken)
+	}
+	if acc.OAuthProfileID != geminiOAuthAntigravityProfileID {
+		t.Fatalf("OAuthProfileID=%q", acc.OAuthProfileID)
+	}
+	if acc.OperatorSource != geminiOperatorSourceAntigravityImport {
+		t.Fatalf("OperatorSource=%q", acc.OperatorSource)
+	}
+
+	saved, err := os.ReadFile(accFile)
+	if err != nil {
+		t.Fatalf("read auth file: %v", err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(saved, &root); err != nil {
+		t.Fatalf("decode auth file: %v", err)
+	}
+	if root["oauth_profile_id"] != geminiOAuthAntigravityProfileID {
+		t.Fatalf("saved oauth_profile_id=%#v", root["oauth_profile_id"])
+	}
+	if root["operator_source"] != geminiOperatorSourceAntigravityImport {
+		t.Fatalf("saved operator_source=%#v", root["operator_source"])
+	}
+}
+
+func TestGeminiProviderRefreshTokenPrefersManagedProfileBeforeLegacyRawClient(t *testing.T) {
+	setGeminiOAuthTestProfiles(t)
+
+	accFile := filepath.Join(t.TempDir(), "gemini_refresh_managed_legacy.json")
+	raw := []byte(`{
+		"access_token":"seed-access",
+		"refresh_token":"seed-refresh",
+		"client_id":"legacy-client-id",
+		"client_secret":"legacy-client-secret",
+		"operator_email":"seat@example.com"
+	}`)
+	if err := os.WriteFile(accFile, raw, 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	acc, err := (&GeminiProvider{}).LoadAccount("gemini_refresh_managed_legacy.json", accFile, raw)
+	if err != nil {
+		t.Fatalf("LoadAccount error: %v", err)
+	}
+	if acc == nil {
+		t.Fatal("expected Gemini account")
+	}
+
+	var calls int
+	transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		values, err := url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		if values.Get("client_id") != testGeminiOAuthGCloudClientID {
+			t.Fatalf("client_id=%q", values.Get("client_id"))
+		}
+		return jsonResponse(http.StatusOK, `{"access_token":"fresh-access","expires_in":3600,"token_type":"Bearer","scope":"scope"}`), nil
+	})
+
+	if err := (&GeminiProvider{}).RefreshToken(context.Background(), acc, transport); err != nil {
+		t.Fatalf("RefreshToken error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls=%d", calls)
+	}
+	if acc.OAuthProfileID != "gcloud" {
+		t.Fatalf("OAuthProfileID=%q", acc.OAuthProfileID)
+	}
+	if acc.OperatorSource != geminiOperatorSourceManagedOAuth {
+		t.Fatalf("OperatorSource=%q", acc.OperatorSource)
+	}
+	if acc.OAuthClientID != "" || acc.OAuthClientSecret != "" {
+		t.Fatalf("expected raw client credentials to be cleared, got %q / %q", acc.OAuthClientID, acc.OAuthClientSecret)
+	}
+
+	saved, err := os.ReadFile(accFile)
+	if err != nil {
+		t.Fatalf("read auth file: %v", err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(saved, &root); err != nil {
+		t.Fatalf("decode auth file: %v", err)
+	}
+	if root["oauth_profile_id"] != "gcloud" {
+		t.Fatalf("saved oauth_profile_id=%#v", root["oauth_profile_id"])
+	}
+	if root["operator_source"] != geminiOperatorSourceManagedOAuth {
+		t.Fatalf("saved operator_source=%#v", root["operator_source"])
+	}
+	if _, ok := root["client_id"]; ok {
+		t.Fatalf("expected saved client_id to be dropped: %s", string(saved))
+	}
+}
+
 func TestGeminiProviderRefreshTokenFallsBackOn400InvalidGrant(t *testing.T) {
 	testGeminiProviderRefreshTokenFallsBackOnRetryableBadRequest(t, "invalid_grant")
 }
 
 func TestGeminiProviderRefreshTokenFallsBackOn400InvalidClient(t *testing.T) {
 	testGeminiProviderRefreshTokenFallsBackOnRetryableBadRequest(t, "invalid_client")
+}
+
+func TestGeminiProviderRefreshTokenMigratesLegacySeatToManagedProfile(t *testing.T) {
+	setGeminiOAuthTestProfiles(t)
+
+	accFile := filepath.Join(t.TempDir(), "gemini_refresh_legacy.json")
+	if err := os.WriteFile(accFile, []byte(`{
+		"access_token":"seed-access",
+		"refresh_token":"seed-refresh",
+		"client_id":"legacy-client",
+		"client_secret":"legacy-secret"
+	}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	raw, err := os.ReadFile(accFile)
+	if err != nil {
+		t.Fatalf("read auth file: %v", err)
+	}
+	acc, err := (&GeminiProvider{}).LoadAccount(filepath.Base(accFile), accFile, raw)
+	if err != nil {
+		t.Fatalf("LoadAccount error: %v", err)
+	}
+	if acc == nil {
+		t.Fatal("expected Gemini account")
+	}
+	if acc.OperatorSource != "" {
+		t.Fatalf("OperatorSource = %q, want empty before migration", acc.OperatorSource)
+	}
+
+	var calls int
+	transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		values, err := url.ParseQuery(string(body))
+		if err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		switch calls {
+		case 1:
+			if values.Get("client_id") != "legacy-client" {
+				t.Fatalf("first client_id=%q", values.Get("client_id"))
+			}
+			return jsonResponse(http.StatusBadRequest, `{"error":"invalid_client","error_description":"legacy client is no longer allowed"}`), nil
+		case 2:
+			if values.Get("client_id") != testGeminiOAuthCLIClientID {
+				t.Fatalf("second client_id=%q", values.Get("client_id"))
+			}
+			return jsonResponse(http.StatusUnauthorized, `{"error":"unauthorized_client","error_description":"retry another client"}`), nil
+		case 3:
+			if values.Get("client_id") != testGeminiOAuthGCloudClientID {
+				t.Fatalf("third client_id=%q", values.Get("client_id"))
+			}
+			return jsonResponse(http.StatusOK, `{"access_token":"fresh-access","expires_in":3600,"token_type":"Bearer","scope":"scope"}`), nil
+		default:
+			t.Fatalf("unexpected refresh call #%d", calls)
+		}
+		return nil, nil
+	})
+
+	if err := (&GeminiProvider{}).RefreshToken(context.Background(), acc, transport); err != nil {
+		t.Fatalf("RefreshToken error: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("calls=%d", calls)
+	}
+	if acc.AccessToken != "fresh-access" {
+		t.Fatalf("AccessToken=%q", acc.AccessToken)
+	}
+	if acc.OAuthProfileID != "gcloud" {
+		t.Fatalf("OAuthProfileID=%q", acc.OAuthProfileID)
+	}
+	if acc.OperatorSource != geminiOperatorSourceManagedOAuth {
+		t.Fatalf("OperatorSource=%q", acc.OperatorSource)
+	}
+	if acc.OAuthClientID != "" || acc.OAuthClientSecret != "" {
+		t.Fatalf("expected raw client credentials to be cleared, got %q / %q", acc.OAuthClientID, acc.OAuthClientSecret)
+	}
+
+	saved, err := os.ReadFile(accFile)
+	if err != nil {
+		t.Fatalf("read auth file: %v", err)
+	}
+	var root map[string]any
+	if err := json.Unmarshal(saved, &root); err != nil {
+		t.Fatalf("decode auth file: %v", err)
+	}
+	if root["oauth_profile_id"] != "gcloud" {
+		t.Fatalf("saved oauth_profile_id=%#v", root["oauth_profile_id"])
+	}
+	if root["operator_source"] != geminiOperatorSourceManagedOAuth {
+		t.Fatalf("saved operator_source=%#v", root["operator_source"])
+	}
+	if _, ok := root["client_id"]; ok {
+		t.Fatalf("expected saved client_id to be dropped: %s", string(saved))
+	}
+	if _, ok := root["client_secret"]; ok {
+		t.Fatalf("expected saved client_secret to be dropped: %s", string(saved))
+	}
 }
 
 func testGeminiProviderRefreshTokenFallsBackOnRetryableBadRequest(t *testing.T, oauthError string) {

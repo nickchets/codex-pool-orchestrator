@@ -106,11 +106,68 @@ func TestServeGeminiSetupScript_PowerShell(t *testing.T) {
 		t.Fatalf("Content-Type = %q, want text/plain*", ct)
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, "$env:CODE_ASSIST_ENDPOINT = $BaseUrl") {
-		t.Fatalf("expected PowerShell env setup in body, got:\n%s", body)
+	if !strings.Contains(body, "$env:GEMINI_API_KEY = $GeminiApiKey") {
+		t.Fatalf("expected PowerShell Gemini API key env setup in body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "$env:GOOGLE_GEMINI_BASE_URL = $BaseUrl") {
+		t.Fatalf("expected PowerShell Gemini base URL env setup in body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "selectedType -Value 'gemini-api-key'") {
+		t.Fatalf("expected PowerShell settings.json auth mode update in body, got:\n%s", body)
+	}
+	if !strings.Contains(body, "useExternal -Value $true") {
+		t.Fatalf("expected PowerShell settings.json external auth update in body, got:\n%s", body)
 	}
 	if strings.Contains(body, "`") {
 		t.Fatalf("PowerShell script should not contain backticks (Go raw string safety), got:\n%s", body)
+	}
+}
+
+func TestServeGeminiSetupScript_Bash(t *testing.T) {
+	secret := "test-secret-key-12345678901234567890"
+	t.Setenv("POOL_JWT_SECRET", secret)
+
+	tmpDir := t.TempDir()
+	usersPath := filepath.Join(tmpDir, "pool_users.json")
+	store, err := newPoolUserStore(usersPath)
+	if err != nil {
+		t.Fatalf("newPoolUserStore: %v", err)
+	}
+
+	user := &PoolUser{
+		ID:        "user123",
+		Token:     "tok123",
+		Email:     "test@example.com",
+		PlanType:  "pro",
+		CreatedAt: time.Now(),
+	}
+	if err := store.Create(user); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	h := &proxyHandler{poolUsers: store}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/setup/gemini/tok123", nil)
+	rr := httptest.NewRecorder()
+	h.serveGeminiSetupScript(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/x-shellscript") {
+		t.Fatalf("Content-Type = %q, want text/x-shellscript*", ct)
+	}
+	body := rr.Body.String()
+	for _, fragment := range []string{
+		"export GEMINI_API_KEY=",
+		"export GOOGLE_GEMINI_BASE_URL=",
+		"settings.security.auth.selectedType = 'gemini-api-key';",
+		"settings.security.auth.useExternal = true;",
+		"settings.codeAssistEndpoint = baseUrl;",
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("expected %q in bash body, got:\n%s", fragment, body)
+		}
 	}
 }
 
@@ -186,16 +243,16 @@ func TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction(t *testing.T) 
 		"overview-quarantine-detail",
 		"Long-dead seats moved out of active rotation",
 		"dead since",
-		"Managed Gemini OAuth and manual <code>oauth_creds.json</code> imports are separate lanes here",
+		"Antigravity Gemini browser auth and manual imports land in the same Gemini seat pool here",
 		"Configures the Gemini CLI endpoint and points you to the same local dashboard/operator flow used for seat onboarding",
-		"Start Managed Gemini OAuth",
+		"Start Antigravity Gemini Auth",
 		"Import oauth_creds.json",
 		"gemini-seat-json-input",
-		"/operator/gemini/oauth-start",
+		"/operator/gemini/antigravity/oauth-start",
 		"/operator/gemini/import-oauth-creds",
 		"gemini_oauth_result",
 		"python3 -m webbrowser",
-		"If you already have a real Gemini oauth_creds.json",
+		"If you already have a real Gemini oauth_creds.json or Antigravity account JSON",
 		"import it into the Gemini manual-import field on / or /status",
 		"Fallback API Pool",
 		"GitLab Claude Pool",

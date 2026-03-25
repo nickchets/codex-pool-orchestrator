@@ -844,29 +844,25 @@ func (h *proxyHandler) serveGeminiSetupScript(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Generate pool OAuth credentials for this user
+	// Generate a Gemini API key for this user. This matches the API key mode
+	// that already works against our local Gemini facade.
 	secret := getPoolJWTSecret()
 	if secret == "" {
 		http.Error(w, "JWT secret not configured", http.StatusServiceUnavailable)
 		return
 	}
-	geminiAuth, err := generateGeminiAuth(secret, user)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
+	geminiAPIKey := generateGeminiAPIKey(secret, user)
 
 	publicURL := h.getEffectivePublicURL(r)
 
-	// Script sets env vars to bypass Google OAuth validation and route through proxy
-	// Uses GOOGLE_GENAI_USE_GCA + GOOGLE_CLOUD_ACCESS_TOKEN to skip getTokenInfo() check
+	// Script keeps Gemini CLI in API key mode and routes requests through the pool.
 	if wantsPowerShell(r) {
 		script := fmt.Sprintf(`#requires -Version 5.1
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $BaseUrl = '%s'
-$PoolToken = '%s'
+$GeminiApiKey = '%s'
 
 # PS 5.1 writes UTF-8 with BOM which breaks parsers. Write without BOM.
 function Set-Utf8NoBom {
@@ -878,10 +874,10 @@ function Set-Utf8NoBom {
 Write-Host 'Configuring Gemini CLI for pool access...'
 Write-Host ''
 
-# Set env vars for the current session
-$env:CODE_ASSIST_ENDPOINT = $BaseUrl
-$env:GOOGLE_GENAI_USE_GCA = '1'
-$env:GOOGLE_CLOUD_ACCESS_TOKEN = $PoolToken
+# Use API key mode in the current session
+Remove-Item Env:GOOGLE_API_KEY, Env:CODE_ASSIST_ENDPOINT, Env:GOOGLE_GENAI_USE_GCA, Env:GOOGLE_CLOUD_ACCESS_TOKEN -ErrorAction Ignore
+$env:GEMINI_API_KEY = $GeminiApiKey
+$env:GOOGLE_GEMINI_BASE_URL = $BaseUrl
 
 # Persist env vars for future PowerShell sessions
 $profilePath = $PROFILE.CurrentUserAllHosts
@@ -893,9 +889,8 @@ $end = '# <<< Gemini Pool Configuration <<<'
 $nl = [Environment]::NewLine
 $blockLines = @(
   $start,
-  ('$env:CODE_ASSIST_ENDPOINT = "' + $BaseUrl + '"'),
-  ('$env:GOOGLE_GENAI_USE_GCA = "1"'),
-  ('$env:GOOGLE_CLOUD_ACCESS_TOKEN = "' + $PoolToken + '"'),
+  ('$env:GEMINI_API_KEY = "' + $GeminiApiKey + '"'),
+  ('$env:GOOGLE_GEMINI_BASE_URL = "' + $BaseUrl + '"'),
   $end
 )
 $block = $blockLines -join $nl
@@ -914,14 +909,35 @@ if ([regex]::IsMatch($existing, $pattern, [Text.RegularExpressions.RegexOptions]
 Set-Utf8NoBom -Path $profilePath -Value $updated
 Write-Host ("Added Gemini pool config to " + $profilePath)
 
+# Ensure Gemini config directory exists and keep settings on API key mode.
+$geminiDir = Join-Path $HOME '.gemini'
+New-Item -ItemType Directory -Force -Path $geminiDir | Out-Null
+$settingsFile = Join-Path $geminiDir 'settings.json'
+$settings = $null
+try { $settings = Get-Content -Path $settingsFile -Raw | ConvertFrom-Json } catch {}
+if ($null -eq $settings) { $settings = New-Object PSObject }
+$security = $null
+try { $security = $settings.security } catch {}
+if ($null -eq $security) { $security = New-Object PSObject }
+$auth = $null
+try { $auth = $security.auth } catch {}
+if ($null -eq $auth) { $auth = New-Object PSObject }
+$auth | Add-Member -MemberType NoteProperty -Name selectedType -Value 'gemini-api-key' -Force
+$auth | Add-Member -MemberType NoteProperty -Name useExternal -Value $true -Force
+$security | Add-Member -MemberType NoteProperty -Name auth -Value $auth -Force
+$settings | Add-Member -MemberType NoteProperty -Name security -Value $security -Force
+$settings | Add-Member -MemberType NoteProperty -Name codeAssistEndpoint -Value $BaseUrl -Force
+Set-Utf8NoBom -Path $settingsFile -Value ($settings | ConvertTo-Json -Depth 10)
+Write-Host ("Updated " + $settingsFile)
+
 Write-Host ''
 Write-Host 'Setup complete!'
 Write-Host ''
 Write-Host ("Gemini CLI will use the pool proxy at: " + $BaseUrl)
-Write-Host 'No Google login required - validation is bypassed.'
+Write-Host 'Gemini API key mode is enabled; no Google login required.'
 Write-Host ''
 Write-Host 'Start a new terminal, or run: . $PROFILE'
-`, publicURL, geminiAuth.AccessToken)
+`, publicURL, geminiAPIKey)
 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte(script))
@@ -931,17 +947,18 @@ Write-Host 'Start a new terminal, or run: . $PROFILE'
 	script := fmt.Sprintf(`#!/bin/bash
 set -e
 BASE_URL="%s"
-POOL_TOKEN="%s"
+GEMINI_API_KEY_VALUE="%s"
 
 echo "Configuring Gemini CLI for pool access..."
 echo ""
 
-# Add env vars to shell profile
+# Add env vars to shell profile (Gemini CLI reads them from process.env).
 add_to_profile() {
-    for profile in "$HOME/.zshrc" "$HOME/.bashrc"; do
+    for profile in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
         if [ -f "$profile" ]; then
             # Remove old Gemini-related env vars
             grep -v "GEMINI_API_KEY=" "$profile" 2>/dev/null | \
+            grep -v "GOOGLE_API_KEY=" 2>/dev/null | \
             grep -v "GOOGLE_GEMINI_BASE_URL=" 2>/dev/null | \
             grep -v "CODE_ASSIST_ENDPOINT=" 2>/dev/null | \
             grep -v "GOOGLE_GENAI_USE_GCA=" 2>/dev/null | \
@@ -952,9 +969,8 @@ add_to_profile() {
             cat >> "$profile" << 'ENVEOF'
 
 # Gemini Pool Configuration
-export CODE_ASSIST_ENDPOINT="%s"
-export GOOGLE_GENAI_USE_GCA=1
-export GOOGLE_CLOUD_ACCESS_TOKEN="%s"
+export GEMINI_API_KEY="%s"
+export GOOGLE_GEMINI_BASE_URL="%s"
 ENVEOF
             echo "✓ Added Gemini pool config to $(basename $profile)"
             return
@@ -965,25 +981,54 @@ ENVEOF
     cat >> "$HOME/.zshrc" << 'ENVEOF'
 
 # Gemini Pool Configuration
-export CODE_ASSIST_ENDPOINT="%s"
-export GOOGLE_GENAI_USE_GCA=1
-export GOOGLE_CLOUD_ACCESS_TOKEN="%s"
+export GEMINI_API_KEY="%s"
+export GOOGLE_GEMINI_BASE_URL="%s"
 ENVEOF
     echo "✓ Created ~/.zshrc with Gemini pool config"
 }
 
 add_to_profile
 
+# Keep Gemini CLI in external API key mode.
+GEMINI_DIR="$HOME/.gemini"
+SETTINGS_FILE="$GEMINI_DIR/settings.json"
+mkdir -p "$GEMINI_DIR"
+export SETTINGS_FILE BASE_URL
+node <<'NODE'
+const fs = require('fs');
+const settingsFile = process.env.SETTINGS_FILE;
+const baseUrl = process.env.BASE_URL;
+let settings = {};
+try {
+  settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+} catch {}
+if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+  settings = {};
+}
+if (!settings.security || typeof settings.security !== 'object' || Array.isArray(settings.security)) {
+  settings.security = {};
+}
+if (!settings.security.auth || typeof settings.security.auth !== 'object' || Array.isArray(settings.security.auth)) {
+  settings.security.auth = {};
+}
+settings.security.auth.selectedType = 'gemini-api-key';
+settings.security.auth.useExternal = true;
+settings.codeAssistEndpoint = baseUrl;
+fs.writeFileSync(settingsFile, JSON.stringify(settings, null, 2) + '\n', { mode: 0o600 });
+NODE
+chmod 600 "$SETTINGS_FILE"
+echo "✓ Updated $SETTINGS_FILE"
+
 echo ""
 echo "Setup complete!"
 echo ""
 echo "Gemini CLI will use the pool proxy at: $BASE_URL"
-echo "No Google login required - validation is bypassed."
+echo "Gemini API key mode is enabled; no Google login required."
 echo ""
 echo "Run 'source ~/.zshrc' or start a new terminal, then run 'gemini'."
-`, publicURL, geminiAuth.AccessToken,
-		publicURL, geminiAuth.AccessToken,
-		publicURL, geminiAuth.AccessToken)
+`, publicURL, geminiAPIKey,
+		geminiAPIKey, publicURL,
+		geminiAPIKey, publicURL)
 
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.Write([]byte(script))

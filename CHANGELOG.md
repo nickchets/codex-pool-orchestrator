@@ -9,6 +9,25 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.7.0] - 2026-03-25
+
+### Added
+- Antigravity-backed Gemini onboarding on `/` and `/status`, including browser OAuth start/callback, Antigravity account JSON import normalization, Code Assist project bootstrap, and persistence of provider-truth fields needed for routing.
+- A pooled Gemini `/v1beta/models/*:generateContent|streamGenerateContent` facade that rewrites supported requests into the Code Assist `v1internal` lane for imported Antigravity-backed seats.
+- Claude request-trace correlation from wrapper to pool, including per-request trace headers, SSE/usage event counters, `chunk_gap` detection, and explicit idle-timeout diagnostics.
+- Focused regression coverage for Gemini provider persistence, Antigravity onboarding, dashboard/operator JSON truth, setup scripts, facade transforms, and request-trace behavior.
+
+### Changed
+- Gemini CLI setup scripts now keep the client in external API key mode with `GEMINI_API_KEY` and `GOOGLE_GEMINI_BASE_URL` instead of the earlier OAuth-bypass environment shape.
+- Gemini seat persistence and routing now keep operator/source provenance plus provider block-state fields such as `proxy_disabled`, `validation_blocked`, quota-forbidden status, subscription tier, and validation metadata.
+- `/status`, `/status?format=json`, and the landing page now describe Gemini seats with Antigravity import provenance and provider-truth fields instead of treating all non-managed seats as one generic manual-import lane.
+- Explicit force-refresh paths now bypass the Gemini per-account refresh throttle when the operator asks for a real refresh.
+
+### Fixed
+- Gemini `v1beta` requests no longer route onto imported seats that lack the Antigravity project ID required for the Code Assist facade.
+- Idle SSE timeout detection now records real timeout state instead of collapsing into a generic downstream `context canceled`.
+- Local Claude tracing can now be correlated end-to-end without leaking wrapper-only headers upstream.
+
 ## [0.6.1] - 2026-03-24
 
 ### Changed

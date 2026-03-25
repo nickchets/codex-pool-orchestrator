@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -307,6 +308,126 @@ func TestTryOnceManagedOpenAIAPIKeyUsesAPIBase(t *testing.T) {
 	}
 }
 
+func TestTryOnceGeminiFacadeForcesRefreshAfter401DespiteRecentLastRefresh(t *testing.T) {
+	t.Setenv(geminiOAuthAntigravitySecretVar, "antigravity-secret")
+
+	geminiBase, _ := url.Parse("https://cloudcode-pa.googleapis.com")
+	geminiAPIBase, _ := url.Parse("https://generativelanguage.googleapis.com")
+	codex := NewCodexProvider(geminiBase, geminiBase, geminiBase, geminiBase)
+	claude := NewClaudeProvider(geminiBase)
+	gemini := NewGeminiProvider(geminiBase, geminiAPIBase)
+
+	accFile := filepath.Join(t.TempDir(), "gemini_antigravity.json")
+	expiredAt := time.Now().Add(-time.Hour).UTC().UnixMilli()
+	lastRefresh := time.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339Nano)
+	raw := fmt.Sprintf(`{
+		"access_token":"stale-access",
+		"refresh_token":"seed-refresh",
+		"oauth_profile_id":"%s",
+		"operator_source":"%s",
+		"antigravity_source":"browser_oauth",
+		"antigravity_project_id":"project-1",
+		"expiry_date":%d,
+		"last_refresh":"%s"
+	}`, geminiOAuthAntigravityProfileID, geminiOperatorSourceAntigravityImport, expiredAt, lastRefresh)
+	if err := os.WriteFile(accFile, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write account: %v", err)
+	}
+
+	acc, err := gemini.LoadAccount(filepath.Base(accFile), accFile, []byte(raw))
+	if err != nil {
+		t.Fatalf("LoadAccount error: %v", err)
+	}
+	if acc == nil {
+		t.Fatal("expected Gemini account")
+	}
+	if (&proxyHandler{}).needsRefresh(acc) {
+		t.Fatal("expected recent LastRefresh to suppress proactive refresh")
+	}
+
+	var refreshCalls int
+	var upstreamCalls int
+	transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case r.URL.String() == geminiOAuthTokenURL:
+			refreshCalls++
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read refresh body: %v", err)
+			}
+			values, err := url.ParseQuery(string(body))
+			if err != nil {
+				t.Fatalf("parse refresh body: %v", err)
+			}
+			if values.Get("client_id") != geminiOAuthAntigravityClientID {
+				t.Fatalf("client_id=%q", values.Get("client_id"))
+			}
+			if values.Get("client_secret") != "antigravity-secret" {
+				t.Fatalf("client_secret=%q", values.Get("client_secret"))
+			}
+			return jsonResponse(http.StatusOK, `{"access_token":"fresh-access","expires_in":3600,"token_type":"Bearer","scope":"scope"}`), nil
+		case r.URL.Host == geminiBase.Host && r.URL.Path == "/v1internal:generateContent":
+			upstreamCalls++
+			switch upstreamCalls {
+			case 1:
+				if got := r.Header.Get("Authorization"); got != "Bearer stale-access" {
+					t.Fatalf("first auth=%q", got)
+				}
+				return jsonResponse(http.StatusUnauthorized, `{"error":"invalid_token"}`), nil
+			case 2:
+				if got := r.Header.Get("Authorization"); got != "Bearer fresh-access" {
+					t.Fatalf("second auth=%q", got)
+				}
+				return jsonResponse(http.StatusOK, `{"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"AG_POOL_OK."}]}}]}}`), nil
+			default:
+				t.Fatalf("unexpected upstream call #%d", upstreamCalls)
+			}
+		default:
+			t.Fatalf("unexpected request to %s", r.URL.String())
+		}
+		return nil, nil
+	})
+
+	h := &proxyHandler{
+		cfg:              config{},
+		transport:        transport,
+		refreshTransport: transport,
+		registry:         NewProviderRegistry(codex, claude, gemini),
+	}
+
+	body := []byte(`{"contents":[{"parts":[{"text":"Reply with exactly AG_POOL_OK."}]}]}`)
+	req, err := http.NewRequest(http.MethodPost, "http://pool.local/v1beta/models/gemini-2.5-flash:generateContent", strings.NewReader(string(body)))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+
+	resp, _, _, err := h.tryOnce(context.Background(), req, body, geminiAPIBase, gemini, acc, "req-gemini")
+	if err != nil {
+		t.Fatalf("tryOnce: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if refreshCalls != 1 {
+		t.Fatalf("refreshCalls=%d", refreshCalls)
+	}
+	if upstreamCalls != 2 {
+		t.Fatalf("upstreamCalls=%d", upstreamCalls)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	gotBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(gotBody), "AG_POOL_OK.") {
+		t.Fatalf("body=%q", string(gotBody))
+	}
+	if acc.AccessToken != "fresh-access" {
+		t.Fatalf("access_token=%q", acc.AccessToken)
+	}
+}
+
 // mapToHeader is a tiny helper to build http.Header in tests without importing net/http everywhere.
 func mapToHeader(m map[string]string) http.Header {
 	h := http.Header{}
@@ -346,6 +467,37 @@ func TestFinalizeProxyResponsePinsInitialConversationAndDecaysPenalty(t *testing
 	}
 	if acc.Penalty != 0.2 {
 		t.Fatalf("penalty = %v", acc.Penalty)
+	}
+}
+
+func TestCandidateSupportingPathSkipsGeminiSeatsWithoutAntigravityProjectID(t *testing.T) {
+	unsupported := &Account{
+		ID:       "gemini_seat_manual",
+		Type:     AccountTypeGemini,
+		PlanType: "gemini",
+		LastUsed: time.Now().UTC(),
+	}
+	supported := &Account{
+		ID:                   "gemini_seat_antigravity",
+		Type:                 AccountTypeGemini,
+		PlanType:             "gemini",
+		AntigravityProjectID: "psyched-sphere-vj8c5",
+	}
+	pool := newPoolState([]*Account{unsupported, supported}, false)
+	h := &proxyHandler{pool: pool}
+	provider := &GeminiProvider{}
+	path := "/v1beta/models/gemini-2.5-flash:streamGenerateContent"
+
+	if got := pool.candidate("", map[string]bool{}, AccountTypeGemini, ""); got == nil || got.ID != unsupported.ID {
+		t.Fatalf("baseline candidate = %+v, want unsupported seat first", got)
+	}
+
+	got := h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, path)
+	if got == nil {
+		t.Fatal("expected supporting candidate")
+	}
+	if got.ID != supported.ID {
+		t.Fatalf("candidate = %s, want %s", got.ID, supported.ID)
 	}
 }
 
@@ -548,6 +700,7 @@ func TestFinalizeCopiedProxyResponseRecordsCopyError(t *testing.T) {
 	ok := h.finalizeCopiedProxyResponse(
 		"req-test",
 		nil,
+		nil,
 		acc,
 		"user-1",
 		http.StatusOK,
@@ -592,6 +745,7 @@ func TestFinalizeCopiedProxyResponseRecordsStatusMetricAndFinalizesSuccess(t *te
 
 	ok := h.finalizeCopiedProxyResponse(
 		"req-test",
+		nil,
 		nil,
 		acc,
 		"user-1",
@@ -1031,11 +1185,58 @@ func TestRefreshAccountOnceGitLabBypassesPerAccountThrottle(t *testing.T) {
 		t.Fatalf("write auth file: %v", err)
 	}
 
-	if err := h.refreshAccountOnce(context.Background(), acc); err != nil {
+	if err := h.refreshAccountOnce(context.Background(), acc, false); err != nil {
 		t.Fatalf("refreshAccountOnce: %v", err)
 	}
 	if acc.AccessToken != "gateway-token-fresh" {
 		t.Fatalf("access_token=%q", acc.AccessToken)
+	}
+}
+
+func TestRefreshAccountOnceKeepsLastRefreshForGeminiOAuthConfigErrorUntouched(t *testing.T) {
+	t.Setenv(geminiOAuthEnvClientIDVar, "")
+	t.Setenv(geminiOAuthEnvClientSecretVar, "")
+	t.Setenv(geminiOAuthCLIClientIDVar, "")
+	t.Setenv(geminiOAuthCLIClientSecretVar, "")
+	t.Setenv(geminiOAuthGCloudClientIDVar, "")
+	t.Setenv(geminiOAuthGCloudClientSecretVar, "")
+	t.Setenv(geminiOAuthAntigravitySecretVar, "")
+
+	geminiBase, _ := url.Parse("https://cloudcode-pa.googleapis.com")
+	geminiAPIBase, _ := url.Parse("https://generativelanguage.googleapis.com")
+	lastRefresh := time.Date(2026, 3, 23, 9, 0, 0, 0, time.UTC)
+
+	h := &proxyHandler{
+		registry: &ProviderRegistry{
+			byType: map[AccountType]Provider{
+				AccountTypeGemini: NewGeminiProvider(geminiBase, geminiAPIBase),
+			},
+		},
+		refreshTransport: roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+			t.Fatalf("unexpected outbound refresh request: %s", req.URL.String())
+			return nil, nil
+		}),
+	}
+
+	acc := &Account{
+		ID:             "gemini_cfg_error",
+		Type:           AccountTypeGemini,
+		File:           filepath.Join(t.TempDir(), "gemini_cfg_error.json"),
+		AccessToken:    "access-token",
+		RefreshToken:   "refresh-token",
+		OperatorSource: geminiOperatorSourceManagedOAuth,
+		LastRefresh:    lastRefresh,
+	}
+	if err := os.WriteFile(acc.File, []byte(`{"access_token":"access-token","refresh_token":"refresh-token","operator_source":"managed_oauth","last_refresh":"2026-03-23T09:00:00Z"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	err := h.refreshAccountOnce(context.Background(), acc, false)
+	if err == nil || !strings.Contains(err.Error(), "no configured Gemini OAuth client") {
+		t.Fatalf("err = %v, want config error", err)
+	}
+	if !acc.LastRefresh.Equal(lastRefresh) {
+		t.Fatalf("LastRefresh = %v, want unchanged %v", acc.LastRefresh, lastRefresh)
 	}
 }
 

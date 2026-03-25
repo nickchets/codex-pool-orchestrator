@@ -359,6 +359,9 @@ func providerSupportsPathForAccount(provider Provider, path string, acc *Account
 	if codexProvider, ok := provider.(*CodexProvider); ok {
 		return codexProvider.SupportsAccountPath(path, acc)
 	}
+	if geminiProvider, ok := provider.(*GeminiProvider); ok {
+		return geminiProvider.SupportsAccountPath(path, acc)
+	}
 	return true
 }
 

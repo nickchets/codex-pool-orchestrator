@@ -13,6 +13,7 @@ func (h *proxyHandler) wrapUsageInterceptWriter(
 	provider Provider,
 	acc *Account,
 	userID string,
+	trace *requestTrace,
 	headerPrimaryPct float64,
 	headerSecondaryPct float64,
 	managedStreamFailed *bool,
@@ -23,6 +24,9 @@ func (h *proxyHandler) wrapUsageInterceptWriter(
 	return &sseInterceptWriter{
 		w: writer,
 		eventCallback: func(data []byte) {
+			if trace != nil {
+				trace.noteSSEEvent(data, false)
+			}
 			if !isManagedCodexAPIKeyAccount(acc) {
 				return
 			}
@@ -61,6 +65,9 @@ func (h *proxyHandler) wrapUsageInterceptWriter(
 			}
 			if ru == nil {
 				return
+			}
+			if trace != nil {
+				trace.noteSSEUsageEvent(data)
 			}
 
 			if acc.Type == AccountTypeClaude {

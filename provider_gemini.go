@@ -25,6 +25,9 @@ const (
 	geminiOAuthCLIClientSecretVar    = "GEMINI_OAUTH_CLI_CLIENT_SECRET"
 	geminiOAuthGCloudClientIDVar     = "GEMINI_OAUTH_GCLOUD_CLIENT_ID"
 	geminiOAuthGCloudClientSecretVar = "GEMINI_OAUTH_GCLOUD_CLIENT_SECRET"
+	geminiOAuthAntigravityProfileID  = "antigravity_public"
+	geminiOAuthAntigravityClientID   = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+	geminiOAuthAntigravitySecretVar  = "ANTIGRAVITY_GEMINI_OAUTH_CLIENT_SECRET"
 )
 
 type geminiOAuthClientProfile struct {
@@ -46,6 +49,14 @@ func geminiOAuthConfigError() error {
 	return errors.New("no configured Gemini OAuth client; set GEMINI_OAUTH_GCLOUD_CLIENT_ID/GEMINI_OAUTH_GCLOUD_CLIENT_SECRET or GEMINI_OAUTH_CLIENT_ID/GEMINI_OAUTH_CLIENT_SECRET")
 }
 
+func geminiOAuthAntigravityProfile() geminiOAuthClientProfile {
+	return geminiOAuthClientProfile{
+		ID:     geminiOAuthAntigravityClientID,
+		Secret: strings.TrimSpace(os.Getenv(geminiOAuthAntigravitySecretVar)),
+		Label:  geminiOAuthAntigravityProfileID,
+	}
+}
+
 func geminiOAuthProfileByID(id string) (geminiOAuthClientProfile, bool) {
 	switch strings.TrimSpace(id) {
 	case "env":
@@ -54,13 +65,15 @@ func geminiOAuthProfileByID(id string) (geminiOAuthClientProfile, bool) {
 		return geminiOAuthProfileFromEnv("gemini_cli", geminiOAuthCLIClientIDVar, geminiOAuthCLIClientSecretVar)
 	case "gcloud":
 		return geminiOAuthProfileFromEnv("gcloud", geminiOAuthGCloudClientIDVar, geminiOAuthGCloudClientSecretVar)
+	case geminiOAuthAntigravityProfileID:
+		return geminiOAuthAntigravityProfile(), true
 	}
 	return geminiOAuthClientProfile{}, false
 }
 
 func geminiOAuthProfileIDForLabel(label string) string {
 	switch strings.TrimSpace(label) {
-	case "env", "gemini_cli", "gcloud":
+	case "env", "gemini_cli", "gcloud", geminiOAuthAntigravityProfileID:
 		return strings.TrimSpace(label)
 	default:
 		return ""
@@ -85,6 +98,16 @@ func (p *GeminiProvider) Type() AccountType {
 	return AccountTypeGemini
 }
 
+func (p *GeminiProvider) SupportsAccountPath(path string, acc *Account) bool {
+	if !strings.HasPrefix(path, geminiAPIModelPrefix) {
+		return true
+	}
+	if acc == nil {
+		return false
+	}
+	return strings.TrimSpace(acc.AntigravityProjectID) != ""
+}
+
 func (p *GeminiProvider) LoadAccount(name, path string, data []byte) (*Account, error) {
 	var gj GeminiAuthJSON
 	if err := json.Unmarshal(data, &gj); err != nil {
@@ -97,21 +120,49 @@ func (p *GeminiProvider) LoadAccount(name, path string, data []byte) (*Account, 
 	if planType == "" {
 		planType = "gemini" // default
 	}
-	acc := &Account{
-		OAuthProfileID:    strings.TrimSpace(gj.OAuthProfileID),
-		Type:              AccountTypeGemini,
-		ID:                strings.TrimSuffix(name, filepath.Ext(name)),
-		File:              path,
-		AccessToken:       gj.AccessToken,
-		RefreshToken:      gj.RefreshToken,
-		OAuthClientID:     strings.TrimSpace(gj.ClientID),
-		OAuthClientSecret: strings.TrimSpace(gj.ClientSecret),
-		OperatorSource:    normalizeGeminiOperatorSource(gj.OperatorSource, gj.OAuthProfileID, AccountTypeGemini),
-		PlanType:          planType,
-		AuthMode:          accountAuthModeOAuth,
-		Disabled:          gj.Disabled,
-		Dead:              gj.Dead,
+	oauthProfileID := strings.TrimSpace(gj.OAuthProfileID)
+	if oauthProfileID == "" && strings.TrimSpace(gj.AntigravitySource) != "" {
+		oauthProfileID = geminiOAuthAntigravityProfileID
 	}
+	operatorSource := storedGeminiOperatorSource(gj.OperatorSource, gj.OAuthProfileID, AccountTypeGemini)
+	if operatorSource == "" && strings.TrimSpace(gj.AntigravitySource) != "" {
+		operatorSource = geminiOperatorSourceAntigravityImport
+	}
+	if operatorSource == "" && strings.TrimSpace(gj.OperatorEmail) != "" {
+		operatorSource = geminiOperatorSourceManagedOAuth
+	}
+	acc := &Account{
+		OAuthProfileID:               oauthProfileID,
+		Type:                         AccountTypeGemini,
+		ID:                           strings.TrimSuffix(name, filepath.Ext(name)),
+		File:                         path,
+		AccessToken:                  gj.AccessToken,
+		RefreshToken:                 gj.RefreshToken,
+		OAuthClientID:                strings.TrimSpace(gj.ClientID),
+		OAuthClientSecret:            strings.TrimSpace(gj.ClientSecret),
+		OperatorSource:               operatorSource,
+		OperatorEmail:                firstNonEmpty(strings.TrimSpace(gj.OperatorEmail), strings.TrimSpace(gj.AntigravityEmail)),
+		PlanType:                     planType,
+		AuthMode:                     accountAuthModeOAuth,
+		Disabled:                     gj.Disabled,
+		Dead:                         gj.Dead,
+		AntigravitySource:            strings.TrimSpace(gj.AntigravitySource),
+		AntigravityAccountID:         strings.TrimSpace(gj.AntigravityAccountID),
+		AntigravityEmail:             strings.TrimSpace(gj.AntigravityEmail),
+		AntigravityName:              strings.TrimSpace(gj.AntigravityName),
+		AntigravityProjectID:         strings.TrimSpace(gj.AntigravityProjectID),
+		AntigravityFile:              strings.TrimSpace(gj.AntigravityFile),
+		AntigravityCurrent:           gj.AntigravityCurrent,
+		AntigravityProxyDisabled:     gj.AntigravityProxyDisabled,
+		AntigravityValidationBlocked: gj.AntigravityValidationBlocked,
+		AntigravityQuota:             gj.AntigravityQuota,
+		GeminiSubscriptionTierID:     strings.TrimSpace(gj.GeminiSubscriptionTierID),
+		GeminiSubscriptionTierName:   strings.TrimSpace(gj.GeminiSubscriptionTierName),
+		GeminiValidationReasonCode:   strings.TrimSpace(gj.GeminiValidationReasonCode),
+		GeminiValidationMessage:      strings.TrimSpace(gj.GeminiValidationMessage),
+		GeminiValidationURL:          strings.TrimSpace(gj.GeminiValidationURL),
+	}
+	acc.AntigravityQuotaForbidden, acc.AntigravityQuotaForbiddenReason = antigravityQuotaDisposition(acc.AntigravityQuota)
 	// expiry_date is Unix timestamp in milliseconds
 	if gj.ExpiryDate > 0 {
 		acc.ExpiresAt = time.UnixMilli(gj.ExpiryDate)
@@ -136,6 +187,9 @@ func (p *GeminiProvider) LoadAccount(name, path string, data []byte) (*Account, 
 	if gj.DeadSince != nil {
 		acc.DeadSince = gj.DeadSince.UTC()
 	}
+	if gj.GeminiProviderCheckedAt != nil {
+		acc.GeminiProviderCheckedAt = gj.GeminiProviderCheckedAt.UTC()
+	}
 	acc.HealthStatus = strings.TrimSpace(gj.HealthStatus)
 	acc.HealthError = strings.TrimSpace(gj.HealthError)
 	return acc, nil
@@ -159,13 +213,13 @@ func geminiOAuthDefaultProfile() geminiOAuthClientProfile {
 	return geminiOAuthClientProfile{}
 }
 
-func geminiOAuthRefreshProfiles(profileID, explicitID, explicitSecret string) []geminiOAuthClientProfile {
+func geminiOAuthRefreshProfiles(operatorSource, profileID, explicitID, explicitSecret string) []geminiOAuthClientProfile {
 	seen := make(map[string]struct{})
 	profiles := make([]geminiOAuthClientProfile, 0, 5)
 	add := func(profile geminiOAuthClientProfile) {
 		profile.ID = strings.TrimSpace(profile.ID)
 		profile.Secret = strings.TrimSpace(profile.Secret)
-		if profile.ID == "" || profile.Secret == "" {
+		if profile.ID == "" {
 			return
 		}
 		key := profile.ID + "\x00" + profile.Secret
@@ -175,9 +229,22 @@ func geminiOAuthRefreshProfiles(profileID, explicitID, explicitSecret string) []
 		seen[key] = struct{}{}
 		profiles = append(profiles, profile)
 	}
+	addManagedDefaults := func() {
+		add(geminiOAuthDefaultProfile())
+		for _, candidateID := range []string{"gcloud", "env", "gemini_cli"} {
+			if profile, ok := geminiOAuthProfileByID(candidateID); ok {
+				add(profile)
+			}
+		}
+	}
+	normalizedSource := normalizeGeminiOperatorSource(operatorSource, profileID, AccountTypeGemini)
 
 	if resolved, ok := geminiOAuthProfileByID(profileID); ok {
 		add(resolved)
+	}
+
+	if normalizedSource == geminiOperatorSourceManagedOAuth {
+		addManagedDefaults()
 	}
 
 	add(geminiOAuthClientProfile{
@@ -186,15 +253,20 @@ func geminiOAuthRefreshProfiles(profileID, explicitID, explicitSecret string) []
 		Label:  "raw",
 	})
 
-	if profile, ok := geminiOAuthProfileByID("env"); ok {
-		add(profile)
+	if normalizedSource == geminiOperatorSourceAntigravityImport || strings.TrimSpace(profileID) == geminiOAuthAntigravityProfileID {
+		return profiles
 	}
 
-	if profile, ok := geminiOAuthProfileByID("gemini_cli"); ok {
-		add(profile)
-	}
-	if profile, ok := geminiOAuthProfileByID("gcloud"); ok {
-		add(profile)
+	if normalizedSource != geminiOperatorSourceManagedOAuth {
+		if profile, ok := geminiOAuthProfileByID("env"); ok {
+			add(profile)
+		}
+		if profile, ok := geminiOAuthProfileByID("gemini_cli"); ok {
+			add(profile)
+		}
+		if profile, ok := geminiOAuthProfileByID("gcloud"); ok {
+			add(profile)
+		}
 	}
 
 	return profiles
@@ -217,7 +289,9 @@ func refreshGeminiTokenWithClient(ctx context.Context, refreshTok string, profil
 
 	form := url.Values{}
 	form.Set("client_id", profile.ID)
-	form.Set("client_secret", profile.Secret)
+	if strings.TrimSpace(profile.Secret) != "" {
+		form.Set("client_secret", profile.Secret)
+	}
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshTok)
 
@@ -268,6 +342,7 @@ func refreshGeminiTokenWithClient(ctx context.Context, refreshTok string, profil
 func (p *GeminiProvider) RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error {
 	acc.mu.Lock()
 	refreshTok := acc.RefreshToken
+	operatorSource := acc.OperatorSource
 	explicitProfileID := acc.OAuthProfileID
 	explicitClientID := acc.OAuthClientID
 	explicitClientSecret := acc.OAuthClientSecret
@@ -287,7 +362,7 @@ func (p *GeminiProvider) RefreshToken(ctx context.Context, acc *Account, transpo
 		}
 		lastFallbackable error
 	)
-	for _, profile := range geminiOAuthRefreshProfiles(explicitProfileID, explicitClientID, explicitClientSecret) {
+	for _, profile := range geminiOAuthRefreshProfiles(operatorSource, explicitProfileID, explicitClientID, explicitClientSecret) {
 		nextPayload, fallbackable, err := refreshGeminiTokenWithClient(ctx, refreshTok, profile, transport)
 		if err == nil {
 			payload = nextPayload
@@ -301,6 +376,7 @@ func (p *GeminiProvider) RefreshToken(ctx context.Context, acc *Account, transpo
 				acc.OAuthClientID = profile.ID
 				acc.OAuthClientSecret = profile.Secret
 			}
+			acc.OperatorSource = normalizeGeminiOperatorSource(acc.OperatorSource, acc.OAuthProfileID, acc.Type)
 			acc.AccessToken = payload.AccessToken
 			if payload.RefreshToken != "" {
 				acc.RefreshToken = payload.RefreshToken

@@ -235,7 +235,7 @@ func (h *proxyHandler) forceRefreshAccount(w http.ResponseWriter, accountID stri
 	}
 
 	// Force refresh
-	err := h.refreshAccountOnce(context.Background(), target)
+	err := h.refreshAccountOnce(context.Background(), target, true)
 	if err != nil {
 		log.Printf("force refresh %s failed: %v", accountID, err)
 		respondJSON(w, map[string]any{"status": "error", "account": accountID, "error": err.Error()})

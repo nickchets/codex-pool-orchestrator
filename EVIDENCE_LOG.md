@@ -2,6 +2,81 @@
 
 > Repo-local evidence for root harness proof execution.
 
+### 2026-03-24T18:08:49Z | REPO-CPO-ARCH-P1-T46 provider-truth schema/status slice
+- Commands
+  - `gofmt -w pool.go provider_gemini.go account_snapshot.go status.go gemini_operator.go gemini_antigravity.go provider_gemini_test.go status_dashboard_test.go`
+  - `go test -count=1 -run '^(TestGeminiProviderLoadAccountLoadsAntigravityFields|TestSaveGeminiAccountPersistsAntigravityFields|TestBuildPoolDashboardDataIncludesGeminiProviderTruth|TestLocalOperatorGeminiAntigravityOAuthCallbackStoresImportedSeat|TestLocalOperatorGeminiAntigravityOAuthCallbackBootstrapsOnboardBeforeLoadCodeAssist|TestGeminiProviderLoadAccountLoadsPersistedState|TestSaveGeminiAccountPersistsStateFields|TestLocalOperatorGeminiSeatAddStoresManagedSeat|TestLocalOperatorGeminiSeatAddMarksUnauthorizedSeatDead|TestBuildPoolDashboardDataSeparatesGeminiOperatorLanes|TestServeStatusPageReturnsJSONForFormatQuery)$' ./...`
+  - `go build ./...`
+- Result
+  - PASS
+  - `T46` now has a real backend-first schema round-trip for Gemini provider-truth coming from Antigravity `loadCodeAssist`: subscription tier id/name, validation reason/message/url, and provider checked-at all persist through auth JSON, load back into runtime state, flow through account snapshots, and surface in `/status?format=json`.
+  - Antigravity OAuth onboarding now preserves that provider-truth through the import normalization path instead of dropping it before the seat is written to disk.
+  - Added focused regression coverage for the new path: load/save round-trip, status projection, and Antigravity OAuth callback persistence all execute in the same repo-local verify slice without reopening `T45`.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - This stays inside the first truthful `T46` sub-slice only: provider-truth schema/load-save/status projection.
+  - Warm-seat admission and routing pressure remain the next bounded follow-up inside `T46/T47`; this slice does not claim that gate is finished.
+
+### 2026-03-24T13:11:29Z | REPO-CPO-ALIGN-P1-T48 Gemini Antigravity facade live smoke
+- Commands
+  - `gofmt -w gemini_code_assist_facade.go gemini_code_assist_facade_test.go main.go`
+  - `go test -count=1 -run 'TestMaybeBuildGeminiCodeAssistFacadeRequest|TestUnwrapGeminiCodeAssistResponse|TestTransformGeminiCodeAssistSSE|TestMaybeTransformGeminiCodeAssistFacadeResponseBuffered' ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `payload=$(jq -Rs '{auth_json: .}' /home/lap/.antigravity_tools/accounts/2a208961-4979-41d3-9697-3d6929601489.json) && curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/import-oauth-creds -H 'Content-Type: application/json' --data "$payload" >/tmp/cpo_antigravity_import_working_response.json`
+  - `curl -fsS -X POST http://127.0.0.1:8989/v1beta/models/gemini-2.5-flash:generateContent -H "x-goog-api-key: $POOL_KEY" -H 'Content-Type: application/json' --data @/tmp/cpo_pool_v1beta_probe_body.json >/tmp/cpo_pool_v1beta_probe.out`
+  - `GEMINI_API_KEY="$POOL_KEY" GOOGLE_GEMINI_BASE_URL='http://127.0.0.1:8989' GOOGLE_API_KEY='' GOOGLE_GENAI_USE_GCA='' GOOGLE_CLOUD_ACCESS_TOKEN='' CODE_ASSIST_ENDPOINT='' gemini -m gemini-2.5-flash -p 'Reply with exactly AG_POOL_OK.' --output-format text >/tmp/cpo_gemini_cli_smoke_success.txt 2>/tmp/cpo_gemini_cli_smoke_success.err`
+- Result
+  - PASS
+  - Our pool now preserves its own auth and pool-user surface while translating pooled Gemini `/v1beta` content calls into Google Code Assist `v1internal` requests for imported Antigravity Gemini OAuth seats, then unwraps the responses back into Gemini API shape for clients.
+  - Direct Gemini Developer API upstream was not usable for these imported seats because it rejected the OAuth token scope, so the live pooled path now depends on the Code Assist facade instead of the developer API upstream.
+  - A working imported Antigravity seat carrying `token.project_id = psyched-sphere-vj8c5` became healthy again and served both the direct pool probe (`DIRECT_POOL_OK`) and the real Gemini CLI smoke (`AG_POOL_OK`).
+  - Post-smoke status showed the imported seat healthy and recently used in the live pool.
+- Artifacts
+  - `/tmp/cpo_pool_v1beta_probe.out`
+  - `/tmp/cpo_gemini_cli_smoke_success.txt`
+  - `/tmp/cpo_gemini_cli_smoke_success.err`
+  - `/tmp/cpo_gemini_status_after_success.json`
+  - `/tmp/cpo_antigravity_import_working_response.json`
+  - `/tmp/cpo_pool_user_create_probe.json`
+- Notes
+  - `POOL_KEY` in this slice means the synthetic Gemini pool API key used for `x-goog-api-key` admission, not the raw pool-user download token.
+  - Imported Antigravity seats without `project_id` were insufficient for this live Gemini facade lane.
+  - Do not record live tokens, pool keys, or auth payload contents in repo-local evidence.
+
+### 2026-03-24T12:26:45Z | REPO-CPO-BUG-P1-T45 residual projection-truth cleanup
+- Commands
+  - `gofmt -w pool.go status_dashboard_test.go`
+  - `go test -count=1 -run '^(TestGeminiProviderLoadAccountLeavesLegacyOperatorSourceUnsetWithoutProfileID|TestGeminiProviderLoadAccountInfersManagedOAuthFromOperatorEmail|TestGeminiProviderRefreshTokenPrefersManagedProfileBeforeLegacyRawClient|TestGeminiProviderRefreshTokenMigratesLegacySeatToManagedProfile|TestGeminiProviderRefreshTokenFallsBackToGCloudClient|TestGeminiProviderRefreshTokenFallsBackOn400InvalidGrant|TestGeminiProviderRefreshTokenFallsBackOn400InvalidClient|TestBuildPoolDashboardDataSeparatesGeminiOperatorLanes|TestBuildPoolDashboardDataLeavesLegacyGeminiOperatorSourceUnsetWithoutProvenance)$' ./...`
+  - `go build ./...`
+- Result
+  - PASS
+  - The residual `T45` projection mismatch is closed: orphan Gemini seats with no explicit `operator_source` and no `oauth_profile_id` no longer get projected back into `manual_import_legacy` through `normalizeGeminiOperatorSource`, so operator-facing JSON/dashboard projection now matches the runtime/storage truth established by the earlier compatibility slice.
+  - Added focused regression coverage for the operator surface: `TestBuildPoolDashboardDataLeavesLegacyGeminiOperatorSourceUnsetWithoutProvenance` proves such a legacy seat keeps an empty `operator_source` in dashboard projection and does not inflate managed/imported Gemini operator counts.
+  - This cleanup stayed deliberately bounded: it does not begin `REPO-CPO-ARCH-P1-T46` provider-truth persistence or `REPO-CPO-BUG-P1-T47` routing logic; it only clears the truthful foundation those later slices will build on.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - No live binary restart or `/status` smoke was performed in this residual cleanup slice because the change is limited to in-process projection logic plus regression coverage.
+
+### 2026-03-24T11:43:00Z | REPO-CPO-BUG-P1-T45
+- Commands
+  - `gofmt -w provider_gemini.go provider_gemini_test.go`
+  - `go test -count=1 -run '^(TestGeminiProviderLoadAccountLeavesLegacyOperatorSourceUnsetWithoutProfileID|TestGeminiProviderLoadAccountInfersManagedOAuthFromOperatorEmail|TestGeminiProviderRefreshTokenPrefersManagedProfileBeforeLegacyRawClient|TestGeminiProviderRefreshTokenMigratesLegacySeatToManagedProfile|TestGeminiProviderRefreshTokenFallsBackToGCloudClient|TestGeminiProviderRefreshTokenFallsBackOn400InvalidGrant|TestGeminiProviderRefreshTokenFallsBackOn400InvalidClient|TestLocalOperatorGeminiOAuthStartAllowsLoopbackWithoutAdminHeader|TestManagedGeminiOAuthCallbackStoresManagedSeat|TestBuildPoolDashboardDataSeparatesGeminiOperatorLanes)$' ./...`
+  - `go build ./...`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_operator:.gemini_operator,gemini_accounts:[.accounts[]|select(.type=="gemini")|{id,operator_source,health_status}]}'`
+- Result
+  - PASS
+  - Legacy Gemini seats that were saved without explicit `operator_source` no longer get force-labeled as `manual_import_legacy` during `LoadAccount`. That preserves the distinction between truly explicit manual-import seats and older seats whose provenance was never written to disk.
+  - Older managed Gemini seats that already carried `operator_email` still load as managed without waiting for a later refresh, so the compatibility fix does not regress the previously introduced managed-seat inference.
+  - A legacy seat can now self-migrate cleanly into the managed Gemini lane after a successful env/gcloud refresh fallback: the refresh path persists `oauth_profile_id`, drops stale raw client credentials, and now also writes `operator_source = managed_oauth` instead of staying stuck in a false manual-import label forever.
+  - The running local service still degrades honestly when no Gemini OAuth client is configured in its env. Live `/status?format=json` continues to report `managed_oauth_available = false`, `managed_seat_count = 0`, `imported_seat_count = 4`; this slice did not fake managed availability or try to pull T46/T47 quota-routing behavior forward.
+- Artifacts
+  - live command output captured in terminal only
+- Notes
+  - The migration is intentionally bounded: seats with an explicit stored source still keep that source; only legacy seats that had no persisted provenance can be promoted into the managed lane by a successful profile-backed refresh.
+  - This slice repairs operator/runtime truth for env-backed Gemini recovery only. Provider-truth persistence, warm-seat admission, and Gemini routing pressure remain in `T46` and `T47`.
+
 ### 2026-03-24T10:38:00Z | REPO-CPO-ALIGN-P1-T43
 - Commands
   - `gofmt -w pool.go account_snapshot.go provider_gemini.go gemini_operator.go status.go router.go provider_gemini_test.go status_dashboard_test.go frontend_setup_scripts_test.go`

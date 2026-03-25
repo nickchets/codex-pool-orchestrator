@@ -109,6 +109,8 @@ func geminiOperatorSourceLabel(source string) string {
 		return "managed oauth"
 	case geminiOperatorSourceManualImport, geminiOperatorSourceManualImportLegacy:
 		return "manual import"
+	case geminiOperatorSourceAntigravityImport:
+		return "antigravity import"
 	default:
 		return ""
 	}
@@ -140,48 +142,54 @@ type PlanCapacityView struct {
 
 // AccountStatus shows the status of a single account.
 type AccountStatus struct {
-	ID                       string               `json:"id"`
-	Type                     string               `json:"type"`
-	PlanType                 string               `json:"plan_type,omitempty"`
-	AuthMode                 string               `json:"auth_mode,omitempty"`
-	AccountID                string               `json:"account_id,omitempty"`
-	Email                    string               `json:"email,omitempty"`
-	Subject                  string               `json:"subject,omitempty"`
-	ChatGPTUserID            string               `json:"chatgpt_user_id,omitempty"`
-	WorkspaceID              string               `json:"workspace_id,omitempty"`
-	SeatKey                  string               `json:"seat_key,omitempty"`
-	FallbackOnly             bool                 `json:"fallback_only,omitempty"`
-	OperatorSource           string               `json:"operator_source,omitempty"`
-	Disabled                 bool                 `json:"disabled"`
-	Dead                     bool                 `json:"dead"`
-	PrimaryUsed              float64              `json:"primary_used_pct"`
-	SecondaryUsed            float64              `json:"secondary_used_pct"`
-	EffectivePrimary         float64              `json:"effective_primary_pct"`
-	EffectiveSecondary       float64              `json:"effective_secondary_pct"`
-	Routing                  PoolDashboardRouting `json:"routing"`
-	RecoveryAt               string               `json:"recovery_at,omitempty"`
-	PrimaryResetIn           string               `json:"primary_reset_in,omitempty"`
-	SecondaryResetIn         string               `json:"secondary_reset_in,omitempty"`
-	LastRefreshAt            string               `json:"last_refresh_at,omitempty"`
-	AuthExpiresAt            string               `json:"auth_expires_at,omitempty"`
-	AuthExpiresIn            string               `json:"auth_expires_in,omitempty"`
-	HealthStatus             string               `json:"health_status,omitempty"`
-	HealthError              string               `json:"health_error,omitempty"`
-	HealthCheckedAt          string               `json:"health_checked_at,omitempty"`
-	LastHealthyAt            string               `json:"last_healthy_at,omitempty"`
-	DeadSince                string               `json:"dead_since,omitempty"`
-	LocalLastUsed            string               `json:"local_last_used,omitempty"`
-	UsageObserved            string               `json:"usage_observed,omitempty"`
-	GitLabRateLimitName      string               `json:"gitlab_rate_limit_name,omitempty"`
-	GitLabRateLimitLimit     int                  `json:"gitlab_rate_limit_limit,omitempty"`
-	GitLabRateLimitRemaining int                  `json:"gitlab_rate_limit_remaining"`
-	GitLabRateLimitResetAt   string               `json:"gitlab_rate_limit_reset_at,omitempty"`
-	GitLabRateLimitResetIn   string               `json:"gitlab_rate_limit_reset_in,omitempty"`
-	GitLabQuotaExceededCount int                  `json:"gitlab_quota_exceeded_count,omitempty"`
-	GitLabQuotaProbeIn       string               `json:"gitlab_quota_probe_in,omitempty"`
-	Score                    float64              `json:"score"`
-	Inflight                 int64                `json:"inflight"`
-	LocalTokens              int64                `json:"local_tokens"`
+	ID                        string               `json:"id"`
+	Type                      string               `json:"type"`
+	PlanType                  string               `json:"plan_type,omitempty"`
+	AuthMode                  string               `json:"auth_mode,omitempty"`
+	AccountID                 string               `json:"account_id,omitempty"`
+	Email                     string               `json:"email,omitempty"`
+	Subject                   string               `json:"subject,omitempty"`
+	ChatGPTUserID             string               `json:"chatgpt_user_id,omitempty"`
+	WorkspaceID               string               `json:"workspace_id,omitempty"`
+	SeatKey                   string               `json:"seat_key,omitempty"`
+	FallbackOnly              bool                 `json:"fallback_only,omitempty"`
+	OperatorSource            string               `json:"operator_source,omitempty"`
+	Disabled                  bool                 `json:"disabled"`
+	Dead                      bool                 `json:"dead"`
+	PrimaryUsed               float64              `json:"primary_used_pct"`
+	SecondaryUsed             float64              `json:"secondary_used_pct"`
+	EffectivePrimary          float64              `json:"effective_primary_pct"`
+	EffectiveSecondary        float64              `json:"effective_secondary_pct"`
+	Routing                   PoolDashboardRouting `json:"routing"`
+	RecoveryAt                string               `json:"recovery_at,omitempty"`
+	PrimaryResetIn            string               `json:"primary_reset_in,omitempty"`
+	SecondaryResetIn          string               `json:"secondary_reset_in,omitempty"`
+	LastRefreshAt             string               `json:"last_refresh_at,omitempty"`
+	AuthExpiresAt             string               `json:"auth_expires_at,omitempty"`
+	AuthExpiresIn             string               `json:"auth_expires_in,omitempty"`
+	HealthStatus              string               `json:"health_status,omitempty"`
+	HealthError               string               `json:"health_error,omitempty"`
+	HealthCheckedAt           string               `json:"health_checked_at,omitempty"`
+	LastHealthyAt             string               `json:"last_healthy_at,omitempty"`
+	ProviderSubscriptionTier  string               `json:"provider_subscription_tier,omitempty"`
+	ProviderSubscriptionName  string               `json:"provider_subscription_name,omitempty"`
+	ProviderValidationCode    string               `json:"provider_validation_code,omitempty"`
+	ProviderValidationMessage string               `json:"provider_validation_message,omitempty"`
+	ProviderValidationURL     string               `json:"provider_validation_url,omitempty"`
+	ProviderCheckedAt         string               `json:"provider_checked_at,omitempty"`
+	DeadSince                 string               `json:"dead_since,omitempty"`
+	LocalLastUsed             string               `json:"local_last_used,omitempty"`
+	UsageObserved             string               `json:"usage_observed,omitempty"`
+	GitLabRateLimitName       string               `json:"gitlab_rate_limit_name,omitempty"`
+	GitLabRateLimitLimit      int                  `json:"gitlab_rate_limit_limit,omitempty"`
+	GitLabRateLimitRemaining  int                  `json:"gitlab_rate_limit_remaining"`
+	GitLabRateLimitResetAt    string               `json:"gitlab_rate_limit_reset_at,omitempty"`
+	GitLabRateLimitResetIn    string               `json:"gitlab_rate_limit_reset_in,omitempty"`
+	GitLabQuotaExceededCount  int                  `json:"gitlab_quota_exceeded_count,omitempty"`
+	GitLabQuotaProbeIn        string               `json:"gitlab_quota_probe_in,omitempty"`
+	Score                     float64              `json:"score"`
+	Inflight                  int64                `json:"inflight"`
+	LocalTokens               int64                `json:"local_tokens"`
 }
 
 type PoolDashboardRouting struct {
@@ -449,7 +457,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 			PlanType:           snapshot.PlanType,
 			AuthMode:           snapshot.AuthMode,
 			AccountID:          firstNonEmpty(snapshot.AccountID, snapshot.IDTokenChatGPTAccountID),
-			Email:              claims.Email,
+			Email:              firstNonEmpty(claims.Email, snapshot.OperatorEmail, snapshot.AntigravityEmail),
 			Subject:            claims.Subject,
 			ChatGPTUserID:      claims.ChatGPTUserID,
 			WorkspaceID:        workspaceID,
@@ -488,6 +496,16 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		}
 		if !snapshot.LastHealthyAt.IsZero() {
 			status.LastHealthyAt = snapshot.LastHealthyAt.UTC().Format(time.RFC3339)
+		}
+		if snapshot.Type == AccountTypeGemini {
+			status.ProviderSubscriptionTier = strings.TrimSpace(snapshot.GeminiSubscriptionTierID)
+			status.ProviderSubscriptionName = strings.TrimSpace(snapshot.GeminiSubscriptionTierName)
+			status.ProviderValidationCode = strings.TrimSpace(snapshot.GeminiValidationReasonCode)
+			status.ProviderValidationMessage = sanitizeStatusMessage(snapshot.GeminiValidationMessage)
+			status.ProviderValidationURL = strings.TrimSpace(snapshot.GeminiValidationURL)
+			if !snapshot.GeminiProviderCheckedAt.IsZero() {
+				status.ProviderCheckedAt = snapshot.GeminiProviderCheckedAt.UTC().Format(time.RFC3339)
+			}
 		}
 		if !snapshot.DeadSince.IsZero() {
 			status.DeadSince = snapshot.DeadSince.UTC().Format(time.RFC3339)
@@ -538,7 +556,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 			switch operatorSource {
 			case geminiOperatorSourceManagedOAuth:
 				data.GeminiOperator.ManagedSeatCount++
-			case geminiOperatorSourceManualImport, geminiOperatorSourceManualImportLegacy:
+			case geminiOperatorSourceManualImport, geminiOperatorSourceAntigravityImport, geminiOperatorSourceManualImportLegacy:
 				data.GeminiOperator.ImportedSeatCount++
 			}
 		}
@@ -1162,33 +1180,29 @@ const statusHTML = `<!DOCTYPE html>
             <div id="gitlab-claude-token-add-status" class="muted" style="margin-top: 10px;"></div>
         </div>
         <div class="operator-card">
-            <div class="operator-title">Managed Gemini OAuth</div>
+            <div class="operator-title">Antigravity Gemini Auth</div>
             <div class="muted">
-                This lane creates first-party managed Gemini seats through a local Google OAuth flow. It is separate from manual <code>oauth_creds.json</code> imports and should only appear when this service has a configured Gemini OAuth client.
+                This lane mirrors the original Antigravity browser sign-in flow, resolves the Code Assist project automatically, and stores the result as an Antigravity-backed Gemini seat in this pool. Manual <code>oauth_creds.json</code> import remains available as a low-level fallback.
             </div>
             <div class="result-block">
-                <div><strong>Managed seats:</strong> {{.GeminiOperator.ManagedSeatCount}}</div>
-                <div><strong>OAuth client:</strong> {{if .GeminiOperator.ManagedOAuthAvailable}}{{if .GeminiOperator.ManagedOAuthProfile}}{{.GeminiOperator.ManagedOAuthProfile}}{{else}}configured{{end}}{{else}}not configured{{end}}</div>
+                <div><strong>Imported seats:</strong> {{.GeminiOperator.ImportedSeatCount}}</div>
+                <div><strong>Total Gemini seats:</strong> {{.GeminiCount}}</div>
             </div>
-            {{if .GeminiOperator.ManagedOAuthAvailable}}
             <div class="action-row">
-                <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromStatus()">Start Managed Gemini OAuth</button>
+                <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromStatus()">Start Antigravity Gemini Auth</button>
             </div>
             <div id="gemini-oauth-start-status" class="muted" style="margin-top: 10px;"></div>
             <div id="gemini-oauth-start-result" class="result-block" style="display: none;">
-                <div><strong>OAuth URL</strong></div>
+                <div><strong>Antigravity Auth URL</strong></div>
                 <div id="gemini-oauth-start-url" class="mono" style="word-break: break-all;"></div>
                 <div id="gemini-oauth-start-outcome" class="muted" style="margin-top: 10px;"></div>
-                <a id="gemini-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px;">Open OAuth Page</a>
+                <a id="gemini-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px;">Open Antigravity Auth Page</a>
             </div>
-            {{else}}
-            <div class="muted" style="margin-top: 12px;">Managed Gemini OAuth is currently unavailable on this service. {{.GeminiOperator.ManagedOAuthNote}}</div>
-            {{end}}
         </div>
         <div class="operator-card">
             <div class="operator-title">Manual Gemini Import</div>
             <div class="muted">
-                Import an existing Gemini <code>oauth_creds.json</code> into the same Gemini seat pool. This is not a separate fallback/API pool; imported credentials become normal Gemini seats and are probed immediately after save.
+                Import an existing Gemini <code>oauth_creds.json</code> or Antigravity account JSON into the same Gemini seat pool. This is not a separate fallback/API pool; imported credentials become normal Gemini seats and are probed or primed immediately after save.
             </div>
             <div class="result-block">
                 <div><strong>Imported seats:</strong> {{.GeminiOperator.ImportedSeatCount}}</div>
@@ -2029,18 +2043,18 @@ const statusHTML = `<!DOCTYPE html>
         function geminiOAuthDescribeOutcome(before, after, backendMode) {
             const mode = String(backendMode || '').trim().toLowerCase();
             if (mode === 'added') {
-                return 'Gemini OAuth completed. Added a new seat; refreshing status now.';
+                return 'Antigravity Gemini auth completed. Added a new seat; refreshing status now.';
             }
             if (mode === 'refreshed') {
-                return 'Gemini OAuth completed. Refreshed an existing seat; refreshing status now.';
+                return 'Antigravity Gemini auth completed. Refreshed an existing seat; refreshing status now.';
             }
             if (after.count > before.count) {
-                return 'Gemini OAuth completed. Added a new seat; refreshing status now.';
+                return 'Antigravity Gemini auth completed. Added a new seat; refreshing status now.';
             }
             if (after.signature !== before.signature) {
-                return 'Gemini OAuth completed. Refreshed an existing seat; refreshing status now.';
+                return 'Antigravity Gemini auth completed. Refreshed an existing seat; refreshing status now.';
             }
-            return 'Gemini OAuth completed. Refreshing status now.';
+            return 'Antigravity Gemini auth completed. Refreshing status now.';
         }
 
         async function geminiOAuthFetchStatusSnapshot() {
@@ -2084,7 +2098,7 @@ const statusHTML = `<!DOCTYPE html>
             }
             try {
                 popup.document.open();
-                popup.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Preparing Gemini OAuth</title></head><body style="font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 24px;"><div style="max-width: 640px; margin: 64px auto; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 24px;">Opening Gemini OAuth session...</div></body></html>');
+                popup.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Preparing Antigravity Gemini Auth</title></head><body style="font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 24px;"><div style="max-width: 640px; margin: 64px auto; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 24px;">Opening Antigravity Gemini auth session...</div></body></html>');
                 popup.document.close();
                 popup.focus();
             } catch (error) {
@@ -2167,9 +2181,9 @@ const statusHTML = `<!DOCTYPE html>
                 }
                 if (status) {
                     status.style.color = '#f85149';
-                    status.textContent = 'Gemini OAuth completed, but status refresh failed: ' + (error && error.message ? error.message : error);
+                    status.textContent = 'Antigravity Gemini auth completed, but status refresh failed: ' + (error && error.message ? error.message : error);
                 }
-                geminiOAuthSetOutcome('Refresh failed. Use the Open OAuth Page link or retry after clearing the popup blocker.');
+                geminiOAuthSetOutcome('Refresh failed. Use the Open Antigravity Auth Page link or retry after clearing the popup blocker.');
                 geminiOAuthClearPendingState();
             }
         }
@@ -2189,19 +2203,19 @@ const statusHTML = `<!DOCTYPE html>
                     if (!geminiOAuthSnapshotsEqual(beforeSnapshot, afterSnapshot)) {
                         if (status) {
                             status.style.color = '#3fb950';
-                            status.textContent = 'Gemini OAuth callback applied. Refreshing status now.';
+                            status.textContent = 'Antigravity Gemini auth callback applied. Refreshing status now.';
                         }
                         void geminiOAuthFinalize(beforeSnapshot, backendMode, null);
                         return;
                     }
                     if (status) {
                         status.style.color = '#8b949e';
-                        status.textContent = 'Waiting for the Gemini seat state to change...';
+                        status.textContent = 'Waiting for the Antigravity Gemini seat state to change...';
                     }
                 } catch (error) {
                     if (status) {
                         status.style.color = '#8b949e';
-                        status.textContent = 'Waiting for the Gemini seat state to change...';
+                        status.textContent = 'Waiting for the Antigravity Gemini seat state to change...';
                     }
                 }
                 if (attempts >= maxAttempts) {
@@ -2213,16 +2227,16 @@ const statusHTML = `<!DOCTYPE html>
                     }
                     if (status) {
                         status.style.color = '#d29922';
-                        status.textContent = 'Timed out waiting for the Gemini seat state to change. Use the Open OAuth Page link to retry.';
+                        status.textContent = 'Timed out waiting for the Antigravity Gemini seat state to change. Use the Open Antigravity Auth Page link to retry.';
                     }
-                    geminiOAuthSetOutcome('No Gemini seat state change was detected yet.');
+                    geminiOAuthSetOutcome('No Antigravity Gemini seat state change was detected yet.');
                     return;
                 }
                 geminiOAuthWatcher = window.setTimeout(tick, 2000);
             };
             if (status) {
                 status.style.color = '#8b949e';
-                status.textContent = 'Waiting for the Gemini seat state to change...';
+                status.textContent = 'Waiting for the Antigravity Gemini seat state to change...';
             }
             geminiOAuthWatcher = window.setTimeout(tick, 2000);
         }
@@ -2265,10 +2279,10 @@ const statusHTML = `<!DOCTYPE html>
                     return;
                 }
 
-                const message = String((data && data.message) || 'Gemini OAuth failed.').trim();
+                const message = String((data && data.message) || 'Antigravity Gemini auth failed.').trim();
                 geminiOAuthSetOutcome(message);
                 status.style.color = '#f85149';
-                status.textContent = message || 'Gemini OAuth failed.';
+                status.textContent = message || 'Antigravity Gemini auth failed.';
             }, false);
         }
 
@@ -2290,7 +2304,7 @@ const statusHTML = `<!DOCTYPE html>
 
             button.disabled = true;
             status.style.color = '#8b949e';
-            status.textContent = 'Starting Gemini OAuth session...';
+            status.textContent = 'Starting Antigravity Gemini auth session...';
             result.style.display = 'none';
             urlNode.textContent = '';
             openLink.href = '#';
@@ -2298,7 +2312,7 @@ const statusHTML = `<!DOCTYPE html>
 
             try {
                 const beforeSnapshot = geminiOAuthSnapshot((await geminiOAuthFetchStatusSnapshot()).accounts);
-                const response = await fetch('/operator/gemini/oauth-start', {
+                const response = await fetch('/operator/gemini/antigravity/oauth-start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({})
@@ -2315,7 +2329,7 @@ const statusHTML = `<!DOCTYPE html>
                 urlNode.textContent = data.oauth_url;
                 openLink.href = data.oauth_url;
                 result.style.display = 'block';
-                geminiOAuthSetOutcome('Waiting for the Gemini seat state to change.');
+                geminiOAuthSetOutcome('Waiting for the Antigravity Gemini seat state to change.');
                 try {
                     sessionStorage.setItem(geminiOAuthStatusKey, JSON.stringify({
                         before: beforeSnapshot,
@@ -2327,10 +2341,10 @@ const statusHTML = `<!DOCTYPE html>
                 if (geminiOAuthPopup) {
                     geminiOAuthPopup.location.href = data.oauth_url;
                     status.style.color = '#3fb950';
-                    status.textContent = 'OAuth URL generated. Complete sign-in in the popup; this page will refresh when the Gemini seat is stored.';
+                    status.textContent = 'Antigravity auth URL generated. Complete sign-in in the popup; this page will refresh when the Gemini seat is stored.';
                 } else {
                     status.style.color = '#d29922';
-                    status.textContent = 'OAuth URL generated, but the popup was blocked. Open the page from the link below; this page will keep watching for the Gemini seat.';
+                    status.textContent = 'Antigravity auth URL generated, but the popup was blocked. Open the page from the link below; this page will keep watching for the Gemini seat.';
                 }
                 geminiOAuthWatchStatusChange(beforeSnapshot, data.result_mode || data.result || '');
             } catch (error) {
@@ -2339,8 +2353,8 @@ const statusHTML = `<!DOCTYPE html>
                 geminiOAuthClearPendingState();
                 button.disabled = false;
                 status.style.color = '#f85149';
-                status.textContent = 'Failed to start Gemini OAuth: ' + (error && error.message ? error.message : error);
-                geminiOAuthSetOutcome('Retry after clearing the popup blocker or open the OAuth URL manually.');
+                status.textContent = 'Failed to start Antigravity Gemini auth: ' + (error && error.message ? error.message : error);
+                geminiOAuthSetOutcome('Retry after clearing the popup blocker or open the Antigravity auth URL manually.');
             }
         }
 

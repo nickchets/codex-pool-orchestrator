@@ -6,27 +6,46 @@
 
 ### DOING
 
+#### REPO-CPO-ARCH-P1-T46: Persist Gemini provider truth and warm-seat admission
+1. Extend the managed Gemini seat schema/load-save path so one seat can persist provider-truth fields needed for later routing: `subscription_tier`, `protected_models`, `validation_blocked*`, per-model quota/reset snapshots, refresh timestamps, and normalized provider block-state fields instead of external sidecars.
+2. Add a Go-native Gemini warmup/probe contract on add and periodic refresh so a seat is only fully eligible after auth recovery plus the first provider-truth snapshot, and keep that state in core persistence rather than `index + sqlite + log-scrape` helpers.
+3. Keep the slice backend-first: lock schema round-trip, warm-seat eligibility, and non-breaking `/status?format=json` exposure before any new UI parity or quota-routing work.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestGeminiProviderLoadAccountLoadsPersistedState|TestSaveGeminiAccountPersistsStateFields|TestLocalOperatorGeminiSeatAddStoresManagedSeat|TestLocalOperatorGeminiSeatAddMarksUnauthorizedSeatDead|TestBuildPoolDashboardDataSeparatesGeminiOperatorLanes|TestServeStatusPageReturnsJSONForFormatQuery' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_operator:.gemini_operator,gemini_accounts:[.accounts[]|select(.type=="gemini")|{id,operator_source,health_status,block_reason:(.routing.block_reason//null)}]}'`
+
+### NEXT
+
+#### REPO-CPO-BUG-P1-T47: Make Gemini rotation sticky-until-pressure with provider-aware block reasons
+1. Add a Gemini-specific admission pre-filter that blocks `validation_blocked`, quarantined, not-warmed, cooldown, and quota-pressured seats before the generic sticky/scored selector runs.
+2. Preserve the existing pin/sticky/scored selector shape, but make Gemini keep one current seat until per-model pressure or a hard provider error forces rotation instead of degrading into near-even drain on generic recency.
+3. Surface the resulting Gemini routing reasons through `/status?format=json`, `/status`, and the landing/dashboard contract without introducing a second control plane, hidden fixed-account mode, or opaque log-derived semantics.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestCandidate.*Gemini|TestRoutingState.*Gemini|TestBuildPoolDashboardData.*|TestServeStatusPageReturnsJSONForFormatQuery' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="gemini")|{id,eligible:(.routing.eligible//false),block_reason:(.routing.block_reason//null),health_status:(.health_status//null)}]}'`
+
+### BLOCKED
+
 #### REPO-CPO-ALIGN-P1-T44: Reconcile Gemini pool truth after the operator split
-1. Make the Gemini dashboard summarize the actual pool composition after the operator split: managed seats, generic API-style fallback lanes if enabled, and automation/import lanes if configured.
+1. Make the Gemini dashboard summarize the actual pool composition after the operator split: managed seats, warmup or quota-blocked state, generic API-style fallback lanes if enabled, and automation or import lanes if configured.
 2. Ensure account rows, counters, and operator actions use the same source-of-truth field names across `/status?format=json`, `/status`, and the landing page.
-3. Lock the slice with targeted dashboard/status regressions and one live smoke against the running service once the UI split lands.
+3. Keep the UI slice blocked until provider-truth fields and Gemini routing reasons are first-class runtime data; otherwise the dashboard will look polished while still lying about seat pressure and rotation.
 
 **Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestServeStatusPageReturnsJSONForFormatQuery|TestServeStatusPage|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction|TestBuildPoolDashboardData.*|TestGeminiProviderLoadAccountLoadsPersistedState' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,gemini_operator:.gemini_operator,accounts:[.accounts[]|select(.type=="gemini")|{id,operator_source,eligible:(.routing.eligible//false),block_reason:(.routing.block_reason//null),health_status:(.health_status//null)}]}'`
 
-### NEXT
+### DONE
+
+#### REPO-CPO-ALIGN-P1-T48: Route pooled Gemini CLI traffic through our Antigravity facade
+1. Copy the Antigravity-compatible Gemini content lane into the pool orchestrator itself by translating pooled Gemini `/v1beta/models/*:generateContent|streamGenerateContent` requests into Google Code Assist `v1internal` calls whenever the selected imported seat carries `antigravity_project_id`.
+2. Preserve the orchestrator's own pool-user admission and auth shape: Gemini clients keep using the pool through the synthetic `x-goog-api-key` lane, while upstream auth stays on imported Antigravity Gemini OAuth seats and responses are unwrapped back into Gemini API shape.
+3. Close the slice only after a direct pooled `/v1beta` probe and a real `gemini` CLI smoke both succeed through the running pool.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestMaybeBuildGeminiCodeAssistFacadeRequest|TestUnwrapGeminiCodeAssistResponse|TestTransformGeminiCodeAssistSSE|TestMaybeTransformGeminiCodeAssistFacadeResponseBuffered' ./... && go build -o /home/lap/.local/bin/codex-pool . && curl -fsS -X POST http://127.0.0.1:8989/v1beta/models/gemini-2.5-flash:generateContent -H "x-goog-api-key: $POOL_KEY" -H 'Content-Type: application/json' --data @/tmp/cpo_pool_v1beta_probe_body.json && GEMINI_API_KEY="$POOL_KEY" GOOGLE_GEMINI_BASE_URL='http://127.0.0.1:8989' GOOGLE_API_KEY='' GOOGLE_GENAI_USE_GCA='' GOOGLE_CLOUD_ACCESS_TOKEN='' CODE_ASSIST_ENDPOINT='' gemini -m gemini-2.5-flash -p 'Reply with exactly AG_POOL_OK.' --output-format text`
 
 #### REPO-CPO-BUG-P1-T45: Repair Gemini managed OAuth runtime after env externalization
 1. Split the current Gemini operator contract into explicit lanes so `/` and `/status` stop mixing managed Gemini OAuth seat onboarding with provider-specific automation/import behavior.
 2. Now that the repo no longer ships hardcoded Google OAuth clients, make the managed Gemini path degrade cleanly from the local service env and recover existing seats without ambiguous `unauthorized_client` drift.
-3. Keep it bounded to runtime/config truth: env-backed client discovery, operator messaging, and migration/sanity for older managed seats that depended on repo-bundled defaults.
+3. Keep it bounded to operator/runtime truth only: env-backed client discovery, seat-source labeling, and migration or sanity for older managed seats that depended on repo-bundled defaults; Antigravity-style quota or rotation semantics stay behind `T46` and `T47`.
 
 **Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestGeminiProviderRefreshTokenFallsBackToGCloudClient|TestGeminiProviderRefreshTokenFallsBackOn400InvalidGrant|TestGeminiProviderRefreshTokenFallsBackOn400InvalidClient|TestLocalOperatorGeminiOAuthStartAllowsLoopbackWithoutAdminHeader|TestManagedGeminiOAuthCallbackStoresManagedSeat|TestBuildPoolDashboardDataSeparatesGeminiOperatorLanes' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_operator:.gemini_operator,gemini_accounts:[.accounts[]|select(.type=="gemini")|{id,operator_source,health_status}]}'`
-
-### BLOCKED
-
-_(none)_
-
-### DONE
 
 #### REPO-CPO-ALIGN-P1-T43: Separate Gemini onboarding lanes from provider-specific automation
 1. Split the Gemini operator/dashboard contract into explicit lanes so managed Gemini OAuth and manual `oauth_creds.json` import stop pretending to be the same action.

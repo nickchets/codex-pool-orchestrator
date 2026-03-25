@@ -124,6 +124,7 @@ func (h *proxyHandler) checkLocalOperatorAuth(w http.ResponseWriter, r *http.Req
 // ServeHTTP routes incoming requests to the appropriate handler.
 func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reqID := randomID()
+	r = withRequestTrace(r, newRequestTrace(h.cfg, reqID, r))
 	if h.cfg.debug {
 		log.Printf("[%s] incoming %s %s", reqID, r.Method, r.URL.Path)
 	}
@@ -219,6 +220,16 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.handleOperatorGeminiOAuthStart(w, r)
 		return
+	case "/operator/gemini/antigravity/oauth-start":
+		if !h.checkLocalOperatorAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleOperatorGeminiAntigravityOAuthStart(w, r)
+		return
 	case "/operator/gemini/oauth-callback":
 		if !h.checkLocalOperatorAuth(w, r) {
 			return
@@ -228,6 +239,16 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.handleOperatorGeminiOAuthCallback(w, r)
+		return
+	case "/operator/gemini/antigravity/oauth-callback", antigravityOAuthCallbackPath:
+		if !h.checkLocalOperatorAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleOperatorGeminiAntigravityOAuthCallback(w, r)
 		return
 	case "/operator/account-delete":
 		if !h.checkLocalOperatorAuth(w, r) {

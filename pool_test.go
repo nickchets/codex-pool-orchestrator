@@ -642,6 +642,46 @@ func TestRoutingStateBlocksRateLimitedLocalCodexSeat(t *testing.T) {
 	}
 }
 
+func TestRoutingStateBlocksValidationBlockedGeminiSeat(t *testing.T) {
+	now := time.Now()
+	seat := &Account{
+		ID:                           "gemini-seat",
+		Type:                         AccountTypeGemini,
+		AntigravityValidationBlocked: true,
+	}
+
+	seat.mu.Lock()
+	routing := routingStateLocked(seat, now, AccountTypeGemini, "")
+	seat.mu.Unlock()
+
+	if routing.Eligible {
+		t.Fatalf("expected validation-blocked Gemini seat to be blocked")
+	}
+	if routing.BlockReason != "validation_blocked" {
+		t.Fatalf("block_reason=%q", routing.BlockReason)
+	}
+}
+
+func TestRoutingStateBlocksProxyDisabledGeminiSeat(t *testing.T) {
+	now := time.Now()
+	seat := &Account{
+		ID:                       "gemini-seat",
+		Type:                     AccountTypeGemini,
+		AntigravityProxyDisabled: true,
+	}
+
+	seat.mu.Lock()
+	routing := routingStateLocked(seat, now, AccountTypeGemini, "")
+	seat.mu.Unlock()
+
+	if routing.Eligible {
+		t.Fatalf("expected proxy-disabled Gemini seat to be blocked")
+	}
+	if routing.BlockReason != "proxy_disabled" {
+		t.Fatalf("block_reason=%q", routing.BlockReason)
+	}
+}
+
 func TestCandidateSkipsRateLimitedLocalCodexSeat(t *testing.T) {
 	now := time.Now()
 	cooling := &Account{
