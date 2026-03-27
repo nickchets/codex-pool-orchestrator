@@ -98,7 +98,7 @@ The format is loosely based on Keep a Changelog. Versioning rules are defined in
 - GitLab-backed Claude pooling with managed Duo direct-access token minting.
 - Operator-facing GitLab Claude token onboarding and pool visibility in `/status`.
 - Dashboard-first local landing with live `Codex`, `Claude`, and `Gemini` views powered by `/status?format=json`.
-- Additional operator controls for fallback API keys, GitLab Claude tokens, and manual account deletion on the local dashboard surfaces.
+- Additional operator controls for fallback API keys, GitLab Claude tokens, and manual account deletion on the dashboard surfaces.
 - GitLab-specific status/admin visibility for cooldowns, quota backoff counters, and direct-access rate-limit signals.
 - Repo-local engineering governance files: `ACTION_PLAN.md`, `DEBUG.md`,
   `EVIDENCE_LOG.md`, and `PROJECT_MANIFEST.md`.
@@ -150,11 +150,10 @@ The format is loosely based on Keep a Changelog. Versioning rules are defined in
 ## [0.1.0] - 2026-03-19
 
 ### Added
-- Standalone operator-ready fork packaging around the upstream proxy core.
-- `orchestrator/codex_pool_manager.py`.
+- Standalone deployment assets around the upstream proxy core.
 - `systemd/codex-pool.service`.
-- Local install and security documentation.
-- Operator-oriented landing and status flows for local deployment.
+- Install and security documentation.
+- Operator-oriented landing and status flows for self-hosted deployment.
 
 ## Upstream Divergence Notes
 

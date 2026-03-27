@@ -149,11 +149,10 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 ## [0.1.0] - 2026-03-19
 
 ### Добавлено
-- Standalone operator-ready обвязка вокруг upstream proxy core.
-- `orchestrator/codex_pool_manager.py`.
+- Standalone deployment assets вокруг upstream proxy core.
 - `systemd/codex-pool.service`.
-- Локальная install/security документация.
-- Operator-oriented landing и status flows для локального deployment.
+- Install/security документация.
+- Operator-oriented landing и status flows для self-hosted deployment.
 
 ## Заметки о расхождении с upstream
 

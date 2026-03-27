@@ -126,7 +126,7 @@ func TestProxyBufferedAnthropicMessagesGeminiToolLoopReinjectsThoughtSignature(t
 			if !strings.Contains(upstreamBodies[1], `"thoughtSignature":"sig-buffered-1"`) {
 				t.Fatalf("second upstream body missing thoughtSignature reinjection: %s", upstreamBodies[1])
 			}
-			if !strings.Contains(upstreamBodies[1], `"result":"/home/lap/projects/codex-pool-orchestrator"`) {
+			if !strings.Contains(upstreamBodies[1], `"result":"/workspace/project"`) {
 				t.Fatalf("second upstream body missing tool result: %s", upstreamBodies[1])
 			}
 			_, _ = io.WriteString(w,
@@ -220,7 +220,7 @@ func TestProxyBufferedAnthropicMessagesGeminiToolLoopReinjectsThoughtSignature(t
 		"messages":[
 			{"role":"user","content":"Use the bash tool exactly once with command pwd. After the tool result, reply with exactly TOOL_BUFFERED_OK."},
 			{"role":"assistant","content":%s},
-			{"role":"user","content":[{"type":"tool_result","tool_use_id":%q,"content":"/home/lap/projects/codex-pool-orchestrator"}]}
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":%q,"content":"/workspace/project"}]}
 		],
 		"tools":[{"name":"bash","description":"run bash","input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}]
 	}`, string(assistantContent), first.Content[0].ID))

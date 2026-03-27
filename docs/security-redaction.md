@@ -12,7 +12,7 @@ Never publish:
 Safe to publish:
 
 - a sanitized standalone fork of the Go proxy
-- generic wrapper code
+- generic deployment helper code
 - synthetic tests
 - service templates with `%h` or env-driven paths
 - docs that describe layout and commands without live secrets
@@ -22,5 +22,5 @@ Before pushing:
 1. Search for absolute local paths.
 2. Search for real emails and workspace IDs.
 3. Search for secrets and token-shaped strings.
-4. Run the wrapper tests.
+4. Run the deployment/UI tests.
 5. Run the targeted Go tests for the operator delta.

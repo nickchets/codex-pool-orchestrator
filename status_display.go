@@ -8,6 +8,9 @@ import (
 var (
 	statusMessageWhitespacePattern = regexp.MustCompile(`\s+`)
 	openAIKeyLikePattern           = regexp.MustCompile(`sk-[A-Za-z0-9*._-]{10,}`)
+	claudeKeyLikePattern           = regexp.MustCompile(`sk-ant-[A-Za-z0-9*._-]{10,}`)
+	geminiAccessTokenLikePattern   = regexp.MustCompile(`ya29\.[A-Za-z0-9._-]{10,}`)
+	geminiRefreshTokenLikePattern  = regexp.MustCompile(`1//[A-Za-z0-9._-]{10,}`)
 )
 
 func compactSecretToken(value string) string {
@@ -24,6 +27,9 @@ func sanitizeStatusMessage(value string) string {
 		return ""
 	}
 	value = openAIKeyLikePattern.ReplaceAllStringFunc(value, compactSecretToken)
+	value = claudeKeyLikePattern.ReplaceAllStringFunc(value, compactSecretToken)
+	value = geminiAccessTokenLikePattern.ReplaceAllStringFunc(value, compactSecretToken)
+	value = geminiRefreshTokenLikePattern.ReplaceAllStringFunc(value, compactSecretToken)
 	value = strings.ReplaceAll(value, "You can find your API key at https://platform.openai.com/account/api-keys.", "")
 	value = strings.ReplaceAll(value, "You can find your API key at https://platform.openai.com/account/api-keys", "")
 	value = statusMessageWhitespacePattern.ReplaceAllString(value, " ")

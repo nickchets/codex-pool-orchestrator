@@ -90,7 +90,7 @@ func TestMaybeBuildAnthropicMessagesGeminiRequestWithTools(t *testing.T) {
 		"system":[{"type":"text","text":"sys"}],
 		"messages":[
 			{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"bash","input":{"command":"pwd"}}]},
-			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"\/home\/lap"}]}
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"\/workspace"}]}
 		],
 		"tools":[
 			{"name":"bash","description":"run bash","input_schema":{"$schema":"https://json-schema.org/draft/2020-12/schema","type":"object","properties":{"command":{"type":"string"}},"required":["command"],"additionalProperties":false}}
@@ -109,7 +109,7 @@ func TestMaybeBuildAnthropicMessagesGeminiRequestWithTools(t *testing.T) {
 		`"functionCall"`,
 		`"functionResponse"`,
 		`"command":"pwd"`,
-		`"result":"/home/lap"`,
+		`"result":"/workspace"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("rewritten body missing %q: %s", want, text)

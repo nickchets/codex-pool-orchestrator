@@ -22,15 +22,16 @@ var friendContent embed.FS
 func (h *proxyHandler) serveFriendLanding(w http.ResponseWriter, r *http.Request) {
 	var templateFile string
 	var templateData map[string]string
+	baseURL := h.getEffectivePublicURL(r)
+	if baseURL == "" {
+		baseURL = "http://localhost:8989"
+	}
 
 	if h.cfg.friendCode == "" {
 		// Local/personal mode - no friend code required
 		templateFile = "templates/local_landing.html"
 		templateData = map[string]string{
-			"BaseURL": getPublicURL(),
-		}
-		if templateData["BaseURL"] == "" {
-			templateData["BaseURL"] = "http://localhost:8989"
+			"BaseURL": baseURL,
 		}
 	} else {
 		// Friend mode - requires friend code
@@ -38,6 +39,7 @@ func (h *proxyHandler) serveFriendLanding(w http.ResponseWriter, r *http.Request
 		templateData = map[string]string{
 			"FriendName": getFriendName(),
 			"Tagline":    getFriendTagline(),
+			"BaseURL":    baseURL,
 		}
 	}
 

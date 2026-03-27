@@ -33,9 +33,9 @@ systemctl --user daemon-reload
 systemctl --user enable --now codex-pool.service
 ```
 
-## 4. Configure The Wrapper
+## 4. Configure The Runtime
 
-The wrapper reads these environment variables when present:
+The service reads these environment variables when present:
 
 - `CODEX_POOL_RUNTIME_ROOT`
 - `CODEX_HOME`
@@ -51,13 +51,13 @@ Reasonable defaults are used if they are omitted.
 Health check:
 
 ```bash
-python3 orchestrator/codex_pool_manager.py status --strict
+curl -fsS http://127.0.0.1:8989/healthz
 ```
 
-One-shot add-account flow:
+Machine-readable status:
 
 ```bash
-python3 orchestrator/codex_pool_manager.py codex-oauth-add
+curl -fsS http://127.0.0.1:8989/status?format=json | jq .
 ```
 
 Preferred web surfaces:
@@ -65,9 +65,15 @@ Preferred web surfaces:
 - `http://127.0.0.1:8989/` for the dashboard-first operator view
 - `http://127.0.0.1:8989/status` for the raw operator dashboard and JSON status contract
 
-Low-level fallback:
+Preferred add-account flows:
 
 ```bash
-python3 orchestrator/codex_pool_manager.py codex-oauth-start
-python3 orchestrator/codex_pool_manager.py codex-oauth-exchange --callback-url 'http://127.0.0.1:1455/auth/callback?code=...&state=...'
+# Codex: click "Start Codex OAuth" on `/` or `/status`
+# Gemini: click "Start Antigravity Gemini Auth" on `/` or `/status`
+```
+
+Low-level OAuth fallback:
+
+```bash
+curl -fsS -X POST http://127.0.0.1:8989/operator/codex/oauth-start | jq .
 ```

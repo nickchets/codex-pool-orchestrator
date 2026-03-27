@@ -33,3 +33,27 @@ func TestServeFriendLandingIncludesAddUserControl(t *testing.T) {
 		}
 	}
 }
+
+func TestServeFriendLandingUsesRequestBaseURLInMetadata(t *testing.T) {
+	h := &proxyHandler{
+		cfg: config{friendCode: "friend-code"},
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	rr := httptest.NewRecorder()
+	h.serveFriendLanding(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	body := rr.Body.String()
+	for _, fragment := range []string{
+		`content="http://example.com/og-image.png"`,
+		`content="http://example.com"`,
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("missing fragment %q", fragment)
+		}
+	}
+}
