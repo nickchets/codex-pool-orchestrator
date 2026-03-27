@@ -21,6 +21,24 @@
 - Notes
   - The temporary pool user created for the smoke was deleted immediately after the check. No GitLab tokens or pool-user credentials were copied into repo docs or release artifacts.
 
+### 2026-03-27T13:24:31Z | REPO-CPO-REL-P1-T54 post-restart observability addendum on the release binary
+- Commands
+  - `curl -fsS -D /tmp/cpo_release_models_headers_20260327.txt -o /tmp/cpo_release_models_body_20260327.json http://127.0.0.1:8989/backend-api/codex/models -H "Authorization: Bearer <codex-pool-token>" -H 'X-Pool-Trace-ID: release-models-20260327'`
+  - `raw /dev/tcp websocket handshake to http://127.0.0.1:8989/responses with X-Pool-Trace-ID=release-ws-20260327 and session_id=release-ws-20260327`
+  - `journalctl --user -u codex-pool.service --since '<post-restart-timestamp>' --no-pager | rg 'release-models-20260327|release-ws-20260327|trace models_cache|trace route mode=websocket|trace response status=101|trace finish mode=websocket'`
+- Result
+  - PASS
+  - The Codex/status half of the combined `0.8.0` release was re-proved on the same restarted release binary, not left at older temporary-runtime evidence only.
+  - `/backend-api/codex/models` returned `HTTP/1.1 200 OK` with `X-Codex-Models-Cache: refresh`, confirming the default `client_version` injection and models-cache trace path still work after deploy.
+  - A raw websocket handshake to `/responses` returned `HTTP/1.1 101 Switching Protocols`, and the service journal recorded the expected `trace route mode=websocket`, `trace response status=101`, and `trace finish mode=websocket` lifecycle for `release-ws-20260327`.
+  - This closes the last evidence gap for publishing the observability/status wave in the same tag as the Gemini/OpenCode closure chain.
+- Artifacts
+  - `/home/lap/.root_layer/shared/spikes/final_tail_completion_20260327/release_verify_post_restart/codex_models_headers.txt`
+  - `/home/lap/.root_layer/shared/spikes/final_tail_completion_20260327/release_verify_post_restart/codex_ws_status.txt`
+  - `/home/lap/.root_layer/shared/spikes/final_tail_completion_20260327/release_verify_post_restart/trace_journal.txt`
+- Notes
+  - This addendum complements the earlier full release verify rerun instead of replacing it; no further code changes were needed after the smoke.
+
 ### 2026-03-27T13:20:55Z | REPO-CPO-REL-P1-T54 full release verify rerun before publish
 - Commands
   - `gofmt -w proxy_buffered_test.go`
