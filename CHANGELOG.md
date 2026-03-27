@@ -9,6 +9,15 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.8.1] - 2026-03-27
+
+### Changed
+- The local landing page now expands Gemini quota visibility from summary-only counters to per-model limit rows with reset time, routable/catalog-only state, protected flags, and key model capabilities.
+
+### Fixed
+- Antigravity Gemini quota normalization now treats the outer `fetchAvailableModels` map key as canonical model identity, so placeholder inner `model` fields no longer collapse live quota snapshots into `0 models captured`.
+- Gemini truth-refresh logs now report the real hydrated quota model count instead of the misleading top-level quota key count.
+
 ## [0.8.0] - 2026-03-27
 
 ### Added

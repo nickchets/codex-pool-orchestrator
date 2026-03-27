@@ -613,12 +613,14 @@ func (h *proxyHandler) refreshStaleAntigravityGeminiTruthForAccount(ctx context.
 	if quotaErr != nil {
 		return quotaErr
 	}
+	quotaModels, _, _, _ := decodeGeminiQuotaSnapshot(quota)
 
 	log.Printf(
-		"antigravity gemini truth refreshed for %s (%s): project=%s quota_models=%d protected_models=%d",
+		"antigravity gemini truth refreshed for %s (%s): project=%s quota_models=%d quota_keys=%d protected_models=%d",
 		accountID,
 		accountEmail,
 		projectID,
+		len(quotaModels),
 		len(quota),
 		len(protectedList),
 	)
@@ -1455,12 +1457,27 @@ func antigravityQuotaModelAllowed(name string) bool {
 	return geminiQuotaModelAllowedInOperatorTruth(name)
 }
 
+func antigravityQuotaModelName(nameHint string, entry map[string]any) string {
+	candidates := []string{
+		strings.TrimSpace(nameHint),
+		antigravityQuotaString(entry, "name"),
+		antigravityQuotaString(entry, "model"),
+		antigravityQuotaString(entry, "id"),
+	}
+	for _, candidate := range candidates {
+		if antigravityQuotaModelAllowed(candidate) {
+			return candidate
+		}
+	}
+	return firstNonEmpty(candidates...)
+}
+
 func normalizeAntigravityGeminiQuotaModelEntry(nameHint string, entry map[string]any) (GeminiModelQuotaSnapshot, bool) {
 	if len(entry) == 0 {
 		return GeminiModelQuotaSnapshot{}, false
 	}
 	model := GeminiModelQuotaSnapshot{
-		Name:        firstNonEmpty(antigravityQuotaString(entry, "name", "model", "id"), strings.TrimSpace(nameHint)),
+		Name:        antigravityQuotaModelName(nameHint, entry),
 		ResetTime:   antigravityQuotaString(entry, "reset_time", "resetTime"),
 		DisplayName: antigravityQuotaString(entry, "display_name", "displayName"),
 	}

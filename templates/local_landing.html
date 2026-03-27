@@ -564,6 +564,96 @@
             line-height: 1.45;
         }
 
+        .quota-panel {
+            margin-top: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.02);
+            overflow: hidden;
+        }
+
+        .quota-panel summary {
+            cursor: pointer;
+            list-style: none;
+            padding: 10px 12px;
+            font-size: 0.78rem;
+            font-weight: 700;
+            color: var(--text);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .quota-panel summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .quota-panel summary::after {
+            content: '+';
+            color: var(--accent);
+            font-size: 1rem;
+            line-height: 1;
+        }
+
+        .quota-panel[open] summary::after {
+            content: '−';
+        }
+
+        .quota-model-list {
+            padding: 0 12px 12px;
+            display: grid;
+            gap: 8px;
+        }
+
+        .quota-model-row {
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            border-radius: 12px;
+            padding: 10px 12px;
+            background: rgba(0, 0, 0, 0.12);
+        }
+
+        .quota-model-head {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 10px;
+        }
+
+        .quota-model-name {
+            font-size: 0.84rem;
+            font-weight: 700;
+            color: var(--text);
+        }
+
+        .quota-model-meter {
+            font-size: 0.82rem;
+            font-weight: 700;
+            color: var(--accent);
+            white-space: nowrap;
+        }
+
+        .quota-model-id {
+            margin-top: 3px;
+            color: var(--muted);
+            font-size: 0.74rem;
+            word-break: break-all;
+        }
+
+        .quota-model-meta {
+            margin-top: 6px;
+            color: var(--muted);
+            font-size: 0.76rem;
+            line-height: 1.45;
+        }
+
+        .quota-model-badges {
+            margin-top: 8px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
         .badge {
             display: inline-flex;
             align-items: center;
@@ -1668,6 +1758,86 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             return parts.join(' | ');
         }
 
+        function geminiQuotaModels(acc) {
+            const quota = acc && acc.provider_truth && acc.provider_truth.quota ? acc.provider_truth.quota : null;
+            return Array.isArray(quota && quota.models) ? quota.models : [];
+        }
+
+        function geminiQuotaModelStateLabel(model) {
+            if (model && model.routable) {
+                return 'routable';
+            }
+            if (model && model.compatibility_lane === 'anthropic_adapter_required') {
+                return 'catalog-only';
+            }
+            return 'seat-blocked';
+        }
+
+        function geminiQuotaModelStateTone(model) {
+            if (model && model.routable) {
+                return 'success';
+            }
+            if (model && model.compatibility_lane === 'anthropic_adapter_required') {
+                return 'neutral';
+            }
+            return 'warning';
+        }
+
+        function geminiQuotaRowsHTML(acc) {
+            if (!acc || acc.type !== 'gemini') {
+                return '';
+            }
+            const models = geminiQuotaModels(acc);
+            if (models.length === 0) {
+                return '';
+            }
+            const rows = models.map((model) => {
+                const displayName = String(model && (model.display_name || model.name) || 'unknown model').trim();
+                const modelID = String(model && model.name || '').trim();
+                const metaParts = [];
+                if (model && model.reset_time) {
+                    metaParts.push('reset ' + formatDateTime(model.reset_time));
+                }
+                if (Number.isFinite(Number(model && model.max_output_tokens)) && Number(model.max_output_tokens) > 0) {
+                    metaParts.push('max out ' + formatNumber(model.max_output_tokens));
+                }
+                if (Number.isFinite(Number(model && model.thinking_budget)) && Number(model.thinking_budget) > 0) {
+                    metaParts.push('thinking ' + formatNumber(model.thinking_budget));
+                }
+                if (model && model.compatibility_reason) {
+                    metaParts.push(String(model.compatibility_reason));
+                }
+                const badges = [];
+                if (model && model.route_provider) {
+                    badges.push(`<span class="badge tone-neutral">${escapeHTML(String(model.route_provider))}</span>`);
+                }
+                badges.push(`<span class="badge tone-${escapeHTML(geminiQuotaModelStateTone(model))}">${escapeHTML(geminiQuotaModelStateLabel(model))}</span>`);
+                if (model && model.protected) {
+                    badges.push('<span class="badge tone-warning">protected</span>');
+                }
+                if (model && model.recommended) {
+                    badges.push('<span class="badge tone-success">recommended</span>');
+                }
+                return `
+                    <div class="quota-model-row">
+                        <div class="quota-model-head">
+                            <div class="quota-model-name">${escapeHTML(displayName)}</div>
+                            <div class="quota-model-meter">${escapeHTML(formatPct(model && model.percentage))}</div>
+                        </div>
+                        ${modelID && modelID !== displayName ? `<div class="quota-model-id mono">${escapeHTML(modelID)}</div>` : ''}
+                        ${metaParts.length > 0 ? `<div class="quota-model-meta">${escapeHTML(metaParts.join(' · '))}</div>` : ''}
+                        <div class="quota-model-badges">${badges.join('')}</div>
+                    </div>
+                `;
+            }).join('');
+            return `
+                <details class="quota-panel">
+                    <summary>Model limits (${escapeHTML(formatNumber(models.length))})</summary>
+                    <div class="quota-model-list">${rows}</div>
+                </details>
+            `;
+        }
+
         function geminiProjectSummary(acc) {
             if (!acc || acc.type !== 'gemini') {
                 return '';
@@ -2089,6 +2259,7 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 const geminiProject = compactDetail(geminiProjectSummary(acc), 96);
                 const geminiQuota = compactDetail(geminiQuotaSummary(acc), 112);
                 const geminiCompatibility = compactDetail(geminiCompatibilitySummary(acc), 96);
+                const geminiQuotaRows = geminiQuotaRowsHTML(acc);
                 const routingDetail = compactDetail(routing.detail || '', 120);
                 const healthDetail = compactDetail(health.detail || '', 120);
                 const meta = [];
@@ -2128,6 +2299,7 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                             <div class="table-meta">${escapeHTML(healthDetail)}</div>
                             ${geminiQuota ? `<div class="table-meta">${escapeHTML(geminiQuota)}</div>` : ''}
                             ${geminiCompatibility ? `<div class="table-meta">${escapeHTML(geminiCompatibility)}</div>` : ''}
+                            ${geminiQuotaRows}
                         </td>
                         <td>
                             <div class="table-title">${escapeHTML(String(acc.local_last_used || 'never'))}</div>

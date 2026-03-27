@@ -392,6 +392,38 @@ func TestNormalizeAntigravityGeminiQuotaPayloadNormalizesUpstreamModelMap(t *tes
 	}
 }
 
+func TestNormalizeAntigravityGeminiQuotaPayloadPrefersOuterMapKeyOverPlaceholderInnerModel(t *testing.T) {
+	quota, protectedModels := normalizeAntigravityGeminiQuotaPayload(map[string]any{
+		"models": map[string]any{
+			"gemini-3.1-pro-low": map[string]any{
+				"model": "MODEL_PLACEHOLDER_M36",
+				"quotaInfo": map[string]any{
+					"remainingFraction": 0.64,
+					"resetTime":         "2026-03-27T22:45:00Z",
+				},
+				"displayName": "Gemini 3.1 Pro Low",
+			},
+		},
+	}, time.Time{})
+
+	if len(protectedModels) != 0 {
+		t.Fatalf("protectedModels=%#v", protectedModels)
+	}
+	models, _ := quota["models"].([]GeminiModelQuotaSnapshot)
+	if len(models) != 1 {
+		t.Fatalf("models=%#v", quota["models"])
+	}
+	if models[0].Name != "gemini-3.1-pro-low" {
+		t.Fatalf("Name=%q", models[0].Name)
+	}
+	if models[0].Percentage != 64 {
+		t.Fatalf("Percentage=%d", models[0].Percentage)
+	}
+	if models[0].DisplayName != "Gemini 3.1 Pro Low" {
+		t.Fatalf("DisplayName=%q", models[0].DisplayName)
+	}
+}
+
 func TestNormalizeAntigravityGeminiQuotaPayloadFiltersCodexModelsAndClassifiesRoutes(t *testing.T) {
 	quota, protectedModels := normalizeAntigravityGeminiQuotaPayload(map[string]any{
 		"models": map[string]any{

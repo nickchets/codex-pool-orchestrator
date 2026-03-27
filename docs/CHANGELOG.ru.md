@@ -8,6 +8,15 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.8.1] - 2026-03-27
+
+### Изменено
+- Локальный landing теперь показывает Gemini quota не только как summary-счетчики, но и как per-model rows с reset time, состоянием `routable`/`catalog-only`, protected-флагами и ключевыми model capabilities.
+
+### Исправлено
+- Нормализация Antigravity Gemini quota теперь считает каноничным outer key из `fetchAvailableModels`, поэтому placeholder-поля `model` внутри entry больше не схлопывают живые quota snapshots в `0 models captured`.
+- Логи refresh-пути Gemini теперь показывают реальное число hydrated quota models, а не вводящий в заблуждение count top-level quota keys.
+
 ## [0.8.0] - 2026-03-27
 
 ### Добавлено
