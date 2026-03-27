@@ -712,6 +712,30 @@ func TestRoutingStateBlocksMissingProjectGeminiSeat(t *testing.T) {
 	}
 }
 
+func TestRoutingStateAllowsWarmedMissingProjectAntigravityGeminiSeat(t *testing.T) {
+	now := time.Now()
+	seat := &Account{
+		ID:                      "gemini-seat",
+		Type:                    AccountTypeGemini,
+		OperatorSource:          geminiOperatorSourceAntigravityImport,
+		OAuthProfileID:          geminiOAuthAntigravityProfileID,
+		GeminiProviderCheckedAt: now.Add(-time.Minute),
+		GeminiOperationalState:  geminiOperationalTruthStateDegradedOK,
+		GeminiOperationalReason: "operator smoke succeeded via fallback project",
+	}
+
+	seat.mu.Lock()
+	routing := routingStateLocked(seat, now, AccountTypeGemini, "")
+	seat.mu.Unlock()
+
+	if !routing.Eligible {
+		t.Fatalf("expected warmed missing-project Antigravity seat to stay eligible, got %+v", routing)
+	}
+	if routing.BlockReason != "" {
+		t.Fatalf("block_reason=%q", routing.BlockReason)
+	}
+}
+
 func TestRoutingStateBlocksGeminiOperationalHardFail(t *testing.T) {
 	now := time.Now()
 	seat := &Account{

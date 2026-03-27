@@ -9,6 +9,14 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.8.3] - 2026-03-27
+
+### Changed
+- Warmed Antigravity Gemini seats that still report `provider_truth_state=missing_project_id` now stay in `degraded_enabled` when the fallback Code Assist project is actually usable, instead of being hard-blocked despite successful operational proof.
+
+### Fixed
+- Routing truth, `/status`, and downstream exports no longer contradict live Gemini seat smoke for fallback-project seats that can answer requests even without a persisted provider project id.
+
 ## [0.8.2] - 2026-03-27
 
 ### Changed

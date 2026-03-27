@@ -777,6 +777,52 @@ func TestBuildPoolDashboardDataMarksAllowlistedValidationBlockedGeminiQuotaModel
 	}
 }
 
+func TestBuildPoolDashboardDataMarksWarmedMissingProjectGeminiSeatDegradedEnabled(t *testing.T) {
+	now := time.Date(2026, 3, 27, 12, 0, 0, 0, time.UTC)
+	seat := &Account{
+		ID:                        "gemini_missing_project_warmed",
+		Type:                      AccountTypeGemini,
+		PlanType:                  "gemini",
+		AuthMode:                  accountAuthModeOAuth,
+		OperatorSource:            geminiOperatorSourceAntigravityImport,
+		OAuthProfileID:            geminiOAuthAntigravityProfileID,
+		GeminiProviderCheckedAt:   now,
+		GeminiOperationalState:    geminiOperationalTruthStateDegradedOK,
+		GeminiOperationalReason:   "operator smoke succeeded via fallback project",
+		GeminiQuotaUpdatedAt:      now,
+		GeminiQuotaModels:         []GeminiModelQuotaSnapshot{{Name: "gemini-3.1-pro-high", RouteProvider: "gemini", Percentage: 81}},
+		GeminiProviderTruthReason: "provider truth missing project_id",
+	}
+
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{seat}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	data := h.buildPoolDashboardData(now)
+	if len(data.Accounts) != 1 {
+		t.Fatalf("accounts=%d", len(data.Accounts))
+	}
+	if !data.Accounts[0].Routing.Eligible {
+		t.Fatalf("routing=%+v", data.Accounts[0].Routing)
+	}
+	if data.Accounts[0].Routing.State != routingDisplayStateDegradedEnabled {
+		t.Fatalf("routing_state=%q", data.Accounts[0].Routing.State)
+	}
+	if data.Accounts[0].Routing.BlockReason != "" {
+		t.Fatalf("block_reason=%q", data.Accounts[0].Routing.BlockReason)
+	}
+	if !strings.Contains(data.Accounts[0].Routing.DegradedReason, "fallback project") {
+		t.Fatalf("degraded_reason=%q", data.Accounts[0].Routing.DegradedReason)
+	}
+	if data.Accounts[0].ProviderTruth == nil {
+		t.Fatal("expected provider_truth object")
+	}
+	if data.Accounts[0].ProviderTruth.State != geminiProviderTruthStateMissingProjectID {
+		t.Fatalf("provider_truth.state=%q", data.Accounts[0].ProviderTruth.State)
+	}
+}
+
 func TestBuildPoolDashboardDataSummarizesGeminiQuotaSnapshotWithoutModelRows(t *testing.T) {
 	now := time.Date(2026, 3, 27, 12, 0, 0, 0, time.UTC)
 	seat := &Account{

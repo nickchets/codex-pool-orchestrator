@@ -8,6 +8,14 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.8.3] - 2026-03-27
+
+### Изменено
+- Warmed Antigravity Gemini seat’ы с `provider_truth_state=missing_project_id` теперь остаются в `degraded_enabled`, если fallback Code Assist project реально пригоден для работы, вместо жесткой блокировки despite successful operational proof.
+
+### Исправлено
+- Routing truth, `/status` и downstream exports больше не противоречат live Gemini seat smoke для fallback-project seat’ов, которые реально отвечают на запросы даже без сохраненного provider project id.
+
 ## [0.8.2] - 2026-03-27
 
 ### Изменено

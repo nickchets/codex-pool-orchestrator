@@ -147,7 +147,7 @@ Important operator-facing states:
 - `enabled`: clean fresh-routing path.
 - `degraded_enabled`: the seat is still eligible for fresh routing, but only under provider or operational caveats.
 - `cooldown`: a short rate-limit reset window after a `429`; wait for `routing.recovery_at` or rerun seat smoke instead of deleting the seat immediately.
-- `missing_project_id`: provider truth exists, but project resolution is incomplete, so the seat is blocked.
+- `missing_project_id`: provider truth exists, but project resolution is incomplete; browser-auth Antigravity seats stay blocked until they have warmed fallback-project proof, after which routing can keep them in `degraded_enabled`.
 - `stale_quota_snapshot` or `stale_provider_truth`: refresh debt, not automatic proof that the account is dead.
 
 Manual Gemini seat smoke:

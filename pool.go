@@ -226,9 +226,16 @@ func routingStateLocked(a *Account, now time.Time, accountType AccountType, requ
 		}
 		switch strings.TrimSpace(a.GeminiProviderTruthState) {
 		case geminiProviderTruthStateMissingProjectID:
-			state.Eligible = false
-			state.BlockReason = "missing_project_id"
-			return state
+			if effectiveGeminiCodeAssistProjectID(a) == "" {
+				state.Eligible = false
+				state.BlockReason = "missing_project_id"
+				return state
+			}
+			if !geminiHasOperationalProof(a.GeminiOperationalState) {
+				state.Eligible = false
+				state.BlockReason = "not_warmed"
+				return state
+			}
 		case geminiProviderTruthStateRestricted, geminiProviderTruthStateProjectOnlyUnverified, geminiProviderTruthStateAuthOnly:
 			if !geminiHasOperationalProof(a.GeminiOperationalState) {
 				state.Eligible = false
