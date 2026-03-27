@@ -2,6 +2,143 @@
 
 > Repo-local evidence for root harness proof execution.
 
+### 2026-03-27T20:30:00Z | REPO-CPO-VERIFY-P2 post-commit head proof for runtime cleanup stack
+- Commands
+  - `go build ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `timeout 40s systemctl --user restart codex-pool.service`
+  - `systemctl --user show codex-pool.service -p MainPID,ExecMainStartTimestamp,ActiveState,SubState`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,gitlab_claude_pool:.gitlab_claude_pool,accounts:[.accounts[]|select((.type=="gemini") or (.type=="claude" and .plan_type=="gitlab_duo"))|{id,type,health_status,dead,routing:.routing,provider:.provider_truth,operational:.operational_truth}]}'`
+  - `timeout 120s agcode --agcode-setup-only`
+  - `jq '{activeIndex,accounts:[.accounts[]|{email,enabled,lastSwitchReason,cachedQuota}]}' /home/lap/.config/opencode/antigravity-accounts.json`
+  - `timeout 180s agcode run 'Reply with exactly T57_LIVE_OK.'`
+  - `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data '{"account_id":"gemini_seat_4eeafc81d5e0","model":"gemini-3.1-pro","force_refresh":false}' | jq '{account_id,provider_truth_state,routing_state,routing_block_reason,routing_recovery_at,operational_truth,generate}'`
+- Result
+  - PASS
+  - The current committed runtime stack still builds and serves correctly after the cleanup commit train. `systemctl --user show` reports `ActiveState=active`, `SubState=running`, and `MainPID=254259`, while `/healthz` returned `{"status":"ok","uptime":"1.9h"}` on the running service.
+  - Live pool truth matches the intended post-release taxonomy instead of collapsing back to older generic health labels. `/status?format=json` now shows `gemini_pool.total_seats=5`, `eligible_seats=3`, `clean_eligible_seats=2`, `degraded_eligible_seats=1`, `cooldown_seats=1`, and `gitlab_claude_pool.eligible_tokens=1`.
+  - The no-prompt OpenCode path still holds on the current head. `agcode --agcode-setup-only` rewrote the local OpenCode state against `http://127.0.0.1:8989/v1`, `antigravity-accounts.json` kept `activeIndex=0` on a clean ready seat, and plain `agcode run` returned `T57_LIVE_OK.` through `gemini-3.1-pro`.
+  - The suspicious Gemini seat is now classified by truthful runtime state rather than by vague failure residue. `seat-smoke` for `gemini_seat_4eeafc81d5e0` on `gemini-3.1-pro` returned `429` with `provider_truth_state=ready`, `routing_state=cooldown`, `routing_block_reason=rate_limited`, and `routing_recovery_at=2026-03-29T16:06:58Z`, which confirms the new cooldown taxonomy and diagnostics are live on the running pool.
+- Notes
+  - This proof was run after the narrow runtime cleanup commits (`d393b12`, `b198c1f`, `3cc022b`) and before the repo-local docs/evidence tail was staged, so the evidence matches the code now sitting on `main`.
+
+### 2026-03-27T15:01:30Z | REPO-CPO-VERIFY-P2 post-SSOT targeted reverify for T56/T58
+- Commands
+  - `go test -count=1 -run 'TestOperatorGeminiSeatSmoke.*|TestBuildOpenCodeConfigBundle|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction|TestServeOpenCodeSetupScript_Bash|TestServeOpenCodeSetupScript_PowerShell' ./...`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json`
+  - `timeout 120s agcode --agcode-setup-only`
+  - `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data '{"account_id":"gemini_seat_7bed08c286d1","model":"gemini-3.1-pro","force_refresh":false}'`
+  - `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data '{"account_id":"gemini_seat_1506839b3bf8","model":"gemini-3.1-pro","force_refresh":false}'`
+  - `sleep 6`
+  - `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data '{"account_id":"gemini_seat_7bed08c286d1","model":"gemini-3.1-pro","force_refresh":false}'`
+  - `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data '{"account_id":"gemini_seat_1506839b3bf8","model":"gemini-3.1-pro","force_refresh":false}'`
+  - `timeout 180s agcode run 'Reply with exactly T56_DEFAULT_OK.'`
+- Result
+  - PASS with one bounded live quota note
+  - The targeted repo-local verify slice stayed green after SSOT sync. Tests passed, live `/status?format=json` still shows `5` Gemini seats with `3 ready`, and plain `agcode run` without `-m` still returned `T56_DEFAULT_OK` on `gemini-3.1-pro`.
+  - The earlier `T58` contradiction did not return. An immediate re-probe of `seat-smoke` on both ready `gemini-3.1-pro` seats hit short `429 RESOURCE_EXHAUSTED` cooldown windows (`quotaResetDelay` roughly `3-5s`), but the same requests succeeded with `generate.ok=true` and `operational_truth.state=clean_ok` after one short wait.
+  - The remaining open issue is therefore not synthetic `404` parity anymore but truthful quota-reset classification. Short provider cooldown windows can still temporarily mark a ready seat as operationally blocked, and that nuance belongs to `T57` admission/degraded-taxonomy cleanup rather than to `T58`.
+- Artifacts
+  - `/home/lap/.root_layer/shared/spikes/t56_t58_reverify_20260327/status.json`
+  - `/home/lap/.root_layer/shared/spikes/t56_t58_reverify_20260327/seat_smoke_new_ready.json`
+  - `/home/lap/.root_layer/shared/spikes/t56_t58_reverify_20260327/seat_smoke_existing_ready.json`
+  - `/home/lap/.root_layer/shared/spikes/t56_t58_reverify_20260327/opencode_summary.json`
+  - `/home/lap/.root_layer/shared/spikes/t56_t58_reverify_20260327/accounts_summary.json`
+  - `/home/lap/.root_layer/shared/spikes/t56_t58_reverify_20260327/agcode_run.txt`
+  - `/home/lap/.root_layer/shared/spikes/t56_t58_reverify_20260327/summary.txt`
+- Notes
+  - This reverify intentionally keeps the repo/local boundary explicit: repo-local `T56` covers exported config plus operator guidance, while plain `agcode run` without `-m` is re-proved here through the environment-local wrapper.
+
+### 2026-03-27T15:05:00Z | REPO-CPO-ALIGN-P2-T56 agcode/OpenCode no-prompt local path live closure
+- Commands
+  - `go test -count=1 -run 'TestBuildOpenCodeConfigBundle|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction|TestServeOpenCodeSetupScript_Bash|TestServeOpenCodeSetupScript_PowerShell' ./...`
+  - `timeout 120s agcode --agcode-setup-only`
+  - `jq '{model,baseURL:.provider["antigravity-manager"].options.baseURL}' /home/lap/.config/opencode/opencode.json`
+  - `jq '{activeIndex,activeAccount:(.accounts[.activeIndex] | {id,enabled,provider_truth_state:(.cachedQuota.provider_truth_state // null)})}' /home/lap/.config/opencode/antigravity-accounts.json`
+  - `curl -fsS http://127.0.0.1:8989/ > /home/lap/.root_layer/shared/spikes/t56_agcode_default_20260327/landing.html`
+  - `timeout 180s agcode run 'Reply with exactly T56_DEFAULT_OK.'`
+- Result
+  - PASS
+  - The local OpenCode cold-start path is now canonical and no-prompt. `agcode --agcode-setup-only` exports `~/.config/opencode/opencode.json` with `model=antigravity-manager/gemini-3.1-pro` and `baseURL=http://127.0.0.1:8989/v1`, while the verified live pool snapshot at closure time kept `activeIndex=0` on a ready Gemini seat.
+  - The operator-facing surfaces are aligned instead of drifting. The live landing now recommends `agcode --agcode-setup-only` followed by plain `agcode run`, and the repo contract exports the same canonical `gemini-3.1-pro` day-one path in code and tests.
+  - Repo-local `T56` covers exported config and operator guidance; plain `agcode run` now honors the intended pool model in this environment because the local wrapper injects the default model. OpenCode's top-level `model` export alone did not stop plain `agcode run` from falling back to a different provider.
+- Artifacts
+  - `/home/lap/.root_layer/shared/spikes/t56_agcode_default_20260327/opencode.json`
+  - `/home/lap/.root_layer/shared/spikes/t56_agcode_default_20260327/antigravity-accounts.json`
+  - `/home/lap/.root_layer/shared/spikes/t56_agcode_default_20260327/landing.html`
+  - `/home/lap/.root_layer/shared/spikes/t56_agcode_default_20260327/agcode_run.txt`
+  - `/home/lap/.root_layer/shared/spikes/t56_agcode_default_20260327/status.json`
+  - `/home/lap/.root_layer/shared/spikes/t56_agcode_default_20260327/summary.txt`
+- Notes
+  - This closure intentionally kept scope on operator UX and exported contract. It does not flatten the remaining Gemini admission/dead-state debt that is still isolated in `T57`.
+
+### 2026-03-27T14:52:00Z | REPO-CPO-BUG-P2-T58 operator seat-smoke parity with live Gemini 3.1 Pro
+- Commands
+  - `go test -count=1 -run 'TestOperatorGeminiSeatSmoke.*|TestMaybeBuildGeminiCodeAssistFacadeRequest|TestTransformGeminiCodeAssistSSE|TestMaybeTransformGeminiCodeAssistFacadeResponseBuffered' ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data '{"account_id":"gemini_seat_7bed08c286d1","model":"gemini-3.1-pro","force_refresh":false}'`
+  - `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data '{"account_id":"gemini_seat_1506839b3bf8","model":"gemini-3.1-pro","force_refresh":false}'`
+  - `timeout 180s agcode run -m antigravity-manager/gemini-3.1-pro 'Reply with exactly T58_AGCODE_OK.'`
+- Result
+  - PASS
+  - The false-negative operator contradiction exposed by `T55` is gone on the running pool. `seat-smoke` for `gemini-3.1-pro` now returns `200` with `generate.ok=true` and `operational_truth.state=clean_ok` for both the fresh browser-auth seat `gemini_seat_7bed08c286d1` and the older ready seat `gemini_seat_1506839b3bf8`.
+  - The proof stayed contract-first and bounded. The already-present dirty-tree code in `operator_gemini_smoke.go` and `operator_gemini_smoke_test.go` was validated rather than replaced, so the fix scope remained limited to operator smoke parity with the live pooled path.
+  - The real pooled runtime was re-proved after restart instead of inferred. `agcode run -m antigravity-manager/gemini-3.1-pro ...` returned `T58_AGCODE_OK`, so operator smoke and the pooled `3.1 Pro` route now agree on healthy runtime truth.
+- Artifacts
+  - `/home/lap/.root_layer/shared/spikes/t58_live_fix_20260327_new_pro.json`
+  - `/home/lap/.root_layer/shared/spikes/t58_live_fix_20260327_existing_pro.json`
+  - `/home/lap/.root_layer/shared/spikes/t58_live_fix_20260327_agcode.txt`
+- Notes
+  - This was a real runtime contradiction, not a browser-auth failure. The fresh `T55` seat remained valid before and after the parity fix.
+
+### 2026-03-27T14:37:30Z | REPO-CPO-VERIFY-P2-T55 fresh browser-auth proof on published 0.8.x
+- Commands
+  - `curl -fsS http://127.0.0.1:8989/status?format=json`
+  - `python3 ... sorted /home/lap/.root_layer/codex_pool/pool/gemini/gemini_seat_*.json by mtime to identify the fresh seat`
+  - `agcode --agcode-setup-only`
+  - `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data '{"account_id":"gemini_seat_7bed08c286d1","model":"gemini-3.1-pro","force_refresh":true}'`
+  - `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data '{"account_id":"gemini_seat_1506839b3bf8","model":"gemini-3.1-pro","force_refresh":false}'`
+  - `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data '{"account_id":"gemini_seat_7bed08c286d1","model":"gemini-2.5-flash","force_refresh":false}'`
+  - `timeout 180s agcode run -m antigravity-manager/gemini-3.1-pro 'Reply with exactly T55_AGCODE_OK.'`
+- Result
+  - PASS (fresh browser-auth import proof) with a new typed runtime contradiction split into successor `T58`
+  - The operator-added seat is real and fresh on the published binary, not a stale ghost. Live `/status?format=json` now shows `gemini_pool.total_seats=5`, `ready_seats=3`, and the new seat `gemini_seat_7bed08c286d1` with `provider_truth.state=ready`, `project_id=primeval-bit-pxq56`, and a fresh provider snapshot.
+  - The export/client side also held on the fresh state. `agcode --agcode-setup-only` kept `baseURL=http://127.0.0.1:8989/v1`, and `antigravity-accounts.json` now places the new ready seat at `activeIndex=0` instead of a degraded-enabled seat. A pooled `agcode run -m antigravity-manager/gemini-3.1-pro` returned `T55_AGCODE_OK`.
+  - The proof exposed one bounded runtime contradiction instead of hiding it: operator `seat-smoke` on `gemini-3.1-pro` returns typed `404 Not Found` for both the new ready seat and an older ready seat, while the same new seat succeeds on `gemini-2.5-flash`. This points to divergence between operator `seat-smoke` and the live pooled `gemini-3.1-pro` path, not to a failed browser-auth import.
+- Artifacts
+  - `/home/lap/.root_layer/shared/spikes/t55_browser_auth_proof_20260327/seat_smoke_new_pro.json`
+  - `/home/lap/.root_layer/shared/spikes/t55_browser_auth_proof_20260327/seat_smoke_existing_pro.json`
+  - `/home/lap/.root_layer/shared/spikes/t55_browser_auth_proof_20260327/seat_smoke_new_flash.json`
+  - `/home/lap/.root_layer/shared/spikes/t55_browser_auth_proof_20260327/agcode_run.txt`
+  - `/home/lap/.root_layer/shared/spikes/t55_browser_auth_proof_20260327/summary.txt`
+- Notes
+  - The original `T55` verify hook was slightly stale on the status shape: the live operator source is now reported as browser-auth/Antigravity wording rather than exact legacy `browser_oauth`. The updated board entry now selects browser-auth seats by runtime truth instead of by the old exact string.
+
+### 2026-03-27T13:55:00Z | REPO-CPO-PLAN-P2 post-0.8.0 backlog hydration with Gemini + Opus + delegated audits
+- Commands
+  - `timeout 60s /home/lap/.local/bin/opus-preflight`
+  - `timeout 180s /home/lap/.local/bin/opus-run 'Reply with exactly OPUS_BATCH_OK.'`
+  - `timeout 600s /home/lap/.local/bin/opus-run '...review prompt...'`
+  - `timeout 120s opencode models antigravity-manager`
+  - `timeout 300s agcode --agcode-setup-only`
+  - `timeout 180s agcode run -m antigravity-manager/gemini-3.1-pro 'Reply with exactly GEMINI_POOL_OK.'`
+  - `timeout 600s agcode run -m antigravity-manager/gemini-3.1-pro '...audit prompt...'`
+  - `jq '{default:(.default // null),baseURL:(.provider["antigravity-manager"].options.baseURL // null)}' /home/lap/.config/opencode/opencode.json`
+  - `jq '{activeIndex,activeIndexByFamily}' /home/lap/.config/opencode/antigravity-accounts.json`
+- Result
+  - PASS (planning / backlog hydration)
+  - Opus availability is now re-proved in the current wave instead of being inferred from older runbooks: `opus-preflight` passed, the direct availability probe returned `OPUS_BATCH_OK`, and the long-form `opus-run` review converged on the same next order as the local board: keep `T55` narrow as the first fresh browser-auth proof, then productize `agcode` / OpenCode UX in `T56`, then pay down Gemini admission / dead-source brittleness in `T57`.
+  - Gemini `3.1 Pro` through `agcode` / OpenCode returned the same ordering. Its roadmap kept `T55` strictly bounded, promoted `agcode` / OpenCode default UX into the first explicit post-release slice, and treated admission/dead-state cleanup as the follow-on technical-debt wave.
+  - The current no-manual-key OpenCode path is live on the published binary: `agcode --agcode-setup-only` refreshed `~/.config/opencode/opencode.json` and `antigravity-accounts.json` for `provider=antigravity-manager` with `base_url=http://127.0.0.1:8989/v1`, `opencode models antigravity-manager` listed the live Gemini catalog including `gemini-3.1-pro`, and a direct `agcode run -m antigravity-manager/gemini-3.1-pro ...` probe returned `GEMINI_POOL_OK`.
+  - The then-open operator gap was made explicit in planning instead of hidden in ad hoc notes: exported OpenCode state still showed `default=null` and `activeIndex=0`, so `T56` was carved out to own the canonical day-one model path plus fresh-ready `activeIndex` preference rather than leaving that behavior implicit.
+  - Repo-local planning artifacts were updated accordingly at that time: `T55` carried explicit acceptance/trigger guidance, and successor cards `T56` and `T57` were hydrated on the board instead of leaving post-release work as an implicit void after `0.8.0`.
+- Artifacts
+  - `docs/POST_RELEASE_POOL_ROADMAP_20260327.ru.md`
+- Notes
+  - No pool secrets or live pool-user tokens were copied into repo docs or evidence.
+
 ### 2026-03-27T13:24:30Z | REPO-CPO-OPS-P1-T53 GitLab Claude recovery re-verified on the live pool
 - Commands
   - `python3 /home/lap/tools/codex_pool_manager.py status --strict`
@@ -1358,3 +1495,43 @@
   - `/home/lap/.root_layer/shared/spikes/t47_live_gate_20260327/post_restart_status.json`
 - Notes
   - The live result makes the key contradiction explicit instead of hiding it: `gemini_seat_2a37154c570e` can still answer a direct fallback-project smoke, but it is now excluded from generic pool rotation because provider truth converged to `missing_project_id`.
+
+### 2026-03-27T15:29:00Z | REPO-CPO-ARCH-P2-T57-TAXONOMY-SLICE
+- Commands
+  - `gofmt -w pool.go status.go operator_gemini_smoke.go pool_test.go status_dashboard_test.go opencode_contract_test.go operator_gemini_smoke_test.go`
+  - `go test -count=1 -run 'TestRoutingState.*Gemini|TestBuildPoolDashboardData.*Gemini|TestBuildOpenCodeConfigBundle.*|TestOperatorGeminiSeatSmoke.*|TestServeStatusPageReturnsJSONForFormatQuery' ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `timeout 40s systemctl --user restart codex-pool.service`
+  - `systemctl --user show codex-pool.service -p MainPID,ExecMainStartTimestamp,ActiveState,SubState`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json > /home/lap/.root_layer/shared/spikes/t57_taxonomy_20260327/status.json`
+  - `timeout 120s agcode --agcode-setup-only`
+  - `jq '{activeIndex,accounts:[.accounts[]|{email,enabled,lastSwitchReason,cachedQuota}]}' /home/lap/.config/opencode/antigravity-accounts.json`
+  - `timeout 180s agcode run 'Reply with exactly T57_LIVE_OK.'`
+  - `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data '{"account_id":"gemini_seat_4eeafc81d5e0","model":"gemini-2.5-flash","force_refresh":true}'`
+  - `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data '{"account_id":"gemini_seat_4eeafc81d5e0","model":"gemini-3.1-pro","force_refresh":true}'`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,account:(.accounts[]|select(.type=="gemini" and .id=="gemini_seat_4eeafc81d5e0")|{id,routing:.routing,operational:.operational_truth,provider:.provider_truth})}'`
+- Result
+  - PASS
+  - `T57` now carries a more truthful Gemini admission taxonomy without widening selector behavior: short quota-reset failures stay in `operational_truth.state=cooldown`, stale quota-only seats can be distinguished from genuinely stale provider truth, and operator `seat-smoke` now returns `routing_block_reason` plus `routing_recovery_at` for direct diagnostics.
+  - The cooldown contract is now stricter as well: when Gemini sends a structured reset window, the pool prefers that exact provider-derived deadline over the older coarse `45s` fallback. New regressions lock both sides of the rule: exact structured cooldown may shorten a stale fallback window, while fallback-only `429` handling still refuses to shorten an already longer wait.
+  - New targeted regressions cover the remaining operator-facing ambiguity: stale quota routing now has its own routing/export test path, aggregate Gemini cooldown counts now include degraded-eligible cooldown seats, and seat-smoke cooldown responses now assert the new block/recovery metadata.
+  - The live user service restarted onto `MainPID=198600` with `ExecMainStartTimestamp=Fri 2026-03-27 11:28:42 EDT`, and `curl -fsS http://127.0.0.1:8989/healthz` returned `{"status":"ok","uptime":"10s"}` after the restart.
+  - Live status after restart is healthier instead of more brittle: startup refresh re-hydrated the previously stale ready seat back into generic eligibility, so `/status?format=json` now shows `gemini_pool.eligible_seats=3` with two clean ready seats plus one degraded-enabled restricted seat, while the remaining non-routable residue is explicit as one `operational_hard_fail` seat and one `missing_project_id` seat.
+  - End-to-end client proof stayed green on the same rollout: `agcode --agcode-setup-only` exported the pool contract with the recovered ready seat at `activeIndex=0`, and plain `agcode run 'Reply with exactly T57_LIVE_OK.'` returned `T57_LIVE_OK.` through `gemini-3.1-pro`.
+  - The follow-up live probe narrowed the last suspected dead-source contradiction as well: `gemini_seat_4eeafc81d5e0` answered cleanly on `gemini-2.5-flash`, then returned a typed short `429 RESOURCE_EXHAUSTED` on `gemini-3.1-pro` with the new `routing_block_reason=rate_limited` / `routing_recovery_at` fields, and finally re-entered pool eligibility as `routing.state=degraded_enabled`. The live pool therefore moved to `eligible_seats=4` with one visible cooling-down seat rather than one lingering fake dead seat.
+  - After the precise-reset fix and restart, repeated live `gemini-3.1-pro` smoke on that same seat returned `clean_ok` twice in a row, so the earlier “forced 45s cooldown residue” symptom was no longer reproduced on the running binary. The exact-short-reset path now remains guarded primarily by the new regression tests.
+- Artifacts
+  - `/home/lap/.root_layer/shared/spikes/t57_taxonomy_20260327/status.json`
+  - `/home/lap/.root_layer/shared/spikes/t57_taxonomy_20260327/opencode_provider.json`
+  - `/home/lap/.root_layer/shared/spikes/t57_taxonomy_20260327/opencode_accounts.json`
+  - `/home/lap/.root_layer/shared/spikes/t57_taxonomy_20260327/agcode_setup.txt`
+  - `/home/lap/.root_layer/shared/spikes/t57_taxonomy_20260327/agcode_run.txt`
+  - `/home/lap/.root_layer/shared/spikes/t57_taxonomy_20260327/smoke_4eea_flash.json`
+  - `/home/lap/.root_layer/shared/spikes/t57_taxonomy_20260327/smoke_4eea_pro.json`
+  - `/home/lap/.root_layer/shared/spikes/t57_taxonomy_20260327/smoke_4eea_pro_precise.json`
+  - `/home/lap/.root_layer/shared/spikes/t57_taxonomy_20260327/smoke_4eea_pro_repeat.json`
+  - `/home/lap/.root_layer/shared/spikes/t57_taxonomy_20260327/status_4eea_after_cooldown.json`
+  - `/home/lap/.root_layer/shared/spikes/t57_taxonomy_20260327/summary.txt`
+- Notes
+  - This is a truthful in-progress `T57` landing rather than final closure. The taxonomy/diagnostic slice is live, and the main remaining policy choice is now about how much model-specific cooldown residue to keep visible in the shared pool, not about whether the suspicious seat is dead.

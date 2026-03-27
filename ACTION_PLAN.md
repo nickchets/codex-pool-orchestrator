@@ -7,23 +7,69 @@
 1. Operator directive on `2026-03-27` is explicit: do not cut a narrow Gemini publish. Close the current Gemini/Antigravity/OpenCode tail through repo-local bureaucracy and publish once with version/changelog only after the runtime, client, dashboard, and seat-reset slices are finished.
 2. External audit inputs captured on `2026-03-27` align on the same dependency chain: `T47 -> T50 -> T44 -> T51 -> T54`. The current repo-local truth after the post-restart live proof wave is: `T47`, `T50`, and `T44` are closed with fresh runtime evidence; `T51` stays in scope for this release, but its release-gate interpretation is narrowed to safe tooling delivery plus live rollback proof rather than a forced operator browser-auth re-add drill.
 3. The combined Gemini/Antigravity/OpenCode + observability wave is now publish-ready as `0.8.0`: full verify is green on the release candidate binary, GitLab Claude recovery (`T53`) is no longer blocking, and the remaining truthful residue is narrowed to post-release operational follow-up (`T55`) rather than to any unresolved release gate.
+4. The post-release audit wave on `2026-03-27` converged on the execution order `T55 -> T58 -> T56 -> T57`: first re-prove one fresh browser-auth add on the published binary, then repair the false-negative `gemini-3.1-pro` operator smoke path it exposed, then make `agcode` / OpenCode the canonical no-prompt local entrypoint, and only after that pay down the broader Gemini admission / dead-source brittleness.
+5. The same follow-through wave on `2026-03-27` is now mostly closed in runtime truth as well: `T55`, `T58`, and `T56` all passed with fresh live proof on the running pool, so the only truthful repo-local successor left from this chain is `T57`.
 
 ## Board
 
 ### DOING
 
+#### REPO-CPO-ARCH-P2-T57: Stabilize Gemini admission taxonomy and quarantine dead-source residue
+1. The biggest post-release technical risk is now model-state brittleness, not missing features: `provider_truth`, `operational_truth`, and `routing.state` are correct but spread across a large admission surface that still depends on upstream error-shape heuristics and historical dead seats remaining visible in the same operator picture.
+2. Split degraded-but-live seats, short quota-reset cooldown windows, stale-quota-but-live seats, truly dead/hard-fail seats, and historical source residue into explicit runtime categories with separate quarantine/reporting rules so GitLab/Gemini graveyard entries stop polluting primary operator expectations and client exports.
+3. Keep this slice contract-first: precise block/degraded reason taxonomy (`cooldown`, `stale_quota_snapshot`, `stale_provider_truth`, `operational_hard_fail`), explicit recovery hints in operator smoke/export surfaces, and targeted status/test proof instead of another behavior-widening wave.
+
+Progress note (2026-03-27):
+- Done: short Gemini `429 RESOURCE_EXHAUSTED` failures now persist as `operational_truth.state=cooldown` with bounded recovery windows instead of flattening into generic hard-fail semantics.
+- Done: when Gemini returns a structured short reset window (`quotaResetTimeStamp` / `quotaResetDelay` / `retryDelay`), that precise provider cooldown now overrides the older coarse `45s` fallback instead of being stretched by it.
+- Done: stale quota-only seats now have their own routing/export taxonomy instead of masquerading as generic stale provider truth, and operator `seat-smoke` now returns `routing_block_reason` plus `routing_recovery_at` for direct diagnostics.
+- Done: the previously suspicious `gemini_seat_4eeafc81d5e0` is no longer treated as a dead-source mystery. Forced live smoke showed `gemini-2.5-flash` succeeds cleanly, while `gemini-3.1-pro` returns a typed short `429` cooldown and then re-enters routing as `degraded_enabled`.
+- Remaining: the broader cleanup policy stays open around how much historical/model-specific cooldown residue to keep visible in the shared pool, while one seat still remains `missing_project_id`.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestCandidate.*Gemini|TestRoutingState.*Gemini|TestBuildPoolDashboardData.*Gemini|TestBuildOpenCodeConfigBundle.*|TestOperatorGeminiSeatSmoke.*|TestLoadAccountsQuarantinesLongDeadAccount|TestServeStatusPageReturnsJSONForFormatQuery|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,gitlab_claude_pool:.gitlab_claude_pool,accounts:[.accounts[]|select((.type=="gemini") or (.type=="claude" and .plan_type=="gitlab_duo"))|{id,type,health_status,dead,routing:.routing,provider:.provider_truth,operational:.operational_truth}]}' && timeout 120s agcode --agcode-setup-only >/dev/null && jq '{activeIndex,accounts:[.accounts[]|{email,enabled,lastSwitchReason,cachedQuota}]}' /home/lap/.config/opencode/antigravity-accounts.json && timeout 180s agcode run 'Reply with exactly T57_LIVE_OK.'`
+
 ### NEXT
-
-#### REPO-CPO-VERIFY-P2-T55: Re-prove the next fresh browser-auth Gemini add on the published 0.8.x contract
-1. The release intentionally leaves one explicit residual risk: reset/rollback proves safety, but the pool still has one `missing_project_id` seat and no fresh browser-auth import was performed on the final published binary.
-2. The next organic browser-auth add should verify end-to-end that a newly imported Gemini seat resolves Code Assist project truth when available, lands in the correct provider-truth state, and exports cleanly to Gemini CLI/OpenCode without manual repair.
-3. Keep this slice bounded to the first fresh-import proof only; do not reopen the release card unless that post-publish add reveals a new runtime contradiction.
-
-**Verify hook:** `curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="gemini")|{id,health_status,routing:.routing,provider:.provider_truth,operational:.operational_truth}]}' && bash /tmp/cpo_final_tail_probe.sh && test -s /home/lap/.root_layer/shared/spikes/final_tail_completion_20260327/post_restart_probe/summary.json`
 
 ### BLOCKED
 
 ### DONE
+
+#### REPO-CPO-ALIGN-P2-T56: Make agcode/OpenCode the canonical no-prompt local entrypoint
+1. `agcode` is now the documented first-class local OpenCode entrypoint for this pool rather than one of several competing setup paths. The landing page, README, exported config bundle, and local wrapper all align on `antigravity-manager/gemini-3.1-pro` as the day-one model.
+2. The generated OpenCode state is now explicit instead of implicit: `agcode --agcode-setup-only` exports `baseURL=http://127.0.0.1:8989/v1` plus a top-level `model=antigravity-manager/gemini-3.1-pro`, and the verified live pool snapshot kept `activeIndex=0` on a ready Gemini seat.
+3. The no-prompt local operator contract is live in this environment, not just documented. Plain `agcode run 'Reply with exactly T56_DEFAULT_OK.'` now routes through the pool on `gemini-3.1-pro` without requiring manual `-m` or manual API-key setup, but that last step depends on the local wrapper rather than on repo-local export logic alone.
+
+Completion note (2026-03-27):
+- Done: repo-local changes landed in `opencode_contract.go`, `opencode_contract_test.go`, `README.md`, `templates/local_landing.html`, and `frontend_setup_scripts_test.go`.
+- Done: in this environment, the local `agcode` wrapper now injects the canonical pool model when the operator omits `-m`, which is why plain `agcode run` is re-proved here as a local operator path rather than as a repo-only export guarantee.
+- Done: live exported state now shows `.model == "antigravity-manager/gemini-3.1-pro"` and `.provider["antigravity-manager"].options.baseURL == "http://127.0.0.1:8989/v1"` in `~/.config/opencode/opencode.json`.
+- Done: the live local UX proof is complete. The landing now advertises `agcode --agcode-setup-only` plus plain `agcode run`, the current pool snapshot kept `activeIndex=0` on a ready seat, and plain `agcode run` returned `T56_DEFAULT_OK` against `gemini-3.1-pro`.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestBuildOpenCodeConfigBundle|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction|TestServeOpenCodeSetupScript_Bash|TestServeOpenCodeSetupScript_PowerShell' ./... && timeout 120s agcode --agcode-setup-only && timeout 120s agcode run 'Reply with exactly T56_DEFAULT_OK.' && jq -e '.model == "antigravity-manager/gemini-3.1-pro" and (.provider["antigravity-manager"].options.baseURL == "http://127.0.0.1:8989/v1")' /home/lap/.config/opencode/opencode.json >/dev/null && jq -e '.accounts[.activeIndex].enabled == true' /home/lap/.config/opencode/antigravity-accounts.json >/dev/null && rg -n 'agcode|gemini-3.1-pro' README.md templates/local_landing.html ACTION_PLAN.md PROJECT_MANIFEST.md`
+
+#### REPO-CPO-BUG-P2-T58: Reconcile operator Gemini seat-smoke with the live `gemini-3.1-pro` pooled path
+1. The false-negative operator contradiction exposed by `T55` is now closed. `seat-smoke` for ready `gemini-3.1-pro` seats no longer returns synthetic `404 Not Found` while the pooled runtime succeeds through the same service.
+2. The fix stayed bounded to operator proof semantics and status truth. Live `seat-smoke` now returns `generate.ok=true` and `operational_truth.state=clean_ok` on both the fresh browser-auth seat `gemini_seat_7bed08c286d1` and the older ready seat `gemini_seat_1506839b3bf8`.
+3. The pooled contract was re-proved after the operator fix instead of being assumed: `agcode run -m antigravity-manager/gemini-3.1-pro ...` still succeeds, so operator smoke and the real pooled `3.1 Pro` path now agree on the same healthy runtime truth.
+
+Completion note (2026-03-27):
+- Done: the operator smoke parity fix was verified on the dirty post-`T55` tree instead of being reimplemented blindly, preserving the already-present bounded code changes in `operator_gemini_smoke.go` and `operator_gemini_smoke_test.go`.
+- Done: live `seat-smoke` on `gemini-3.1-pro` now returns `GEMINI_SMOKE_OK:gemini_seat_7bed08c286d1.` and `GEMINI_SMOKE_OK:gemini_seat_1506839b3bf8.` with `provider_truth_state=ready` and `operational_truth.state=clean_ok`.
+- Done: pooled `agcode run -m antigravity-manager/gemini-3.1-pro 'Reply with exactly T58_AGCODE_OK.'` passed after the same restart, proving the operator path no longer diverges from the live pooled contract.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestOperatorGeminiSeatSmoke.*|TestMaybeBuildGeminiCodeAssistFacadeRequest|TestTransformGeminiCodeAssistSSE|TestMaybeTransformGeminiCodeAssistFacadeResponseBuffered' ./... && STATUS_JSON=$(mktemp) && curl -fsS http://127.0.0.1:8989/status?format=json -o "$STATUS_JSON" && mapfile -t READY_IDS < <(jq -r '[.accounts[]|select(.type=="gemini" and (.provider_truth.state // "")=="ready")][0:2]|.[].id' "$STATUS_JSON") && test "${#READY_IDS[@]}" -ge 2 && for ACCOUNT_ID in "${READY_IDS[@]}"; do curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data "{\"account_id\":\"${ACCOUNT_ID}\",\"model\":\"gemini-3.1-pro\",\"force_refresh\":false}" | jq -e '.generate.ok == true and ((.operational_truth.state // "") == "clean_ok")' >/dev/null; done && timeout 120s agcode run -m antigravity-manager/gemini-3.1-pro 'Reply with exactly T58_AGCODE_OK.'`
+
+#### REPO-CPO-VERIFY-P2-T55: Re-prove the next fresh browser-auth Gemini add on the published 0.8.x contract
+1. The first fresh browser-auth add on the published `0.8.x` binary is now re-proved. A new Gemini seat (`gemini_seat_7bed08c286d1`) landed with fresh provider truth, `project_id=primeval-bit-pxq56`, and the pool state moved to `5` Gemini seats with `3 ready`.
+2. The export/client half of the proof also held on the fresh state: `agcode --agcode-setup-only` rewrote OpenCode config against `http://127.0.0.1:8989/v1` without manual key repair, and `activeIndex=0` now points at the newly added ready seat.
+3. The proof surfaced a real runtime contradiction without silently flattening it away: operator `seat-smoke` on `gemini-3.1-pro` returns typed `404 Not Found` for both the new ready seat and an older ready seat, while the new seat answers cleanly on `gemini-2.5-flash` and pooled `agcode run -m antigravity-manager/gemini-3.1-pro` still succeeds. That contradiction is split into successor bug card `T58` instead of reopening the release card.
+
+Completion note (2026-03-27):
+- Done: live `/status?format=json` after the fresh add shows `gemini_pool.total_seats=5`, `ready_seats=3`, and the new seat `gemini_seat_7bed08c286d1` with `provider_truth.state=ready`, `project_id=primeval-bit-pxq56`, and fresh provider timestamps.
+- Done: `agcode --agcode-setup-only` on the same state kept the OpenCode export clean; `antigravity-accounts.json` now places the fresh ready seat at `activeIndex=0`, and pooled `agcode run -m antigravity-manager/gemini-3.1-pro` returned `T55_AGCODE_OK`.
+- Done: the contradiction discovered during proof is explicit and bounded. `seat-smoke` for `gemini-3.1-pro` hard-failed with `404 Not Found` on both `gemini_seat_7bed08c286d1` and `gemini_seat_1506839b3bf8`, while `seat-smoke` on the new seat with `gemini-2.5-flash` returned `GEMINI_SMOKE_OK:gemini_seat_7bed08c286d1`.
+
+**Verify hook:** `STATUS_JSON=$(mktemp) && curl -fsS http://127.0.0.1:8989/status?format=json -o "$STATUS_JSON" && ACCOUNT_ID="$(jq -r '[.accounts[]|select(.type=="gemini" and ((.operator_source // "") | ascii_downcase | test("browser")))]|max_by((.provider_truth.checked_at // .last_refresh_at // ""))|.id // empty' "$STATUS_JSON")" && test -n "$ACCOUNT_ID" && jq '{gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="gemini")|{id,operator_source,health_status,routing:.routing,provider:.provider_truth,operational:.operational_truth}]}' "$STATUS_JSON" && curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data "{\"account_id\":\"$ACCOUNT_ID\",\"model\":\"gemini-2.5-flash\",\"force_refresh\":false}" | jq '{account_id,provider_truth_state,operational_truth,routing_state,load_code_assist,generate}' && agcode --agcode-setup-only && timeout 120s agcode run -m antigravity-manager/gemini-3.1-pro 'Reply with exactly T55_AGCODE_OK.'`
 
 #### REPO-CPO-REL-P1-T54: Cut one combined Gemini/Antigravity/OpenCode + observability release
 1. The combined release is now versioned as `0.8.0` with synchronized English/Russian changelogs and one coherent publish surface across Gemini, OpenCode, operator reset tooling, and the supporting observability / status-truth alignment tail that accumulated in the same working tree.
