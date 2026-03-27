@@ -8,6 +8,14 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.8.2] - 2026-03-27
+
+### Изменено
+- HTML-дашборд `/status` теперь показывает те же Gemini per-model quota rows, что и локальный landing: reset time, ключевые model limits/capabilities, provider tags и явные state-метки `routable` / `seat-blocked` / `catalog-only` для каждой модели.
+
+### Исправлено
+- Видимость Gemini quota на `/status` больше не обрывается на summary-строке, из-за чего раньше было не видно, какие модели реально routable, какие блокируются состоянием seat’а, а какие остаются только catalog-only.
+
 ## [0.8.1] - 2026-03-27
 
 ### Изменено

@@ -1388,6 +1388,32 @@ func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
 		"score": func(v float64) string {
 			return fmt.Sprintf("%.2f", v)
 		},
+		"quotaStateLabel": func(routable bool, lane, routeProvider string) string {
+			routeProvider = strings.TrimSpace(routeProvider)
+			if routable {
+				return "routable"
+			}
+			if strings.TrimSpace(lane) == geminiQuotaCompatibilityLaneAnthropicAdapterRequired {
+				return "catalog-only"
+			}
+			if routeProvider != "" && routeProvider != "gemini" {
+				return "unsupported-provider"
+			}
+			return "seat-blocked"
+		},
+		"quotaStateTagClass": func(routable bool, lane, routeProvider string) string {
+			routeProvider = strings.TrimSpace(routeProvider)
+			if routable {
+				return "tag tag-state-routable"
+			}
+			if strings.TrimSpace(lane) == geminiQuotaCompatibilityLaneAnthropicAdapterRequired {
+				return "tag tag-state-catalog"
+			}
+			if routeProvider != "" && routeProvider != "gemini" {
+				return "tag tag-state-unknown"
+			}
+			return "tag tag-state-seat-blocked"
+		},
 		"bar": func(v float64) template.HTML {
 			width := v
 			if width > 100 {
@@ -1688,12 +1714,50 @@ const statusHTML = `<!DOCTYPE html>
         .tag-api { background: #1f6feb; color: #fff; }
         .tag-disabled { background: #6e7681; color: #fff; }
         .tag-dead { background: #f85149; color: #fff; }
+        .tag-state-routable { background: #238636; color: #fff; }
+        .tag-state-seat-blocked { background: #d29922; color: #111; }
+        .tag-state-catalog { background: #6e7681; color: #fff; }
+        .tag-state-unknown { background: #30363d; color: #fff; }
+        .tag-capability { background: #1f6feb; color: #fff; }
+        .tag-capability-thinking { background: #8957e5; color: #fff; }
         .usage-cell { white-space: nowrap; }
         .detail-line {
             display: block;
             max-width: 340px;
             white-space: normal;
             overflow-wrap: anywhere;
+        }
+        .quota-model-list {
+            margin-top: 8px;
+            display: grid;
+            gap: 8px;
+        }
+        .quota-model-row {
+            background: #0d1117;
+            border: 1px solid #21262d;
+            border-radius: 6px;
+            padding: 8px 10px;
+        }
+        .quota-model-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 10px;
+        }
+        .quota-model-name {
+            font-weight: 600;
+            color: #dbeafe;
+        }
+        .quota-model-meter {
+            color: #58a6ff;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .quota-model-tags {
+            margin-top: 6px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
         }
         .effective { color: #8b949e; font-size: 11px; }
         .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
@@ -2029,6 +2093,46 @@ const statusHTML = `<!DOCTYPE html>
                 {{if and (eq .Type "gemini") .ProviderTruth}}<br><small class="detail-line">provider {{if .ProviderTruth.State}}{{.ProviderTruth.State}}{{else if .ProviderTruth.Ready}}ready{{else}}unknown{{end}}{{if .ProviderTruth.Stale}} · stale{{end}}{{if .ProviderTruth.ProjectID}} · project <span class="mono" title="{{.ProviderTruth.ProjectID}}">{{clipOpaque .ProviderTruth.ProjectID}}</span>{{end}}</small>{{end}}
                 {{if and (eq .Type "gemini") .OperationalTruth}}<br><small class="detail-line">operational {{if .OperationalTruth.State}}{{.OperationalTruth.State}}{{else}}unknown{{end}}{{if .OperationalTruth.Reason}} · {{clip .OperationalTruth.Reason 88}}{{end}}{{if .OperationalTruth.CheckedAt}} · checked {{.OperationalTruth.CheckedAt}}{{end}}</small>{{end}}
                 {{if and (eq .Type "gemini") .ProviderQuotaSummary}}<br><small class="detail-line">quota {{.ProviderQuotaSummary}}</small>{{end}}
+                {{if and (eq .Type "gemini") .ProviderTruth .ProviderTruth.Quota}}
+                    {{with .ProviderTruth.Quota}}
+                        {{if gt (len .Models) 0}}
+                        <div class="quota-model-list">
+                            {{range .Models}}
+                            <div class="quota-model-row">
+                                <div class="quota-model-head">
+                                    <span class="quota-model-name">{{if .DisplayName}}{{.DisplayName}}{{else}}{{.Name}}{{end}}</span>
+                                    <span class="quota-model-meter">{{.Percentage}}%</span>
+                                </div>
+                                {{if and .DisplayName (ne .DisplayName .Name)}}<small class="detail-line mono">{{.Name}}</small>{{else if .Name}}<small class="detail-line mono">{{.Name}}</small>{{end}}
+                                <small class="detail-line">
+                                    {{if .ResetTime}}reset {{.ResetTime}}{{end}}
+                                    {{if .CompatibilityReason}}{{if .ResetTime}} · {{end}}{{clip .CompatibilityReason 88}}{{end}}
+                                </small>
+                                {{if or (gt .MaxTokens 0) (gt .MaxOutputTokens 0) (gt .ThinkingBudget 0)}}
+                                <small class="detail-line">
+                                    {{if gt .MaxTokens 0}}max {{printf "%d" .MaxTokens}}{{end}}
+                                    {{if and (gt .MaxTokens 0) (gt .MaxOutputTokens 0)}} · {{end}}
+                                    {{if gt .MaxOutputTokens 0}}max out {{printf "%d" .MaxOutputTokens}}{{end}}
+                                    {{if and (or (gt .MaxTokens 0) (gt .MaxOutputTokens 0)) (gt .ThinkingBudget 0)}} · {{end}}
+                                    {{if gt .ThinkingBudget 0}}thinking {{printf "%d" .ThinkingBudget}}{{end}}
+                                </small>
+                                {{end}}
+                                <div class="quota-model-tags">
+                                    {{if eq .RouteProvider "gemini"}}<span class="tag tag-gemini">gemini</span>{{end}}
+                                    {{if eq .RouteProvider "claude"}}<span class="tag tag-claude">claude</span>{{end}}
+                                    {{if and .RouteProvider (ne .RouteProvider "gemini") (ne .RouteProvider "claude")}}<span class="tag tag-state-unknown">{{.RouteProvider}}</span>{{end}}
+                                    <span class="{{quotaStateTagClass .Routable .CompatibilityLane .RouteProvider}}">{{quotaStateLabel .Routable .CompatibilityLane .RouteProvider}}</span>
+                                    {{if .Protected}}<span class="tag tag-disabled">protected</span>{{end}}
+                                    {{if .Recommended}}<span class="tag tag-pro">recommended</span>{{end}}
+                                    {{if .SupportsImages}}<span class="tag tag-capability">images</span>{{end}}
+                                    {{if .SupportsThinking}}<span class="tag tag-capability-thinking">thinking</span>{{end}}
+                                </div>
+                            </div>
+                            {{end}}
+                        </div>
+                        {{end}}
+                    {{end}}
+                {{end}}
                 {{if .ProbeSummary}}<br><small class="detail-line">{{.ProbeSummary}}</small>{{end}}
                 {{if and .FallbackOnly (gt .Penalty 0)}}<br><small class="detail-line">penalty {{printf "%.2f" .Penalty}}</small>{{end}}
                 {{if .DeadSince}}<br><small class="detail-line">dead since {{.DeadSince}}</small>{{end}}

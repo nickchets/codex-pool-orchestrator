@@ -1277,6 +1277,107 @@ func TestServeStatusPageClarifiesQuotaVsLocalFields(t *testing.T) {
 	}
 }
 
+func TestServeStatusPageIncludesGeminiQuotaModelRows(t *testing.T) {
+	now := time.Date(2026, 3, 27, 18, 0, 0, 0, time.UTC)
+	readyAccount := &Account{
+		ID:                         "gemini_html_quota",
+		Type:                       AccountTypeGemini,
+		PlanType:                   "gemini",
+		AuthMode:                   accountAuthModeOAuth,
+		OperatorSource:             geminiOperatorSourceAntigravityImport,
+		AntigravityProjectID:       "project-1",
+		GeminiProviderTruthReady:   true,
+		GeminiProviderTruthState:   geminiProviderTruthStateReady,
+		GeminiOperationalState:     geminiOperationalTruthStateCleanOK,
+		GeminiOperationalReason:    "healthy proof",
+		GeminiProviderCheckedAt:    now.Add(-2 * time.Minute),
+		GeminiQuotaUpdatedAt:       now.Add(-time.Minute),
+		GeminiProtectedModels:      []string{"gemini-3.1-pro-high"},
+		GeminiModelForwardingRules: map[string]string{"gemini-1.5-pro": "gemini-2.5-pro"},
+		GeminiQuotaModels: []GeminiModelQuotaSnapshot{{
+			Name:             "gemini-3.1-pro-high",
+			DisplayName:      "Gemini 3.1 Pro High",
+			RouteProvider:    "gemini",
+			Percentage:       84,
+			ResetTime:        "2026-03-28T02:00:00Z",
+			SupportsImages:   true,
+			SupportsThinking: true,
+			ThinkingBudget:   8192,
+			MaxTokens:        1048576,
+			MaxOutputTokens:  65535,
+			Recommended:      true,
+		}, {
+			Name:          "claude-sonnet-4-6",
+			DisplayName:   "Claude Sonnet 4.6",
+			RouteProvider: "claude",
+			Percentage:    62,
+			ResetTime:     "2026-03-28T03:00:00Z",
+		}},
+	}
+	blockedAccount := &Account{
+		ID:                           "gemini_html_quota_blocked",
+		Type:                         AccountTypeGemini,
+		PlanType:                     "gemini",
+		AuthMode:                     accountAuthModeOAuth,
+		OperatorSource:               geminiOperatorSourceAntigravityImport,
+		OAuthProfileID:               geminiOAuthAntigravityProfileID,
+		AntigravityProjectID:         "project-2",
+		AntigravityValidationBlocked: true,
+		GeminiValidationReasonCode:   "ACCOUNT_NEEDS_WORKSPACE",
+		GeminiProviderTruthState:     geminiProviderTruthStateValidationBlocked,
+		GeminiProviderTruthReason:    "workspace validation required",
+		GeminiOperationalState:       geminiOperationalTruthStateDegradedOK,
+		GeminiOperationalReason:      "workspace validation required",
+		GeminiProviderCheckedAt:      now.Add(-90 * time.Second),
+		GeminiQuotaUpdatedAt:         now.Add(-45 * time.Second),
+		GeminiQuotaModels: []GeminiModelQuotaSnapshot{{
+			Name:          "gemini-2.5-flash",
+			DisplayName:   "Gemini 2.5 Flash",
+			RouteProvider: "gemini",
+			Percentage:    73,
+			ResetTime:     "2026-03-28T02:30:00Z",
+		}},
+	}
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{readyAccount, blockedAccount}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/status", nil)
+	rr := httptest.NewRecorder()
+	h.serveStatusPage(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	for _, fragment := range []string{
+		"Gemini 3.1 Pro High",
+		"Claude Sonnet 4.6",
+		"quota-model-list",
+		"tag-state-routable",
+		"tag-state-seat-blocked",
+		"tag-state-catalog",
+		"protected",
+		"recommended",
+		"Gemini 2.5 Flash",
+		"seat not ready: ACCOUNT_NEEDS_WORKSPACE",
+		"quota catalog only; Anthropic-compatible adapter is not implemented",
+		"max 1048576",
+		"max out 65535",
+		"thinking 8192",
+		"images",
+		"thinking",
+		"reset 2026-03-28T02:00:00Z",
+		"reset 2026-03-28T02:30:00Z",
+		"reset 2026-03-28T03:00:00Z",
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("missing fragment %q in body", fragment)
+		}
+	}
+}
+
 func TestServeStatusPageReturnsJSONForExplicitJSONClients(t *testing.T) {
 	now := time.Now().UTC()
 	account := &Account{

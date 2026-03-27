@@ -9,6 +9,14 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.8.2] - 2026-03-27
+
+### Changed
+- The `/status` HTML dashboard now renders the same Gemini per-model quota rows as the local landing page, including reset time, key model limits/capabilities, provider tags, and explicit `routable` / `seat-blocked` / `catalog-only` state labels for each model.
+
+### Fixed
+- Gemini quota visibility on `/status` no longer stops at summary text, which previously hid whether a seat's quota catalog was actually routable, blocked by seat state, or catalog-only.
+
 ## [0.8.1] - 2026-03-27
 
 ### Changed
