@@ -4,7 +4,7 @@ Pool your accounts. Share with friends. Never swap credentials again.
 
 A reverse proxy that distributes your Agent (Codex/Claude/Gemini) sessions across multiple accounts. Got three Codex accounts? Five Claude logins? The proxy spreads your usage across all of them automatically - no manual switching, no juggling auth files.
 
-Works with **Codex CLI**, **Claude Code**, **Gemini CLI**, and now a dedicated **OpenCode Antigravity export** surface.
+Works with **Codex CLI**, **Claude Code**, **Gemini CLI**, and now a dedicated **Gemini-only OpenCode Antigravity export** surface.
 
 ---
 
@@ -21,13 +21,13 @@ Or maybe you want to pool accounts with friends - everyone throws their accounts
 - Auto-refreshes tokens before they expire
 - Proxies WebSocket upgrades (including Codex Responses WS and realtime `/ws` flows)
 - Tracks usage so you can see who's burning through quota
-- Exposes a dashboard-first local operator surface on `/` and `/status`
+- Exposes a dashboard-first operator surface on `/` and `/status`
 
 ---
 
 ## Operator Surface
 
-The local operator UI is dashboard-first:
+The operator UI is dashboard-first:
 
 - `/` shows live `Codex`, `Claude`, and `Gemini` dashboards
 - `/status` exposes the raw operator dashboard and JSON status contract
@@ -65,9 +65,9 @@ pool/
 │   └── main.json
 ```
 
-For Gemini seats, use the local operator dashboard:
+For Gemini seats, use the operator dashboard:
 
-1. Open `http://127.0.0.1:8989/` or `http://127.0.0.1:8989/status`
+1. Open `http://<pool-host>/` or `http://<pool-host>/status`
 2. In the Gemini operator panel, click `Start Antigravity Gemini Auth`
 3. Complete Google sign-in; the dashboard resolves the Code Assist project and stores the seat through the shared Gemini pool
 
@@ -88,38 +88,77 @@ go build && ./codex-pool
 **Codex** - `~/.codex/config.toml`:
 ```toml
 model_provider = "codex-pool"
-chatgpt_base_url = "http://127.0.0.1:8989/backend-api"
+chatgpt_base_url = "http://<pool-host>/backend-api"
 
 [model_providers.codex-pool]
 name = "OpenAI via codex-pool proxy"
-base_url = "http://127.0.0.1:8989/v1"
+base_url = "http://<pool-host>/v1"
 wire_api = "responses"
 requires_openai_auth = true
 ```
 
 **Claude Code**:
 ```bash
-export ANTHROPIC_BASE_URL="http://127.0.0.1:8989"
+export ANTHROPIC_BASE_URL="http://<pool-host>"
 export ANTHROPIC_API_KEY="pool"
 ```
 
 **Gemini CLI**:
 ```bash
-# Preferred path: use /setup/gemini/<download-token> from the local operator surface.
+# Preferred path: use the tokenized `/setup/gemini/...` URL emitted for your pool user.
 # If you wire Gemini CLI manually, use a generated synthetic pool key (AIzaSy-pool-...),
 # not the literal string "pool".
 export GEMINI_API_KEY="AIzaSy-pool-..."
-export GOOGLE_GEMINI_BASE_URL="http://127.0.0.1:8989"
+export GOOGLE_GEMINI_BASE_URL="http://<pool-host>"
 ```
 
-The guided installer `/setup/gemini/<download-token>` is the preferred path. It keeps Gemini CLI in external API-key mode, writes the same pool-facing client configuration for you, and pins the client to the pool root URL instead of `/v1`.
+The tokenized `/setup/gemini/...` installer URL is the preferred path. It keeps Gemini CLI in external API-key mode, writes the same pool-facing client configuration for you, and pins the client to the pool root URL instead of `/v1`.
 
-**OpenCode**:
+**OpenCode (Gemini via pool)**:
 
-- Pure Antigravity/OpenCode export: `/config/opencode/<download-token>`
-- Guided installer: `/setup/opencode/<download-token>`
+- Recommended path: the tokenized `/setup/opencode/...` URL emitted for that pool user
+- Raw export bundle: the tokenized `/config/opencode/...` URL emitted for that pool user
 
-The OpenCode export writes `~/.config/opencode/opencode.json` plus `~/.config/opencode/antigravity-accounts.json`, uses the generated pooled Anthropic-style API key, and normalizes the proxy base URL to `/v1`, matching the Antigravity-style client contract instead of reusing the Gemini CLI env path.
+Recommended day-one flow:
+
+```bash
+# 1. Open the real per-user /setup/opencode/... URL emitted by the pool.
+# 2. Run the returned installer script.
+opencode run -m antigravity-manager/gemini-3.1-pro "Reply with exactly OK."
+```
+
+The setup URL writes `~/.config/opencode/opencode.json` plus `~/.config/opencode/antigravity-accounts.json`, keeps the proxy base URL normalized to `/v1`, and exports `model = antigravity-manager/gemini-3.1-pro`. This is still Gemini through the pool, not a Claude provider switch.
+
+The tokenized `/setup/opencode/...` URL returns an installer script. If you want the raw JSON bundle instead, use the matching tokenized `/config/opencode/...` URL.
+
+---
+
+## Gemini Diagnostics
+
+Gemini seat state is intentionally additive in `/status?format=json`:
+
+- `provider_truth` is what browser-auth / Code Assist project resolution currently says about the seat.
+- `operational_truth` is what a recent live Gemini proof actually observed.
+- `routing.state` is what the selector is doing right now.
+- `gemini_pool.eligible_seats` is the total fresh-routing-eligible Gemini count; `gemini_pool.clean_eligible_seats` and `gemini_pool.degraded_eligible_seats` split that total for operator/UI clarity.
+
+Important operator-facing states:
+
+- `enabled`: clean fresh-routing path.
+- `degraded_enabled`: the seat is still eligible for fresh routing, but only under provider or operational caveats.
+- `cooldown`: a short rate-limit reset window after a `429`; wait for `routing.recovery_at` or rerun seat smoke instead of deleting the seat immediately.
+- `missing_project_id`: provider truth exists, but project resolution is incomplete, so the seat is blocked.
+- `stale_quota_snapshot` or `stale_provider_truth`: refresh debt, not automatic proof that the account is dead.
+
+Manual Gemini seat smoke:
+
+```bash
+curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke \
+  -H 'Content-Type: application/json' \
+  --data '{"account_id":"gemini_seat_...","model":"gemini-3.1-pro","force_refresh":false}' | jq .
+```
+
+The smoke response now includes `routing_block_reason` and `routing_recovery_at`, so you can tell the difference between a short cooldown, a stale snapshot, a restriction, and a real hard failure.
 
 ---
 
@@ -157,11 +196,10 @@ Environment variable `PROXY_MAX_INMEM_BODY_BYTES` controls how large a request b
 
 ---
 
-## Operator Packaging
+## Deployment Assets
 
-This repository also includes a reusable operator layer for standalone deployments:
+This repository also includes generic deployment assets for self-hosted installs:
 
-- `orchestrator/codex_pool_manager.py`
 - `systemd/codex-pool.service`
 - `docs/install.md`
 - `docs/upstream-delta.md`
@@ -171,17 +209,15 @@ This repository also includes a reusable operator layer for standalone deploymen
 - `docs/CHANGELOG.ru.md`
 - `docs/VERSIONING.ru.md`
 
-Typical operator commands:
+Typical operator checks:
 
 ```bash
-python3 orchestrator/codex_pool_manager.py status --strict
-python3 orchestrator/codex_pool_manager.py codex-oauth-add
+curl -fsS http://<pool-host>/healthz
+curl -fsS http://<pool-host>/status?format=json | jq .
 systemctl --user status codex-pool.service --no-pager
 ```
 
-The preferred add-account path is the `/status` web button or `codex-oauth-add`.
-Keep `codex-oauth-start` and `codex-oauth-exchange` as low-level fallback only.
-The local `/` page is intended to be an operator dashboard, not a decorative landing page.
+The preferred add-account path is the `/` or `/status` web button. The `/` page is intended to be an operator dashboard, not a decorative landing page.
 
 Current tracked version is stored in `VERSION`. Fork-specific release history lives in
 `CHANGELOG.md`, and version bump rules live in `VERSIONING.md`.

@@ -153,8 +153,10 @@ func buildOpenCodeConfigDocument(baseURL, apiKey string, models map[string]any) 
 	}
 	return map[string]any{
 		"$schema": "https://opencode.ai/config.json",
+		"model":   openCodeAntigravityProviderID + "/gemini-3.1-pro",
 		"provider": map[string]any{
 			openCodeAntigravityProviderID: map[string]any{
+				// OpenCode reaches this local Gemini pool over its Anthropic-compatible transport.
 				"npm":  "@ai-sdk/anthropic",
 				"name": "Antigravity Manager",
 				"options": map[string]any{
@@ -167,11 +169,8 @@ func buildOpenCodeConfigDocument(baseURL, apiKey string, models map[string]any) 
 	}
 }
 
-func openCodeAccountTimestampMillis(acc *Account) int64 {
-	if acc == nil {
-		return 0
-	}
-	for _, ts := range []time.Time{acc.LastUsed, acc.LastRefresh, acc.GeminiProviderCheckedAt} {
+func openCodeAccountAddedAtMillis(snapshot accountSnapshot) int64 {
+	for _, ts := range []time.Time{snapshot.LastUsed, snapshot.LastRefresh, snapshot.GeminiProviderCheckedAt} {
 		if !ts.IsZero() {
 			return ts.UTC().UnixMilli()
 		}
@@ -179,10 +178,20 @@ func openCodeAccountTimestampMillis(acc *Account) int64 {
 	return 0
 }
 
+func openCodeAccountLastUsedMillis(snapshot accountSnapshot) int64 {
+	if snapshot.LastUsed.IsZero() {
+		return 0
+	}
+	return snapshot.LastUsed.UTC().UnixMilli()
+}
+
 func buildOpenCodeCachedQuota(snapshot accountSnapshot) map[string]any {
 	quota := make(map[string]any)
 	if !snapshot.GeminiQuotaUpdatedAt.IsZero() {
 		quota["last_updated"] = snapshot.GeminiQuotaUpdatedAt.UTC().Unix()
+	}
+	if !snapshot.GeminiProviderCheckedAt.IsZero() {
+		quota["provider_checked_at"] = snapshot.GeminiProviderCheckedAt.UTC().Unix()
 	}
 	if tier := firstNonEmpty(strings.TrimSpace(snapshot.GeminiSubscriptionTierID), strings.TrimSpace(snapshot.GeminiSubscriptionTierName)); tier != "" {
 		quota["subscription_tier"] = tier
@@ -267,6 +276,35 @@ func buildOpenCodeCachedQuota(snapshot accountSnapshot) map[string]any {
 	return quota
 }
 
+func openCodeGeminiRoutingRank(enabled bool, state string) int {
+	if !enabled {
+		return 3
+	}
+	switch strings.TrimSpace(state) {
+	case "", routingDisplayStateEnabled:
+		return 0
+	case routingDisplayStateDegradedEnabled:
+		return 1
+	default:
+		return 2
+	}
+}
+
+func openCodeGeminiOperationalRank(state string) int {
+	switch strings.TrimSpace(state) {
+	case "", geminiOperationalTruthStateCleanOK:
+		return 0
+	case geminiOperationalTruthStateCooldown:
+		return 1
+	case geminiOperationalTruthStateDegradedOK:
+		return 2
+	case geminiOperationalTruthStateHardFail:
+		return 3
+	default:
+		return 4
+	}
+}
+
 func buildOpenCodeAntigravityAccounts(h *proxyHandler) openCodePluginAccountsFile {
 	out := openCodePluginAccountsFile{
 		Version: 3,
@@ -285,12 +323,15 @@ func buildOpenCodeAntigravityAccounts(h *proxyHandler) openCodePluginAccountsFil
 	h.pool.mu.RUnlock()
 
 	type accountRow struct {
-		sortKeyCurrent bool
-		sortKeyEnabled bool
-		sortKeyLast    int64
-		sortKeyEmail   string
-		sortKeyID      string
-		account        openCodePluginAccount
+		sortKeyEnabled         bool
+		sortKeyProviderReady   bool
+		sortKeyRoutingRank     int
+		sortKeyOperationalRank int
+		sortKeyCurrent         bool
+		sortKeyLast            int64
+		sortKeyEmail           string
+		sortKeyID              string
+		account                openCodePluginAccount
 	}
 
 	rows := make([]accountRow, 0, len(accs))
@@ -303,28 +344,47 @@ func buildOpenCodeAntigravityAccounts(h *proxyHandler) openCodePluginAccountsFil
 		if refreshToken == "" || snapshot.Disabled || snapshot.Dead {
 			continue
 		}
-		ts := openCodeAccountTimestampMillis(acc)
+		addedAt := openCodeAccountAddedAtMillis(snapshot)
+		lastUsed := openCodeAccountLastUsedMillis(snapshot)
 		email := firstNonEmpty(strings.TrimSpace(snapshot.OperatorEmail), strings.TrimSpace(snapshot.AntigravityEmail))
 		projectID := strings.TrimSpace(snapshot.AntigravityProjectID)
 		routing := buildPoolDashboardRouting(snapshot, snapshot.Routing, now)
 		enabled := routing.Eligible
 		quota := buildOpenCodeCachedQuota(snapshot)
+		if quota == nil {
+			quota = make(map[string]any)
+		}
+		if routingState := strings.TrimSpace(routing.State); routingState != "" {
+			quota["routing_state"] = routingState
+		}
+		if blockReason := strings.TrimSpace(routing.BlockReason); blockReason != "" {
+			quota["routing_block_reason"] = blockReason
+		}
+		if routingReason := strings.TrimSpace(routing.DegradedReason); routingReason != "" {
+			quota["routing_reason"] = routingReason
+		}
+		if recoveryAt := strings.TrimSpace(routing.RecoveryAt); recoveryAt != "" {
+			quota["routing_recovery_at"] = recoveryAt
+		}
+		if len(quota) == 0 {
+			quota = nil
+		}
 		account := openCodePluginAccount{
 			Email:            email,
 			RefreshToken:     refreshToken,
 			ProjectID:        projectID,
 			ManagedProjectID: projectID,
-			AddedAt:          ts,
-			LastUsed:         ts,
+			AddedAt:          addedAt,
+			LastUsed:         lastUsed,
 			CachedQuota:      quota,
 			Enabled:          &enabled,
 		}
 		if !snapshot.GeminiQuotaUpdatedAt.IsZero() {
 			account.CachedQuotaUpdated = snapshot.GeminiQuotaUpdatedAt.UTC().UnixMilli()
 		}
-		if !snapshot.RateLimitUntil.IsZero() {
+		if snapshot.RateLimitUntil.After(now) {
 			account.CoolingDownUntil = snapshot.RateLimitUntil.UTC().UnixMilli()
-			account.CooldownReason = firstNonEmpty(strings.TrimSpace(routing.BlockReason), "rate_limited")
+			account.CooldownReason = firstNonEmpty(strings.TrimSpace(routing.DegradedReason), strings.TrimSpace(routing.BlockReason), "rate_limited")
 		}
 		if !enabled {
 			account.LastSwitchReason = firstNonEmpty(
@@ -334,8 +394,8 @@ func buildOpenCodeAntigravityAccounts(h *proxyHandler) openCodePluginAccountsFil
 			)
 			if account.CooldownReason == "" {
 				account.CooldownReason = firstNonEmpty(
-					strings.TrimSpace(routing.BlockReason),
 					strings.TrimSpace(routing.DegradedReason),
+					strings.TrimSpace(routing.BlockReason),
 				)
 			}
 		} else if strings.TrimSpace(routing.State) == routingDisplayStateDegradedEnabled {
@@ -343,21 +403,30 @@ func buildOpenCodeAntigravityAccounts(h *proxyHandler) openCodePluginAccountsFil
 			account.CooldownReason = strings.TrimSpace(routing.DegradedReason)
 		}
 		rows = append(rows, accountRow{
-			sortKeyCurrent: snapshot.AntigravityCurrent,
-			sortKeyEnabled: enabled,
-			sortKeyLast:    ts,
-			sortKeyEmail:   strings.ToLower(email),
-			sortKeyID:      snapshot.ID,
-			account:        account,
+			sortKeyEnabled:         enabled,
+			sortKeyProviderReady:   snapshot.GeminiProviderTruthReady,
+			sortKeyRoutingRank:     openCodeGeminiRoutingRank(enabled, routing.State),
+			sortKeyOperationalRank: openCodeGeminiOperationalRank(snapshot.GeminiOperationalState),
+			sortKeyCurrent:         snapshot.AntigravityCurrent,
+			sortKeyLast:            addedAt,
+			sortKeyEmail:           strings.ToLower(email),
+			sortKeyID:              snapshot.ID,
+			account:                account,
 		})
 	}
 
 	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].sortKeyRoutingRank != rows[j].sortKeyRoutingRank {
+			return rows[i].sortKeyRoutingRank < rows[j].sortKeyRoutingRank
+		}
+		if rows[i].sortKeyProviderReady != rows[j].sortKeyProviderReady {
+			return rows[i].sortKeyProviderReady
+		}
+		if rows[i].sortKeyOperationalRank != rows[j].sortKeyOperationalRank {
+			return rows[i].sortKeyOperationalRank < rows[j].sortKeyOperationalRank
+		}
 		if rows[i].sortKeyCurrent != rows[j].sortKeyCurrent {
 			return rows[i].sortKeyCurrent
-		}
-		if rows[i].sortKeyEnabled != rows[j].sortKeyEnabled {
-			return rows[i].sortKeyEnabled
 		}
 		if rows[i].sortKeyLast != rows[j].sortKeyLast {
 			return rows[i].sortKeyLast > rows[j].sortKeyLast

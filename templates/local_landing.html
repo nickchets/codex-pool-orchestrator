@@ -746,7 +746,7 @@
                 <div class="eyebrow">Local Operator Dashboard</div>
                 <h1>AI Pool</h1>
                 <p>
-                    Dashboard-first local operator surface. Every live metric, table, and routing hint below is sourced
+                    Dashboard-first operator surface. Every live metric, table, and routing hint below is sourced
                     from <code>/status?format=json</code> so the landing page does not drift away from the real pool state.
                 </p>
             </div>
@@ -800,7 +800,7 @@
                 <h2>Codex Dashboard</h2>
                 <p>
                     Seats stay primary. The Fallback API Pool only matters when the regular Codex seat pool is exhausted
-                    or blocked, and its keys are shown separately so local operator actions stay readable.
+                    or blocked, and its keys are shown separately so operator actions stay readable.
                 </p>
             </div>
 
@@ -1094,7 +1094,8 @@ brew install claude-code</pre>
                 <h2>Gemini Dashboard</h2>
                 <p>
                     Gemini now gets the same operator dashboard treatment on the landing page: live provider metrics,
-                    workspace grouping, and account visibility first, setup second.
+                    workspace grouping, and account visibility first, setup second. Provider truth, operational proof,
+                    and routing state stay separate on purpose so seat debugging does not collapse into one vague label.
                 </p>
             </div>
 
@@ -1105,7 +1106,7 @@ brew install claude-code</pre>
                     <div class="surface-header">
                         <div>
                             <h3>Routing Focus</h3>
-                            <p>Current and recent Gemini routing state, if Gemini seats are present in the pool.</p>
+                            <p>Current and recent Gemini routing state. Best eligible is derived from the live Gemini rows below, not from the currently active non-Gemini seat.</p>
                         </div>
                     </div>
                     <div id="gemini-routing-cards" class="card-grid"></div>
@@ -1209,7 +1210,7 @@ brew install gemini-cli</pre>
 
                         <div class="detail-block">
                             <h4>One-Line Setup</h4>
-                            <p>Configures the Gemini CLI endpoint and points you to the same local dashboard/operator flow used for seat onboarding.</p>
+                            <p>Configures the Gemini CLI endpoint and points you to the same dashboard/operator flow used for seat onboarding.</p>
                             <div class="code-shell">
                                 <button class="copy-btn" onclick="copyToClipboard('gemini-one-liner', this)">Copy</button>
                                 <pre id="gemini-one-liner"></pre>
@@ -1228,17 +1229,17 @@ brew install gemini-cli</pre>
                             <h4>Seat Onboarding</h4>
                             <div class="code-shell">
                                 <button class="copy-btn" onclick="copyToClipboard('gemini-auth', this)">Copy</button>
-                                <pre id="gemini-auth"># Preferred: open the local dashboard
+                                <pre id="gemini-auth"># Preferred: open the dashboard
 python3 -m webbrowser '{{.BaseURL}}/'
-# Or the raw operator dashboard
+# Or the raw status dashboard
 python3 -m webbrowser '{{.BaseURL}}/status'
 # Then click: Start Antigravity Gemini Auth</pre>
                             </div>
                         </div>
 
                         <div class="detail-block">
-                            <h4>OpenCode One-Line Setup</h4>
-                            <p>Downloads the OpenCode config bundle and Antigravity account inventory from the same pool contract.</p>
+                            <h4>OpenCode Recommended Path</h4>
+                            <p>Preferred for this pool: run the per-user OpenCode setup bundle, then start OpenCode on <code>antigravity-manager/gemini-3.1-pro</code> without manual API entry.</p>
                             <div class="code-shell">
                                 <button class="copy-btn" onclick="copyToClipboard('opencode-one-liner', this)">Copy</button>
                                 <pre id="opencode-one-liner"></pre>
@@ -1364,6 +1365,94 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             return seatProvider(seat, data) === provider ? seat : null;
         }
 
+        function safeTimestamp(value) {
+            if (!value) {
+                return 0;
+            }
+            const date = new Date(value);
+            if (Number.isNaN(date.getTime())) {
+                return 0;
+            }
+            return date.getTime();
+        }
+
+        function seatStatusFromAccount(acc, basis) {
+            if (!acc || !acc.id) {
+                return null;
+            }
+            const routing = acc && acc.routing && typeof acc.routing === 'object' ? acc.routing : {};
+            let routingStatus = '';
+            if (!routing.eligible && routing.block_reason) {
+                routingStatus = String(routing.block_reason);
+            } else if (routing.state) {
+                routingStatus = String(routing.state);
+            } else if (routing.block_reason) {
+                routingStatus = String(routing.block_reason);
+            } else if (routing.eligible) {
+                routingStatus = 'eligible';
+            }
+            return {
+                id: String(acc.id),
+                email: String(acc.email || ''),
+                workspace_id: acc.workspace_id || '',
+                seat_key: acc.seat_key || acc.id,
+                routing_status: routingStatus,
+                primary_headroom_pct: Number(routing.primary_headroom_pct || 0),
+                secondary_headroom_pct: Number(routing.secondary_headroom_pct || 0),
+                primary_headroom_known: Boolean(routing.primary_headroom_known),
+                secondary_headroom_known: Boolean(routing.secondary_headroom_known),
+                inflight: Number(acc.inflight || 0),
+                local_last_used: String(acc.local_last_used || ""),
+                basis: basis || '',
+            };
+        }
+
+        function providerBestEligibleSeat(provider, data) {
+            const accounts = providerAccounts(provider, data).filter((acc) => acc && acc.routing && acc.routing.eligible);
+            if (accounts.length === 0) {
+                return null;
+            }
+            accounts.sort((left, right) => {
+                const scoreDelta = Number(right.score || 0) - Number(left.score || 0);
+                if (scoreDelta !== 0) {
+                    return scoreDelta;
+                }
+                const inflightDelta = Number(right.inflight || 0) - Number(left.inflight || 0);
+                if (inflightDelta !== 0) {
+                    return inflightDelta;
+                }
+                const lastUsedDelta = safeTimestamp(right.last_used) - safeTimestamp(left.last_used);
+                if (lastUsedDelta !== 0) {
+                    return lastUsedDelta;
+                }
+                return String(left.id || '').localeCompare(String(right.id || ''));
+            });
+            return seatStatusFromAccount(
+                accounts[0],
+                'Provider-local best eligible seat from the live ' + provider + ' rows below.',
+            );
+        }
+
+        function providerLastUsedSeat(provider, data) {
+            const explicit = seatForProvider(data && data.last_used_seat, provider, data);
+            if (explicit) {
+                return explicit;
+            }
+            const active = seatForProvider(data && data.active_seat, provider, data);
+            if (active && active.local_last_used) {
+                return Object.assign({}, active, {
+                    basis: 'This is also the most recently used local seat.',
+                });
+            }
+            const current = seatForProvider(data && data.current_seat, provider, data);
+            if (current && current.local_last_used) {
+                return Object.assign({}, current, {
+                    basis: 'This is also the most recently used local seat.',
+                });
+            }
+            return null;
+        }
+
         function providerAccounts(provider, data) {
             return (Array.isArray(data && data.accounts) ? data.accounts : []).filter((acc) => acc && acc.type === provider);
         }
@@ -1384,6 +1473,57 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             return data && data.gemini_pool && typeof data.gemini_pool === 'object' ? data.gemini_pool : {};
         }
 
+        function geminiOperationalSummary(geminiPool) {
+            const parts = [];
+            if (geminiPool.ready_seats) {
+                parts.push(formatNumber(geminiPool.ready_seats) + ' provider-ready');
+            }
+            if (geminiPool.warm_seats) {
+                parts.push(formatNumber(geminiPool.warm_seats) + ' with recent Gemini proof');
+            }
+            if (geminiPool.cooldown_seats) {
+                parts.push(formatNumber(geminiPool.cooldown_seats) + ' cooling down');
+            }
+            if (geminiPool.stale_quota_seats) {
+                parts.push(formatNumber(geminiPool.stale_quota_seats) + ' stale quota snapshot');
+            } else if (geminiPool.stale_truth_seats) {
+                parts.push(formatNumber(geminiPool.stale_truth_seats) + ' stale provider truth');
+            }
+            if (geminiPool.restricted_seats) {
+                parts.push(formatNumber(geminiPool.restricted_seats) + ' restricted');
+            }
+            if (geminiPool.missing_project_seats) {
+                parts.push(formatNumber(geminiPool.missing_project_seats) + ' missing project');
+            }
+            if (geminiPool.quota_empty_seats) {
+                parts.push(formatNumber(geminiPool.quota_empty_seats) + ' empty quota snapshot');
+            }
+            if (parts.length === 0) {
+                return 'No Gemini operator state is currently exposed.';
+            }
+            return parts.join(' · ') + '. Warmed means a recent Gemini proof succeeded; it does not guarantee clean fresh routing by itself.';
+        }
+
+        function geminiEligibilitySummary(geminiPool, eligible) {
+            const clean = Number(geminiPool.clean_eligible_seats || 0);
+            const degraded = Number(geminiPool.degraded_eligible_seats || 0);
+            const eligibleNow = Number(eligible || 0);
+            if (eligibleNow <= 0) {
+                return 'No Gemini seat is currently eligible for fresh routing.';
+            }
+            const parts = [];
+            if (clean > 0) {
+                parts.push(formatNumber(clean) + ' clean');
+            }
+            if (degraded > 0) {
+                parts.push(formatNumber(degraded) + ' degraded-enabled');
+            }
+            if (parts.length === 0) {
+                return formatNumber(eligibleNow) + ' Gemini seat(s) are currently eligible for fresh routing.';
+            }
+            return formatNumber(eligibleNow) + ' Gemini seat(s) are currently eligible for fresh routing: ' + parts.join(' · ') + '. Degraded-enabled seats still route, but only under provider or operational caveats.';
+        }
+
         function escapeHTML(value) {
             return String(value == null ? '' : value)
                 .replace(/&/g, '&amp;')
@@ -1391,6 +1531,19 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 .replace(/>/g, '&gt;')
                 .replace(/"/g, '&quot;')
                 .replace(/'/g, '&#39;');
+        }
+
+        function compactDetail(value, maxLength) {
+            const text = String(value || '').trim();
+            if (!text) {
+                return '';
+            }
+            if (!Number.isFinite(Number(maxLength)) || text.length <= maxLength) {
+                return text;
+            }
+            const head = Math.max(18, Math.floor(maxLength * 0.72));
+            const tail = Math.max(10, maxLength - head - 3);
+            return text.slice(0, head) + '...' + text.slice(-tail);
         }
 
         function classifyAccountStatus(acc) {
@@ -1426,10 +1579,11 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 return { main: '-', detail: '' };
             }
             const main = String(acc.health_status || '').trim() || 'local only';
+            const mainLower = main.toLowerCase();
             const details = [];
             const deadSince = String(acc.dead_since || '').trim();
             if (deadSince) {
-                details.push('dead since ' + formatDateTime(deadSince));
+                details.push((mainLower === 'dead' ? 'since ' : 'dead since ') + formatDateTime(deadSince));
             }
             const errorText = String(acc.health_error || '').trim();
             if (errorText) {
@@ -1445,7 +1599,10 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 details.push('probe ' + String(acc.gitlab_quota_probe_in));
             }
             if (acc.provider_truth && acc.provider_truth.state) {
-                details.push('provider ' + String(acc.provider_truth.state));
+                const providerState = String(acc.provider_truth.state).trim();
+                if (providerState && providerState.toLowerCase() !== mainLower) {
+                    details.push('provider ' + providerState);
+                }
             }
             if (acc.operational_truth && acc.operational_truth.state) {
                 details.push('operational ' + String(acc.operational_truth.state));
@@ -1520,7 +1677,7 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             if (providerTruth.project_id) {
                 parts.push('project ' + clipMiddle(providerTruth.project_id, 10, 6));
             }
-            if (providerTruth.state) {
+            if (providerTruth.state && (providerTruth.project_id || providerTruth.freshness_state)) {
                 parts.push('provider ' + String(providerTruth.state));
             }
             if (providerTruth.freshness_state) {
@@ -1723,30 +1880,31 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             const geminiOperator = data && data.gemini_operator ? data.gemini_operator : {};
             const geminiPool = geminiPoolSummary(data);
             const legacySeats = Number(geminiOperator.legacy_seat_count || 0) + Number(geminiOperator.managed_seat_count || 0);
+            const eligibleGemini = Number(summary.eligible_accounts || geminiPool.eligible_seats || 0);
             renderMetricCards('gemini-summary-cards', [
                 {
-                    label: 'Accounts',
-                    value: formatNumber(summary.eligible_accounts || 0) + ' / ' + formatNumber(accounts.length),
-                    detail: 'Eligible / total Gemini accounts right now.',
-                    tone: (summary.eligible_accounts || 0) > 0 ? 'success' : 'warning',
+                    label: 'Fresh Routing / Total',
+                    value: formatNumber(eligibleGemini) + ' / ' + formatNumber(accounts.length),
+                    detail: geminiEligibilitySummary(geminiPool, eligibleGemini),
+                    tone: Number(geminiPool.clean_eligible_seats || 0) > 0 ? 'success' : (eligibleGemini > 0 ? 'warning' : 'warning'),
                 },
                 {
-                    label: 'Ready / Warm',
+                    label: 'Ready / Operational',
                     value: formatNumber(geminiPool.ready_seats || 0) + ' / ' + formatNumber(geminiPool.warm_seats || 0),
-                    detail: String(geminiPool.note || ('Restricted ' + formatNumber(geminiPool.restricted_seats || 0) + ', warmup-blocked ' + formatNumber(geminiPool.not_warmed_seats || 0) + '.')),
+                    detail: geminiOperationalSummary(geminiPool),
                     tone: (geminiPool.ready_seats || 0) > 0 ? 'success' : 'warning',
                 },
                 {
                     label: 'Quota Truth',
                     value: formatNumber(geminiPool.quota_model_count || 0) + ' models',
-                    detail: 'Tracked on ' + formatNumber(geminiPool.quota_tracked_seats || 0) + ' seat(s); empty snapshots ' + formatNumber(geminiPool.quota_empty_seats || 0) + '.',
+                    detail: 'Tracked on ' + formatNumber(geminiPool.quota_tracked_seats || 0) + ' seat(s); ' + formatNumber(geminiPool.quota_empty_seats || 0) + ' snapshot(s) currently have no model rows yet.',
                     tone: (geminiPool.quota_tracked_seats || 0) > 0 ? 'neutral' : 'warning',
                 },
                 {
-                    label: 'Restrictions',
-                    value: formatNumber(geminiPool.validation_flagged_seats || 0) + ' flagged',
-                    detail: 'Restricted ' + formatNumber(geminiPool.restricted_seats || 0) + ', missing project ' + formatNumber(geminiPool.missing_project_seats || 0) + '.',
-                    tone: (geminiPool.validation_flagged_seats || 0) > 0 || (geminiPool.missing_project_seats || 0) > 0 ? 'warning' : 'neutral',
+                    label: 'Restricted / Missing',
+                    value: formatNumber(geminiPool.restricted_seats || 0) + ' / ' + formatNumber(geminiPool.missing_project_seats || 0),
+                    detail: 'Provider restrictions and missing project IDs that keep seats out of the clean ready path.',
+                    tone: (geminiPool.restricted_seats || 0) > 0 || (geminiPool.missing_project_seats || 0) > 0 ? 'warning' : 'neutral',
                 },
                 {
                     label: 'Antigravity Seats',
@@ -1770,8 +1928,8 @@ python3 -m webbrowser '{{.BaseURL}}/status'
         function renderRouting(provider, data) {
             const active = seatForProvider(data && data.active_seat, provider, data);
             const current = seatForProvider(data && data.current_seat, provider, data);
-            const lastUsed = seatForProvider(data && data.last_used_seat, provider, data);
-            const nextEligible = seatForProvider(data && data.best_eligible_seat, provider, data);
+            const lastUsed = providerLastUsedSeat(provider, data);
+            const nextEligible = seatForProvider(data && data.best_eligible_seat, provider, data) || providerBestEligibleSeat(provider, data);
 
             if (provider === 'codex') {
                 const apiPool = data && data.openai_api_pool ? data.openai_api_pool : {};
@@ -1831,7 +1989,7 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             if (result && !geminiOAuthDone) {
                 result.style.display = 'none';
             }
-            note.textContent = String(operator.note || 'Antigravity browser auth is the only supported Gemini seat onboarding flow on this local dashboard.');
+            note.textContent = String(operator.note || 'Antigravity browser auth is the only supported Gemini seat onboarding flow for this pool.');
             note.className = (Number(operator.legacy_seat_count || 0) + Number(operator.managed_seat_count || 0)) > 0 ? 'status-line warning' : 'status-line';
         }
 
@@ -1890,15 +2048,21 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 return 'api fallback';
             }
             const plan = String(acc.plan_type || '').trim();
+            const type = String(acc.type || '').trim();
             const auth = String(acc.auth_mode || '').trim();
             const source = acc.type === 'gemini' ? String(acc.operator_source || '').trim() : '';
-            const parts = [plan, auth];
+            const parts = [];
+            if (plan && plan.toLowerCase() !== type.toLowerCase()) {
+                parts.push(plan);
+            }
+            if (auth) {
+                parts.push(auth);
+            }
             if (source) {
                 parts.push(source);
             }
-            const filtered = parts.filter(Boolean);
-            if (filtered.length > 0) {
-                return filtered.join(' | ');
+            if (parts.length > 0) {
+                return parts.join(' | ');
             }
             return '-';
         }
@@ -1922,9 +2086,11 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 const plan = accountPlanLabel(acc);
                 const accountLabel = accountDisplayName(acc);
                 const statusID = provider + '-account-action-status';
-                const geminiProject = geminiProjectSummary(acc);
-                const geminiQuota = geminiQuotaSummary(acc);
-                const geminiCompatibility = geminiCompatibilitySummary(acc);
+                const geminiProject = compactDetail(geminiProjectSummary(acc), 96);
+                const geminiQuota = compactDetail(geminiQuotaSummary(acc), 112);
+                const geminiCompatibility = compactDetail(geminiCompatibilitySummary(acc), 96);
+                const routingDetail = compactDetail(routing.detail || '', 120);
+                const healthDetail = compactDetail(health.detail || '', 120);
                 const meta = [];
                 if (acc.id) {
                     meta.push(clipOpaque(acc.id));
@@ -1950,7 +2116,7 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                         </td>
                         <td title="${escapeHTML(routing.detail || '')}">
                             <span class="badge tone-${escapeHTML(routing.tone)}">${escapeHTML(routing.label)}</span>
-                            <div class="table-meta">${escapeHTML(routing.detail || '')}</div>
+                            <div class="table-meta">${escapeHTML(routingDetail)}</div>
                             ${geminiProject ? `<div class="table-meta">${escapeHTML(geminiProject)}</div>` : ''}
                         </td>
                         <td>
@@ -1959,7 +2125,7 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                         </td>
                         <td title="${escapeHTML(health.detail || '')}">
                             <div class="table-title">${escapeHTML(health.main)}</div>
-                            <div class="table-meta">${escapeHTML(health.detail || '')}</div>
+                            <div class="table-meta">${escapeHTML(healthDetail)}</div>
                             ${geminiQuota ? `<div class="table-meta">${escapeHTML(geminiQuota)}</div>` : ''}
                             ${geminiCompatibility ? `<div class="table-meta">${escapeHTML(geminiCompatibility)}</div>` : ''}
                         </td>
@@ -2123,17 +2289,23 @@ echo 'Then click: Start Antigravity Gemini Auth'`;
 }`;
 
             document.getElementById('opencode-one-liner').textContent =
-`echo "Create a pool user from the local operator surface or /admin/pool-users first."
-echo "Then run:"
-echo "  curl -fsSL ${BASE_URL}/setup/opencode/<download-token> | bash"`;
+`# Preferred path
+# 1. Open the real per-user /setup/opencode/... URL emitted by this pool.
+# 2. Run the returned installer script.
+opencode run -m antigravity-manager/gemini-3.1-pro "Reply with exactly OK."
+
+# Shared snippet intentionally does not embed the real tokenized setup URL.
+# This shared snippet intentionally does not embed a reusable download token.`;
 
             document.getElementById('opencode-config').textContent =
-`# Raw export bundle
-curl -fsS ${BASE_URL}/config/opencode/<download-token> | jq .
+`# Raw export bundles are per-user and tokenized.
+# Use the real /config/opencode/... URL emitted for that pool user, then inspect it with jq.
 
-# Preferred path: use /setup/opencode/<download-token>
+# Setup installer: use the real per-user /setup/opencode/... URL emitted
+# for that pool user.
 # It writes ~/.config/opencode/opencode.json and antigravity-accounts.json
-# from the same exported bundle and keeps the /v1 Anthropic-style contract aligned.`;
+# from the same exported bundle and keeps the /v1 Anthropic-compatible
+# transport aligned for OpenCode via this Gemini pool.`;
         }
 
         function codexOAuthSnapshot(accounts) {

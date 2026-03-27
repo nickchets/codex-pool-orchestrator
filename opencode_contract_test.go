@@ -68,6 +68,9 @@ func TestBuildOpenCodeConfigBundle(t *testing.T) {
 	if bundle.ProviderID != openCodeAntigravityProviderID {
 		t.Fatalf("provider_id = %q", bundle.ProviderID)
 	}
+	if got, _ := bundle.OpenCodeConfig["model"].(string); got != "antigravity-manager/gemini-3.1-pro" {
+		t.Fatalf("model = %q", got)
+	}
 	if bundle.BaseURL != "http://pool.local/v1" {
 		t.Fatalf("base_url = %q", bundle.BaseURL)
 	}
@@ -112,6 +115,12 @@ func TestBuildOpenCodeConfigBundle(t *testing.T) {
 	if account.RefreshToken != "refresh-1" {
 		t.Fatalf("refresh_token = %q", account.RefreshToken)
 	}
+	if account.AddedAt != now.UnixMilli() {
+		t.Fatalf("added_at = %d", account.AddedAt)
+	}
+	if account.LastUsed != now.UnixMilli() {
+		t.Fatalf("last_used = %d", account.LastUsed)
+	}
 	if account.ProjectID != "project-1" {
 		t.Fatalf("project_id = %q", account.ProjectID)
 	}
@@ -133,6 +142,51 @@ func TestBuildOpenCodeConfigBundle(t *testing.T) {
 	}
 	if cachedModels[0]["protected"] != true {
 		t.Fatalf("cached model = %#v", cachedModels[0])
+	}
+	if got := account.CachedQuota["provider_checked_at"]; got != now.Unix() {
+		t.Fatalf("cached_quota.provider_checked_at = %#v", got)
+	}
+}
+
+func TestBuildOpenCodeConfigBundleKeepsLastUsedEmptyWhenSeatWasOnlyRefreshed(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	now := time.Date(2026, time.March, 27, 12, 34, 56, 0, time.UTC)
+	h := &proxyHandler{
+		pool: newPoolState([]*Account{
+			{
+				ID:                      "gemini-seat-refreshed",
+				Type:                    AccountTypeGemini,
+				RefreshToken:            "refresh-1",
+				OperatorEmail:           "seat@example.com",
+				AntigravityProjectID:    "project-1",
+				LastRefresh:             now,
+				GeminiProviderCheckedAt: now.Add(-time.Minute),
+				GeminiOperationalState:  geminiOperationalTruthStateCleanOK,
+			},
+		}, false),
+	}
+	user := &PoolUser{
+		ID:       "pool-user-1234",
+		Token:    "download-token",
+		Email:    "pool@example.com",
+		PlanType: "pro",
+	}
+	req := httptest.NewRequest("GET", "http://pool.local/config/opencode/download-token", nil)
+
+	bundle, err := h.buildOpenCodeConfigBundle(req, user, getPoolJWTSecret())
+	if err != nil {
+		t.Fatalf("buildOpenCodeConfigBundle: %v", err)
+	}
+	if len(bundle.AntigravityAccounts.Accounts) != 1 {
+		t.Fatalf("accounts = %d, want 1", len(bundle.AntigravityAccounts.Accounts))
+	}
+	account := bundle.AntigravityAccounts.Accounts[0]
+	if account.AddedAt != now.UnixMilli() {
+		t.Fatalf("added_at = %d", account.AddedAt)
+	}
+	if account.LastUsed != 0 {
+		t.Fatalf("last_used = %d", account.LastUsed)
 	}
 }
 
@@ -180,7 +234,7 @@ func TestBuildOpenCodeConfigBundleMarksBlockedGeminiSeatDisabled(t *testing.T) {
 	if account.LastSwitchReason != "not_warmed" {
 		t.Fatalf("last_switch_reason = %q", account.LastSwitchReason)
 	}
-	if account.CooldownReason != "not_warmed" {
+	if account.CooldownReason != "UNSUPPORTED_LOCATION" {
 		t.Fatalf("cooldown_reason = %q", account.CooldownReason)
 	}
 	if account.CachedQuota["provider_truth_state"] != geminiProviderTruthStateRestricted {
@@ -248,5 +302,219 @@ func TestBuildOpenCodeConfigBundlePrefersEnabledSeatForActiveIndex(t *testing.T)
 	}
 	if second.Enabled == nil || *second.Enabled {
 		t.Fatalf("second account = %#v", second)
+	}
+}
+
+func TestBuildOpenCodeConfigBundlePrefersReadyCleanSeatOverDegradedEnabledSeat(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	now := time.Now().UTC()
+	h := &proxyHandler{
+		pool: newPoolState([]*Account{
+			{
+				ID:                           "gemini-seat-degraded",
+				Type:                         AccountTypeGemini,
+				RefreshToken:                 "refresh-degraded",
+				OperatorEmail:                "a-degraded@example.com",
+				OperatorSource:               geminiOperatorSourceAntigravityImport,
+				OAuthProfileID:               geminiOAuthAntigravityProfileID,
+				AntigravityProjectID:         "project-degraded",
+				AntigravityCurrent:           true,
+				AntigravityValidationBlocked: true,
+				GeminiValidationReasonCode:   "UNSUPPORTED_LOCATION",
+				GeminiProviderTruthState:     geminiProviderTruthStateRestricted,
+				GeminiProviderTruthReason:    "UNSUPPORTED_LOCATION",
+				GeminiProviderCheckedAt:      now,
+				GeminiOperationalState:       geminiOperationalTruthStateDegradedOK,
+				GeminiOperationalReason:      "provider restriction detected",
+				LastUsed:                     now.Add(2 * time.Minute),
+			},
+			{
+				ID:                      "gemini-seat-ready",
+				Type:                    AccountTypeGemini,
+				RefreshToken:            "refresh-ready",
+				OperatorEmail:           "z-ready@example.com",
+				AntigravityProjectID:    "project-ready",
+				GeminiProviderCheckedAt: now,
+				GeminiOperationalState:  geminiOperationalTruthStateCleanOK,
+				LastUsed:                now,
+			},
+		}, false),
+	}
+	user := &PoolUser{
+		ID:       "pool-user-1234",
+		Token:    "download-token",
+		Email:    "pool@example.com",
+		PlanType: "pro",
+	}
+	req := httptest.NewRequest("GET", "http://pool.local/config/opencode/download-token", nil)
+
+	bundle, err := h.buildOpenCodeConfigBundle(req, user, getPoolJWTSecret())
+	if err != nil {
+		t.Fatalf("buildOpenCodeConfigBundle: %v", err)
+	}
+	if bundle.AntigravityAccounts.ActiveIndex != 0 {
+		t.Fatalf("active_index = %d", bundle.AntigravityAccounts.ActiveIndex)
+	}
+	if len(bundle.AntigravityAccounts.Accounts) != 2 {
+		t.Fatalf("accounts = %d", len(bundle.AntigravityAccounts.Accounts))
+	}
+	first := bundle.AntigravityAccounts.Accounts[0]
+	second := bundle.AntigravityAccounts.Accounts[1]
+	if first.RefreshToken != "refresh-ready" || first.Enabled == nil || !*first.Enabled {
+		t.Fatalf("first account = %#v", first)
+	}
+	if second.RefreshToken != "refresh-degraded" || second.Enabled == nil || !*second.Enabled {
+		t.Fatalf("second account = %#v", second)
+	}
+	if second.LastSwitchReason != routingDisplayStateDegradedEnabled {
+		t.Fatalf("last_switch_reason = %q", second.LastSwitchReason)
+	}
+}
+
+func TestBuildOpenCodeConfigBundleExportsGeminiCooldownState(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	now := time.Now().UTC()
+	cooldownUntil := now.Add(5 * time.Second)
+	h := &proxyHandler{
+		pool: newPoolState([]*Account{
+			{
+				ID:                      "gemini-seat-cooldown",
+				Type:                    AccountTypeGemini,
+				RefreshToken:            "refresh-cooldown",
+				OperatorEmail:           "cooldown@example.com",
+				AntigravityProjectID:    "project-cooldown",
+				GeminiProviderCheckedAt: now,
+				GeminiOperationalState:  geminiOperationalTruthStateCooldown,
+				GeminiOperationalReason: "You have exhausted your capacity on this model.",
+				RateLimitUntil:          cooldownUntil,
+			},
+		}, false),
+	}
+	user := &PoolUser{
+		ID:       "pool-user-1234",
+		Token:    "download-token",
+		Email:    "pool@example.com",
+		PlanType: "pro",
+	}
+	req := httptest.NewRequest("GET", "http://pool.local/config/opencode/download-token", nil)
+
+	bundle, err := h.buildOpenCodeConfigBundle(req, user, getPoolJWTSecret())
+	if err != nil {
+		t.Fatalf("buildOpenCodeConfigBundle: %v", err)
+	}
+	if len(bundle.AntigravityAccounts.Accounts) != 1 {
+		t.Fatalf("accounts = %d", len(bundle.AntigravityAccounts.Accounts))
+	}
+	account := bundle.AntigravityAccounts.Accounts[0]
+	if account.Enabled == nil || *account.Enabled {
+		t.Fatalf("account = %#v", account)
+	}
+	if account.CoolingDownUntil != cooldownUntil.UnixMilli() {
+		t.Fatalf("cooling_down_until = %d", account.CoolingDownUntil)
+	}
+	if account.LastSwitchReason != "rate_limited" {
+		t.Fatalf("last_switch_reason = %q", account.LastSwitchReason)
+	}
+	if account.CooldownReason == "" || !strings.Contains(account.CooldownReason, "capacity") {
+		t.Fatalf("cooldown_reason = %q", account.CooldownReason)
+	}
+	if account.CachedQuota["operational_truth_state"] != geminiOperationalTruthStateCooldown {
+		t.Fatalf("cached_quota = %#v", account.CachedQuota)
+	}
+	if account.CachedQuota["routing_state"] != routingDisplayStateCooldown {
+		t.Fatalf("cached_quota = %#v", account.CachedQuota)
+	}
+	if account.CachedQuota["routing_block_reason"] != "rate_limited" {
+		t.Fatalf("cached_quota = %#v", account.CachedQuota)
+	}
+}
+
+func TestBuildOpenCodeConfigBundleOmitsExpiredGeminiCooldownMetadata(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	now := time.Now().UTC()
+	h := &proxyHandler{
+		pool: newPoolState([]*Account{
+			{
+				ID:                      "gemini-seat-ready",
+				Type:                    AccountTypeGemini,
+				RefreshToken:            "refresh-ready",
+				OperatorEmail:           "ready@example.com",
+				AntigravityProjectID:    "project-ready",
+				GeminiProviderCheckedAt: now,
+				GeminiOperationalState:  geminiOperationalTruthStateCleanOK,
+				RateLimitUntil:          now.Add(-time.Minute),
+			},
+		}, false),
+	}
+	user := &PoolUser{
+		ID:       "pool-user-1234",
+		Token:    "download-token",
+		Email:    "pool@example.com",
+		PlanType: "pro",
+	}
+	req := httptest.NewRequest("GET", "http://pool.local/config/opencode/download-token", nil)
+
+	bundle, err := h.buildOpenCodeConfigBundle(req, user, getPoolJWTSecret())
+	if err != nil {
+		t.Fatalf("buildOpenCodeConfigBundle: %v", err)
+	}
+	account := bundle.AntigravityAccounts.Accounts[0]
+	if account.CoolingDownUntil != 0 {
+		t.Fatalf("cooling_down_until = %d", account.CoolingDownUntil)
+	}
+	if account.CooldownReason != "" {
+		t.Fatalf("cooldown_reason = %q", account.CooldownReason)
+	}
+}
+
+func TestBuildOpenCodeConfigBundleExportsStaleQuotaRoutingMetadata(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	now := time.Now().UTC()
+	freshUntil := now.Add(-2 * time.Minute)
+	h := &proxyHandler{
+		pool: newPoolState([]*Account{
+			{
+				ID:                      "gemini-seat-stale-quota",
+				Type:                    AccountTypeGemini,
+				RefreshToken:            "refresh-stale-quota",
+				OperatorEmail:           "stale-quota@example.com",
+				AntigravityProjectID:    "project-stale-quota",
+				GeminiProviderCheckedAt: now,
+				GeminiQuotaUpdatedAt:    freshUntil.Add(-geminiProviderTruthFreshnessWindow),
+				GeminiOperationalState:  geminiOperationalTruthStateCleanOK,
+			},
+		}, false),
+	}
+	user := &PoolUser{
+		ID:       "pool-user-1234",
+		Token:    "download-token",
+		Email:    "pool@example.com",
+		PlanType: "pro",
+	}
+	req := httptest.NewRequest("GET", "http://pool.local/config/opencode/download-token", nil)
+
+	bundle, err := h.buildOpenCodeConfigBundle(req, user, getPoolJWTSecret())
+	if err != nil {
+		t.Fatalf("buildOpenCodeConfigBundle: %v", err)
+	}
+	account := bundle.AntigravityAccounts.Accounts[0]
+	if account.Enabled == nil || *account.Enabled {
+		t.Fatalf("account = %#v", account)
+	}
+	if account.LastSwitchReason != "stale_quota_snapshot" {
+		t.Fatalf("last_switch_reason = %q", account.LastSwitchReason)
+	}
+	if account.CachedQuota["routing_block_reason"] != "stale_quota_snapshot" {
+		t.Fatalf("cached_quota = %#v", account.CachedQuota)
+	}
+	if got := account.CachedQuota["routing_reason"]; got != "quota snapshot is older than the freshness window" {
+		t.Fatalf("routing_reason = %#v", got)
+	}
+	if account.CachedQuota["routing_recovery_at"] == "" {
+		t.Fatalf("cached_quota = %#v", account.CachedQuota)
 	}
 }
