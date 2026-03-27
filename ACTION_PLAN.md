@@ -2,36 +2,126 @@
 
 > Repo-local board for governed product work in this capsule.
 
+## Current Release Program
+
+1. Operator directive on `2026-03-27` is explicit: do not cut a narrow Gemini publish. Close the current Gemini/Antigravity/OpenCode tail through repo-local bureaucracy and publish once with version/changelog only after the runtime, client, dashboard, and seat-reset slices are finished.
+2. External audit inputs captured on `2026-03-27` align on the same dependency chain: `T47 -> T50 -> T44 -> T51 -> T54`. The current repo-local truth after the post-restart live proof wave is: `T47`, `T50`, and `T44` are closed with fresh runtime evidence; `T51` stays in scope for this release, but its release-gate interpretation is narrowed to safe tooling delivery plus live rollback proof rather than a forced operator browser-auth re-add drill.
+3. The combined Gemini/Antigravity/OpenCode + observability wave is now publish-ready as `0.8.0`: full verify is green on the release candidate binary, GitLab Claude recovery (`T53`) is no longer blocking, and the remaining truthful residue is narrowed to post-release operational follow-up (`T55`) rather than to any unresolved release gate.
+
 ## Board
 
 ### DOING
 
-#### REPO-CPO-ARCH-P1-T46: Persist Gemini provider truth and warm-seat admission
-1. Extend the managed Gemini seat schema/load-save path so one seat can persist provider-truth fields needed for later routing: `subscription_tier`, `protected_models`, `validation_blocked*`, per-model quota/reset snapshots, refresh timestamps, and normalized provider block-state fields instead of external sidecars.
-2. Add a Go-native Gemini warmup/probe contract on add and periodic refresh so a seat is only fully eligible after auth recovery plus the first provider-truth snapshot, and keep that state in core persistence rather than `index + sqlite + log-scrape` helpers.
-3. Keep the slice backend-first: lock schema round-trip, warm-seat eligibility, and non-breaking `/status?format=json` exposure before any new UI parity or quota-routing work.
-
-**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestGeminiProviderLoadAccountLoadsPersistedState|TestSaveGeminiAccountPersistsStateFields|TestLocalOperatorGeminiSeatAddStoresManagedSeat|TestLocalOperatorGeminiSeatAddMarksUnauthorizedSeatDead|TestBuildPoolDashboardDataSeparatesGeminiOperatorLanes|TestServeStatusPageReturnsJSONForFormatQuery' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_operator:.gemini_operator,gemini_accounts:[.accounts[]|select(.type=="gemini")|{id,operator_source,health_status,block_reason:(.routing.block_reason//null)}]}'`
-
 ### NEXT
 
-#### REPO-CPO-BUG-P1-T47: Make Gemini rotation sticky-until-pressure with provider-aware block reasons
-1. Add a Gemini-specific admission pre-filter that blocks `validation_blocked`, quarantined, not-warmed, cooldown, and quota-pressured seats before the generic sticky/scored selector runs.
-2. Preserve the existing pin/sticky/scored selector shape, but make Gemini keep one current seat until per-model pressure or a hard provider error forces rotation instead of degrading into near-even drain on generic recency.
-3. Surface the resulting Gemini routing reasons through `/status?format=json`, `/status`, and the landing/dashboard contract without introducing a second control plane, hidden fixed-account mode, or opaque log-derived semantics.
+#### REPO-CPO-VERIFY-P2-T55: Re-prove the next fresh browser-auth Gemini add on the published 0.8.x contract
+1. The release intentionally leaves one explicit residual risk: reset/rollback proves safety, but the pool still has one `missing_project_id` seat and no fresh browser-auth import was performed on the final published binary.
+2. The next organic browser-auth add should verify end-to-end that a newly imported Gemini seat resolves Code Assist project truth when available, lands in the correct provider-truth state, and exports cleanly to Gemini CLI/OpenCode without manual repair.
+3. Keep this slice bounded to the first fresh-import proof only; do not reopen the release card unless that post-publish add reveals a new runtime contradiction.
 
-**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestCandidate.*Gemini|TestRoutingState.*Gemini|TestBuildPoolDashboardData.*|TestServeStatusPageReturnsJSONForFormatQuery' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="gemini")|{id,eligible:(.routing.eligible//false),block_reason:(.routing.block_reason//null),health_status:(.health_status//null)}]}'`
+**Verify hook:** `curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="gemini")|{id,health_status,routing:.routing,provider:.provider_truth,operational:.operational_truth}]}' && bash /tmp/cpo_final_tail_probe.sh && test -s /home/lap/.root_layer/shared/spikes/final_tail_completion_20260327/post_restart_probe/summary.json`
 
 ### BLOCKED
 
-#### REPO-CPO-ALIGN-P1-T44: Reconcile Gemini pool truth after the operator split
-1. Make the Gemini dashboard summarize the actual pool composition after the operator split: managed seats, warmup or quota-blocked state, generic API-style fallback lanes if enabled, and automation or import lanes if configured.
-2. Ensure account rows, counters, and operator actions use the same source-of-truth field names across `/status?format=json`, `/status`, and the landing page.
-3. Keep the UI slice blocked until provider-truth fields and Gemini routing reasons are first-class runtime data; otherwise the dashboard will look polished while still lying about seat pressure and rotation.
-
-**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestServeStatusPageReturnsJSONForFormatQuery|TestServeStatusPage|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction|TestBuildPoolDashboardData.*|TestGeminiProviderLoadAccountLoadsPersistedState' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,gemini_operator:.gemini_operator,accounts:[.accounts[]|select(.type=="gemini")|{id,operator_source,eligible:(.routing.eligible//false),block_reason:(.routing.block_reason//null),health_status:(.health_status//null)}]}'`
-
 ### DONE
+
+#### REPO-CPO-REL-P1-T54: Cut one combined Gemini/Antigravity/OpenCode + observability release
+1. The combined release is now versioned as `0.8.0` with synchronized English/Russian changelogs and one coherent publish surface across Gemini, OpenCode, operator reset tooling, and the supporting observability / status-truth alignment tail that accumulated in the same working tree.
+2. Final verification is complete on the release candidate binary: full `go build` / `go test`, strict manager status, live `/healthz` / `/status`, live Gemini CLI/OpenCode probes, repeated Gemini reset/rollback proof, and live GitLab Claude recovery smoke all passed on `2026-03-27`.
+3. The release keeps residual risks explicit instead of blocking on out-of-scope residue: one `restricted` Gemini seat, one `missing_project_id` seat, and several dead historical GitLab tokens remain visible as truthful runtime state rather than being hidden behind the tag.
+
+Completion note (2026-03-27):
+- Done: `VERSION=0.8.0`, `CHANGELOG.md`, `docs/CHANGELOG.ru.md`, `README.md`, and the supporting repo-local docs now describe the combined release wave rather than the earlier narrower Gemini-only cut.
+- Done: the full-suite regression gate returned to green after refreshing stale buffered Gemini test fixtures to match the 30-minute provider-truth freshness contract introduced by `T47`.
+- Done: live post-restart probes on `127.0.0.1:8989` re-confirmed `GEMINI_LIVE_OK`, `OPENCODE_LIVE_OK`, repeated `reset-bundle -> reset-delete -> reset-rollback`, and a recovered GitLab Claude `/v1/messages` smoke.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go build ./... && go test -count=1 -timeout 300s ./... && python3 /home/lap/tools/codex_pool_manager.py status --strict && curl -fsS http://127.0.0.1:8989/healthz && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="gemini")|{id,health_status,routing:.routing,provider:.provider_truth,operational:.operational_truth}]}' && test -s CHANGELOG.md && test -s docs/CHANGELOG.ru.md && test -s VERSION`
+
+#### REPO-CPO-OPS-P1-T53: Replenish GitLab Claude pool with unblocked source tokens
+1. The local Claude lane is no longer empty: manager strict status now shows at least one `gitlab_duo` account as healthy and routable (`claude_gitlab_1edaf5d8fa2f`), while the older blocked / insufficient-credit tokens remain visible as dead residue instead of collapsing the whole pool.
+2. Recovery is now operationally proven instead of inferred from status only: a real pooled Claude `/v1/messages` smoke succeeds against the live service with the recovered GitLab lane.
+3. Remaining dead GitLab tokens are still truthful residue, but they no longer block the repo-local release. Future token additions remain an operational scaling path, not a code-fix prerequisite.
+
+Completion note (2026-03-27):
+- Done: a temporary pool-user Claude config emitted a valid pooled Anthropic token and a live `/v1/messages` request returned `GITLAB_CLAUDE_RECOVERY_OK` from `claude-sonnet-4-20250514`.
+- Done: `python3 /home/lap/tools/codex_pool_manager.py status --strict` now shows one healthy/eligible `gitlab_duo` account alongside the still-dead historical tokens, so the Claude lane is no longer `503 no live claude accounts`.
+- Done: `T53` is therefore closed as recovered runtime state; the dead GitLab source tokens remain truthful operational residue rather than an active board blocker.
+
+**Verify hook:** `python3 /home/lap/tools/codex_pool_manager.py status --strict && jq '.admin_accounts[] | select(.type=="claude" and .plan_type=="gitlab_duo") | {id,health_status,health_error,dead,routing,last_refresh_at}' /home/lap/.root_layer/shared/spikes/final_tail_completion_20260327/t53_gitlab_recovery_verify/strict_status.json && curl -fsS -H "Authorization: Bearer $CLAUDE_POOL_TOKEN" -H 'anthropic-version: 2023-06-01' -H 'Content-Type: application/json' http://127.0.0.1:8989/v1/messages -d '{"model":"claude-sonnet-4-20250514","max_tokens":64,"messages":[{"role":"user","content":"Reply with exactly GITLAB_CLAUDE_RECOVERY_OK."}]}'`
+
+#### REPO-CPO-VERIFY-P1-T51: Deliver controlled Gemini reset tooling and live rollback proof on the truthful contract
+1. The operator now has a loopback-only reset workflow with sanitized inventory, before/after status snapshots, raw backups, and rollback artifacts: `reset-bundle`, `reset-delete`, and `reset-rollback` all exist on the running service.
+2. The release-gate scope for this slice is intentionally narrowed after the 2026-03-27 Opus/Gemini audit: forced `delete -> browser-auth re-add` is no longer required as a pre-release drill, because the current browser-auth seats already prove the post-fix client/runtime contract through live Gemini CLI and OpenCode probes.
+3. The residual truth is explicit rather than hidden: rollback safety is release-closed, while the first future organic browser-auth add remains the next fresh-import-after-all-fixes proof. Reset/rollback does not magically repair `missing_project_id`, and the current post-reset status preserves that fact.
+
+Completion note (2026-03-27):
+- Done: `operator_gemini_reset.go` now validates manifest-derived target paths in both `reset-delete` and `reset-rollback` via `ensureOperatorManagedPoolPath(...)`; targeted traversal regressions passed before rollout.
+- Done: the restarted live binary on `127.0.0.1:8989` completed a full `reset-bundle -> reset-delete -> reset-rollback` cycle for all four Gemini browser-auth seats with `deleted_count=4`, `restored_count=4`, and the same post-reset pool truth (`2 ready`, `1 restricted`, `1 missing_project_id`) restored afterwards.
+- Done: the same post-restart proof bundle re-confirmed the client contract against the restored seats: Gemini CLI setup stayed in external API-key mode on the pool root URL, OpenCode export stayed on `/v1` with `activeIndex=0` on an enabled seat, and both live probes returned `GEMINI_LIVE_OK` / `OPENCODE_LIVE_OK`.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestOperatorGeminiReset.*' ./... && curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/reset-bundle -H 'Content-Type: application/json' --data '{}' && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="gemini")|{id,health_status,routing:.routing,provider:.provider_truth,operational:.operational_truth}]}' && test -s /home/lap/.root_layer/shared/spikes/final_tail_completion_20260327/post_restart_probe/summary.json`
+
+#### REPO-CPO-ALIGN-P1-T44: Reconcile Gemini pool truth after the operator split
+1. The Gemini dashboard and `/status?format=json` now summarize the same runtime truth after the operator split: browser-auth seat counts, provider-truth state, routing state, compatibility lane, project visibility, and quota summaries all come from one source-of-truth contract.
+2. Account rows and summary cards are now browser-auth-aware instead of managed-OAuth-biased: imported/Antigravity lanes show the right labels, `provider_quota_summary`, `compatibility_lane`, and `provider_truth.project_id`, and the landing consumes `gemini_pool` directly.
+3. The operator surface is now a projection of live runtime truth rather than a second semantic layer: `/status`, `/`, and the client exports all show the same pool composition and the same blocked/degraded reasons for current seats.
+
+Completion note (2026-03-27):
+- Done: live `/status?format=json` on the restarted service shows `gemini_pool.total_seats=4`, `eligible_seats=3`, `ready_seats=2`, `restricted_seats=1`, `missing_project_seats=1`, and the expected per-seat routing/provider/operational split.
+- Done: the local landing HTML on the restarted service still consumes the same fields directly; the live page includes `gemini_pool`, `provider_quota_summary`, `compatibility_lane`, `providerTruth.project_id`, and the Gemini/OpenCode setup blocks in one surface.
+- Done: the browser-auth-only operator wording stayed truthful through the same wave, so the UI no longer implies a local/manual Gemini import lane exists for normal onboarding.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestServeStatusPageReturnsJSONForFormatQuery|TestServeStatusPage|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction|TestBuildPoolDashboardData.*|TestGeminiProviderLoadAccountLoadsPersistedState' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,gemini_operator:.gemini_operator,accounts:[.accounts[]|select(.type=="gemini")|{id,operator_source,eligible:(.routing.eligible//false),block_reason:(.routing.block_reason//null),health_status:(.health_status//null)}]}' && rg -n 'gemini_pool|provider_quota_summary|compatibility_lane|providerTruth.project_id' /home/lap/.root_layer/shared/spikes/final_tail_completion_20260327/post_restart_probe/landing.html`
+
+#### REPO-CPO-ALIGN-P1-T50: Align Gemini CLI and OpenCode connectivity with the pool contract
+1. Gemini CLI and OpenCode now have explicit, different sync/export semantics on the same running pool: Gemini CLI uses the pool root URL in external API-key mode, while OpenCode uses the Anthropic-style `/v1` export plus `antigravity-accounts.json`.
+2. The exported client state now carries the runtime truth needed to avoid stale-seat confusion: provider family, compatibility lane, `project_id`, `provider_quota_summary`, and enabled/blocked account state all survive through the config bundle instead of being hidden behind name heuristics.
+3. The live client proof is now post-restart and end-to-end: setup scripts write the expected local files, Gemini requests succeed through `/v1beta`, OpenCode requests succeed through `/v1/messages`, and `activeIndex` no longer points at a blocked Gemini seat.
+
+Completion note (2026-03-27):
+- Done: the post-restart probe wrote `.gemini/settings.json` with `selectedType=gemini-api-key`, `useExternal=true`, and `codeAssistEndpoint=http://127.0.0.1:8989`, proving the Gemini CLI contract stays on the pool root URL rather than `/v1`.
+- Done: the same probe wrote `~/.config/opencode/opencode.json` and `antigravity-accounts.json` with `provider_id=antigravity-manager`, `base_url=http://127.0.0.1:8989/v1`, `activeIndex=0`, and a disabled `missing_project_id` seat that no longer steals the active slot.
+- Done: both live client requests succeeded on the restarted service: `/v1beta/models/gemini-2.5-flash:generateContent` returned `GEMINI_LIVE_OK`, and `/v1/messages` returned `OPENCODE_LIVE_OK`.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && rg -n 'Gemini CLI|OpenCode|/v1|GOOGLE_GEMINI_BASE_URL|opencode' ACTION_PLAN.md PROJECT_MANIFEST.md docs/GEMINI_ANTIGRAVITY_AUDIT_PLAN_20260325.ru.md README.md && go test -count=1 -run 'TestBuildOpenCodeConfigBundle|TestServeOpenCodeSetupScript_.*|TestServeConfigDownloadOpenCode|TestMaybeBuildGeminiCodeAssistFacadeRequest|TestTransformGeminiCodeAssistSSE|TestServeStatusPageReturnsJSONForFormatQuery' ./... && test -s /home/lap/.root_layer/shared/spikes/final_tail_completion_20260327/post_restart_probe/summary.json`
+
+#### REPO-CPO-BUG-P1-T47: Make Gemini rotation sticky-until-pressure with provider-aware block reasons
+1. Gemini admission is now provider-aware on the running service: stale provider truth, `missing_project_id`, not-warmed restricted/auth-only seats, cooldown, quota pressure, and hard operational failure all block before the generic sticky/scored selector chooses a seat.
+2. Sticky selection is now live and bounded instead of silently draining all Gemini seats by recency: the pool keeps one active Gemini seat until a truthful pressure/block reason forces rotation, while startup stale-truth refresh restores ready Antigravity seats so the new gate does not strand the pool after restart.
+3. `/status?format=json`, `/status`, and the landing/dashboard now publish the same Gemini routing reasons and additive truth lines: `provider_truth`, `operational_truth`, and `routing.state` stay explicit without introducing a second control plane or hidden fixed-seat mode.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestHydrateAntigravityGeminiQuotaForAccountPersistsQuota|TestApplyAntigravityGeminiQuotaRefreshLockedMarksEmptySnapshotFresh|TestCandidate.*Gemini|TestRoutingState.*Gemini|TestBuildPoolDashboardData.*|TestServeStatusPageReturnsJSONForFormatQuery|TestStaleAntigravityGeminiTruthRefreshEligibleLocked|TestOperatorGeminiSeatSmoke.*' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="gemini")|{id,eligible:(.routing.eligible//false),block_reason:(.routing.block_reason//null),health_status:(.health_status//null),provider:(.provider_truth.state//null),freshness:(.provider_truth.freshness_state//null),routing:(.routing.state//null)}]}'`
+
+#### REPO-CPO-ARCH-P1-T49: Freeze the Gemini quota-first contract after the Antigravity audit
+1. Gemini runtime truth is now split additively on the running service: advisory `provider_truth`, observed `operational_truth`, and live `routing.state` are first-class instead of being collapsed into one overloaded `health_status`.
+2. Allowlisted Antigravity restrictions no longer masquerade as hard operational blocks on reload: live `/status?format=json` now publishes `health_status=restricted` with `routing.state=degraded_enabled`, while operator smoke separately records `operational_truth.state=degraded_ok` once a seat actually answers.
+3. The live rollout on `2026-03-27` proved both shapes on production `127.0.0.1:8989`: `gemini_seat_1d2425df7919` answered with `UNSUPPORTED_LOCATION` through the fallback project, and `gemini_seat_2a37154c570e` answered while truthfully degrading to `missing_project_id` after provider refresh.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && rg -n 'REPO-CPO-ARCH-P1-T49|operational_truth|routing.state|degraded_enabled|validation_blocked' ACTION_PLAN.md PROJECT_MANIFEST.md docs/GEMINI_ANTIGRAVITY_AUDIT_PLAN_20260325.ru.md && go test -count=1 -run 'TestGeminiProviderLoadAccountNormalizesAllowlistedRestrictedHealthStatus|TestReloadAccountsNormalizesAllowlistedGeminiRestrictedHealthStatus|TestBuildPoolDashboardData.*Gemini|TestFinalizeProxyResponse.*Gemini|TestFinalizeWebSocketSuccessState.*Gemini|TestOperatorGeminiSeatSmoke.*' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_accounts:[.accounts[]|select(.type=="gemini" and (.id=="gemini_seat_1d2425df7919" or .id=="gemini_seat_2a37154c570e"))|{id,health_status,provider_truth:.provider_truth,routing:.routing,operational_truth:(.operational_truth//null)}]}'`
+
+#### REPO-CPO-BUG-P1-T52: Diagnose live GitLab Claude pool 503 no-live-accounts incident
+1. Capture live GitLab Claude pool truth from the running service and manager surfaces: strict pool status, `/status?format=json`, current `systemd --user` unit state, and recent journal evidence, so the failure is classified as dead/rate-limited/missing-gateway-state/empty-pool instead of a generic `503`.
+2. Keep this slice incident-first and non-destructive: no seat delete/re-add, no blind restart, and no auth mutation until the current runtime classification is concrete and written into repo-local evidence.
+3. Close the slice with one bounded outcome only: either a verified small fix, or a tighter successor card that explains exactly why the live pool has no eligible Claude accounts while `T47` stays queued behind this out-of-band incident.
+
+Completion note (2026-03-26):
+- Done: the live pool was classified without mutating runtime state. `python3 /home/lap/tools/codex_pool_manager.py status --strict` and `/status?format=json` both show `gitlab_claude_pool.total_tokens=4`, `eligible_tokens=0`, `dead_tokens=4`.
+- Done: all four `gitlab_duo` account files still contain source GitLab tokens, but the last refresh on each account failed with the same upstream reason: `gitlab direct access failed: 403 Forbidden - Your account has been blocked.` The pool is therefore empty because upstream source accounts are blocked, not because of a local selector or cooldown regression.
+- Follow-on work was split out into blocked operational recovery (`T53`) instead of pretending a local code fix exists for a dead upstream credential set.
+
+**Verify hook:** `python3 /home/lap/tools/codex_pool_manager.py status --strict && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gitlab_claude_pool:.gitlab_claude_pool,accounts:[.accounts[]|select(.type=="claude" and .plan_type=="gitlab_duo")|{id,health_status,health_error,dead,routing:.routing,last_refresh_at,auth_expires_at}]}' && journalctl --user -u codex-pool.service --since '2026-03-26 02:20:00' --no-pager | rg 'gitlab claude refresh .* blocked'`
+
+#### REPO-CPO-ARCH-P1-T46: Persist Gemini provider truth and warm-seat admission
+1. Extend the managed Gemini seat schema/load-save path so one seat can persist provider-truth fields needed for later routing and facade admission: `antigravity_project_id`, `subscription_tier`, `protected_models`, `validation_blocked*`, per-model quota/reset snapshots, refresh timestamps, protocol caps (`max_output_tokens`, `thinking_budget`), and normalized provider block-state fields instead of external sidecars.
+2. Add a Go-native Gemini warmup/probe contract on add and periodic refresh so a seat is only fully eligible after auth recovery plus the first provider-truth snapshot, and make that eligibility explicit enough for both `/status?format=json` and the local OpenCode/Antigravity client lane instead of relying on `index + sqlite + log-scrape` helpers.
+3. Keep the slice backend-first: lock schema round-trip, provider-truth freshness, warm-seat eligibility, and non-breaking `/status?format=json` exposure before any new UI parity, CLI sync parity, or quota-routing work.
+
+Completion note (2026-03-26):
+- Done: provider-truth state projection, nested `provider_truth` status object, opportunistic auth+provider hydrate during managed probe, typed persistence for `protected_models`, per-model quota/reset snapshots, and Gemini protocol caps in status-compatible shape.
+- Done: managed Gemini add/OAuth probe no longer reports `healthy` when auth refresh succeeds but provider truth is still missing or validation-blocked; partial truth now persists as `missing_project_id` / `validation_blocked` instead of being silently flattened into auth-only success.
+- Done: ready Gemini provider truth now exposes explicit freshness/staleness semantics derived from `gemini_provider_checked_at` and `gemini_quota_updated_at`, so `/status?format=json` distinguishes fresh truth from stale truth without prematurely turning that stale signal into `T47` selector blocking.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run '^(TestBuildPoolDashboardDataIncludesGeminiProviderTruth|TestBuildPoolDashboardDataMarksGeminiProviderTruthFreshWhenReady|TestBuildPoolDashboardDataMarksGeminiProviderTruthStaleFromQuotaAge|TestGeminiProviderLoadAccountLoadsPersistedState|TestSaveGeminiAccountPersistsProviderTruthReadyState|TestReloadAccountsKeepsGeminiPersistedStateWhilePreservingRuntimeUsage|TestServeStatusPageReturnsJSONForFormatQuery)$' ./...`
 
 #### REPO-CPO-ALIGN-P1-T48: Route pooled Gemini CLI traffic through our Antigravity facade
 1. Copy the Antigravity-compatible Gemini content lane into the pool orchestrator itself by translating pooled Gemini `/v1beta/models/*:generateContent|streamGenerateContent` requests into Google Code Assist `v1internal` calls whenever the selected imported seat carries `antigravity_project_id`.

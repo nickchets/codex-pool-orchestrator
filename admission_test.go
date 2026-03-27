@@ -23,6 +23,23 @@ func TestResolveProxyAdmissionClaudePoolUser(t *testing.T) {
 	}
 }
 
+func TestResolveProxyAdmissionClaudePoolUserViaXAPIKey(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	req := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages", nil)
+	req.Header.Set("X-Api-Key", generateClaudePoolToken(getPoolJWTSecret(), "claude-user"))
+
+	h := &proxyHandler{}
+	admission := h.resolveProxyAdmission(req, "req-x-api-key")
+
+	if admission.Kind != AdmissionKindPoolUser {
+		t.Fatalf("kind = %q, want %q", admission.Kind, AdmissionKindPoolUser)
+	}
+	if admission.UserID != "claude-user" {
+		t.Fatalf("user_id = %q, want %q", admission.UserID, "claude-user")
+	}
+}
+
 func TestResolveProxyAdmissionGeminiAPIKeyPoolUser(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
 

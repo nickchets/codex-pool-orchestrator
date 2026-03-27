@@ -167,6 +167,166 @@ func TestServeCodexModelsServesStaleCacheOnRefreshFailure(t *testing.T) {
 	}
 }
 
+func TestFetchCodexModelsLogsTraceRefresh(t *testing.T) {
+	now := time.Now().UTC()
+	acc := &Account{
+		ID:          "seat-a",
+		Type:        AccountTypeCodex,
+		PlanType:    "pro",
+		AuthMode:    accountAuthModeOAuth,
+		AccessToken: "token-a",
+		Usage: UsageSnapshot{
+			RetrievedAt: now,
+		},
+	}
+
+	transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header: http.Header{
+				"Content-Type": []string{"application/json"},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"gpt-5.4"}]}`)),
+		}, nil
+	})
+	h := testCodexModelsHandler(t, transport, time.Now().Add(-time.Minute), acc)
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/backend-api/codex/models?client_version=0.106.0", nil)
+	req = req.WithContext(testTraceContext("req-models"))
+	routePlan := RoutePlan{
+		AccountType: AccountTypeCodex,
+		Provider:    h.registry.ForType(AccountTypeCodex),
+	}
+
+	logs := captureLogs(t, func() {
+		if _, err := h.fetchCodexModels(req, "req-models", routePlan); err != nil {
+			t.Fatalf("fetchCodexModels: %v", err)
+		}
+	})
+
+	if !strings.Contains(logs, "[req-models] trace models_cache") {
+		t.Fatalf("missing models_cache trace log: %s", logs)
+	}
+	if !strings.Contains(logs, `provider=codex`) || !strings.Contains(logs, `state=refresh`) {
+		t.Fatalf("unexpected models_cache trace log: %s", logs)
+	}
+}
+
+func TestFetchCodexModelsDefaultsClientVersion(t *testing.T) {
+	now := time.Now().UTC()
+	acc := &Account{
+		ID:          "seat-a",
+		Type:        AccountTypeCodex,
+		PlanType:    "pro",
+		AuthMode:    accountAuthModeOAuth,
+		AccessToken: "token-a",
+		Usage: UsageSnapshot{
+			RetrievedAt: now,
+		},
+	}
+
+	transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		if got := r.URL.Query().Get("client_version"); got != codexClientVersion {
+			t.Fatalf("client_version=%q want %q", got, codexClientVersion)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Header: http.Header{
+				"Content-Type": []string{"application/json"},
+			},
+			Body: io.NopCloser(strings.NewReader(`{"data":[{"id":"gpt-5.4"}]}`)),
+		}, nil
+	})
+	h := testCodexModelsHandler(t, transport, time.Now().Add(-time.Minute), acc)
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/backend-api/codex/models", nil)
+	req = req.WithContext(testTraceContext("req-models-default-version"))
+	routePlan := RoutePlan{
+		AccountType: AccountTypeCodex,
+		Provider:    h.registry.ForType(AccountTypeCodex),
+	}
+
+	if _, err := h.fetchCodexModels(req, "req-models-default-version", routePlan); err != nil {
+		t.Fatalf("fetchCodexModels: %v", err)
+	}
+}
+
+func TestMaybeServeCachedCodexModelsLogsSingleRefreshError(t *testing.T) {
+	now := time.Now().UTC()
+	acc := &Account{
+		ID:          "seat-a",
+		Type:        AccountTypeCodex,
+		PlanType:    "pro",
+		AuthMode:    accountAuthModeOAuth,
+		AccessToken: "token-a",
+		Usage: UsageSnapshot{
+			RetrievedAt: now,
+		},
+	}
+
+	transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		return nil, io.EOF
+	})
+	h := testCodexModelsHandler(t, transport, time.Now().Add(-time.Minute), acc)
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/backend-api/codex/models", nil)
+	req = req.WithContext(testTraceContext("req-models-refresh-error"))
+	rr := httptest.NewRecorder()
+
+	logs := captureLogs(t, func() {
+		handled := h.maybeServeCachedCodexModels(rr, req, "req-models-refresh-error", AdmissionResult{
+			Kind:         AdmissionKindPoolUser,
+			UserID:       "pool-user",
+			ProviderType: AccountTypeCodex,
+		})
+		if !handled {
+			t.Fatal("expected codex models request to be handled")
+		}
+	})
+
+	if got := strings.Count(logs, "trace models_cache"); got != 1 {
+		t.Fatalf("models_cache trace count=%d logs=%s", got, logs)
+	}
+	if !strings.Contains(logs, `state=refresh_error`) {
+		t.Fatalf("missing refresh_error trace log: %s", logs)
+	}
+}
+
+func TestEnsureCodexRouteReadyLogsWarmupBlock(t *testing.T) {
+	acc := &Account{
+		ID:          "seat-a",
+		Type:        AccountTypeCodex,
+		PlanType:    "pro",
+		AuthMode:    accountAuthModeOAuth,
+		AccessToken: "token-a",
+	}
+	h := testCodexModelsHandler(t, roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		t.Fatal("transport should not be called during warm-up gate")
+		return nil, nil
+	}), time.Now(), acc)
+
+	trace := &requestTrace{
+		cfg:       requestTraceConfig{requests: true},
+		reqID:     "req-warm",
+		startedAt: time.Now(),
+	}
+	rr := httptest.NewRecorder()
+	logs := captureLogs(t, func() {
+		if h.ensureCodexRouteReady(rr, "req-warm", RoutePlan{AccountType: AccountTypeCodex}, trace) {
+			t.Fatal("expected warm-up block")
+		}
+	})
+
+	if !strings.Contains(logs, "[req-warm] trace route_gate") {
+		t.Fatalf("missing route_gate trace log: %s", logs)
+	}
+	if !strings.Contains(logs, `reason=warmup`) {
+		t.Fatalf("unexpected route_gate trace log: %s", logs)
+	}
+}
+
 func (h *proxyHandler) serveCodexModelsForTest(w http.ResponseWriter, r *http.Request, reqID string, routePlan RoutePlan) {
 	now := time.Now()
 	if cached, ok := h.codexModels.load(); ok {

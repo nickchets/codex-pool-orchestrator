@@ -148,9 +148,10 @@ func (h *proxyHandler) handleCodexLoopbackCallback(w http.ResponseWriter, r *htt
 		callbackURL += "?" + r.URL.RawQuery
 	}
 
-	result, err := h.completeCodexExchange(codexExchangeRequest{
+	result, err := h.completeCodexExchange(r.Context(), codexExchangeRequest{
 		State:       state,
 		CallbackURL: callbackURL,
+		Lane:        "loopback",
 	})
 	if err != nil {
 		log.Printf("codex oauth loopback callback failed: %v", err)

@@ -47,6 +47,43 @@ func TestApplySuccessfulAccountStateLockedClearsDeadSince(t *testing.T) {
 	}
 }
 
+func TestApplySuccessfulAccountStateLockedPreservesGeminiValidationBlockedTruth(t *testing.T) {
+	now := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
+	acc := &Account{
+		ID:                           "gemini-blocked",
+		Type:                         AccountTypeGemini,
+		AntigravityValidationBlocked: true,
+		GeminiValidationReasonCode:   "UNSUPPORTED_LOCATION",
+		GeminiProviderTruthState:     geminiProviderTruthStateRestricted,
+		HealthStatus:                 "error",
+		HealthError:                  "stale transport error",
+		RateLimitUntil:               now.Add(time.Hour),
+	}
+
+	acc.mu.Lock()
+	applySuccessfulAccountStateLocked(acc, now)
+	acc.mu.Unlock()
+
+	if acc.HealthStatus != "restricted" {
+		t.Fatalf("health_status=%q", acc.HealthStatus)
+	}
+	if acc.HealthError != "" {
+		t.Fatalf("health_error=%q", acc.HealthError)
+	}
+	if acc.HealthCheckedAt != now {
+		t.Fatalf("health_checked_at=%s want %s", acc.HealthCheckedAt, now)
+	}
+	if !acc.LastHealthyAt.IsZero() {
+		t.Fatalf("last_healthy_at=%s want zero", acc.LastHealthyAt)
+	}
+	if !acc.RateLimitUntil.IsZero() {
+		t.Fatalf("rate_limit_until=%s want zero", acc.RateLimitUntil)
+	}
+	if acc.GeminiOperationalState != geminiOperationalTruthStateDegradedOK {
+		t.Fatalf("gemini_operational_state=%q", acc.GeminiOperationalState)
+	}
+}
+
 func TestBuildPoolDashboardDataIncludesDeadSince(t *testing.T) {
 	now := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
 	deadSince := now.Add(-96 * time.Hour).UTC()

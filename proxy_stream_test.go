@@ -105,6 +105,79 @@ func TestProxyStreamedRequestClaude(t *testing.T) {
 	}
 }
 
+func TestProxyPassthroughStreamedStripsLocalTraceHeaders(t *testing.T) {
+	traceHeaderCh := make(chan string, 1)
+	legacyTraceHeaderCh := make(chan string, 1)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		traceHeaderCh <- r.Header.Get(localTraceHeaderID)
+		legacyTraceHeaderCh <- r.Header.Get(legacyLocalTraceHeaderID)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer upstream.Close()
+
+	baseURL, _ := url.Parse(upstream.URL)
+	codex := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	claude := NewClaudeProvider(baseURL)
+	gemini := NewGeminiProvider(baseURL, baseURL)
+	registry := NewProviderRegistry(codex, claude, gemini)
+
+	h := &proxyHandler{
+		cfg: config{
+			requestTimeout:       5 * time.Second,
+			streamTimeout:        5 * time.Second,
+			maxInMemoryBodyBytes: 8,
+		},
+		transport: http.DefaultTransport,
+		pool:      newPoolState(nil, false),
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+	}
+
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	body := bytes.Repeat([]byte("a"), 64)
+	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/responses", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer sk-proj-test-passthrough")
+	req.Header.Set(localTraceHeaderID, "pool-trace")
+	req.Header.Set(legacyLocalTraceHeaderID, "legacy-trace")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+
+	select {
+	case got := <-traceHeaderCh:
+		if got != "" {
+			t.Fatalf("expected pool trace header to be stripped, got %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for upstream pool trace header")
+	}
+
+	select {
+	case got := <-legacyTraceHeaderCh:
+		if got != "" {
+			t.Fatalf("expected legacy trace header to be stripped, got %q", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for upstream legacy trace header")
+	}
+}
+
 func TestProxyStreamedManagedAPI5xxPreservesFullErrorBody(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
 

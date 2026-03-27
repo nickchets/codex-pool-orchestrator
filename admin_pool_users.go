@@ -125,9 +125,12 @@ func (h *proxyHandler) handlePoolUsersCreate(w http.ResponseWriter, r *http.Requ
 		},
 		"token": user.Token,
 		"setup": map[string]string{
-			"codex_config":  baseURL + "/config/codex/" + user.Token,
-			"gemini_config": baseURL + "/config/gemini/" + user.Token,
-			"claude_config": baseURL + "/config/claude/" + user.Token,
+			"codex_config":    baseURL + "/config/codex/" + user.Token,
+			"gemini_config":   baseURL + "/config/gemini/" + user.Token,
+			"gemini_setup":    baseURL + "/setup/gemini/" + user.Token,
+			"claude_config":   baseURL + "/config/claude/" + user.Token,
+			"opencode_config": baseURL + "/config/opencode/" + user.Token,
+			"opencode_setup":  baseURL + "/setup/opencode/" + user.Token,
 		},
 	})
 }
@@ -161,6 +164,9 @@ func (h *proxyHandler) serveConfigDownload(w http.ResponseWriter, r *http.Reques
 	case strings.HasPrefix(path, "/config/codex/"):
 		configType = "codex"
 		token = strings.TrimPrefix(path, "/config/codex/")
+	case strings.HasPrefix(path, "/config/opencode/"):
+		configType = "opencode"
+		token = strings.TrimPrefix(path, "/config/opencode/")
 	case strings.HasPrefix(path, "/config/gemini/"):
 		configType = "gemini"
 		token = strings.TrimPrefix(path, "/config/gemini/")
@@ -218,5 +224,12 @@ func (h *proxyHandler) serveConfigDownload(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		json.NewEncoder(w).Encode(auth)
+	case "opencode":
+		bundle, err := h.buildOpenCodeConfigBundle(r, user, secret)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(bundle)
 	}
 }

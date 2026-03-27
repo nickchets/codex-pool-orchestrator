@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -168,9 +169,28 @@ func TestGeminiProviderLoadAccountLoadsAntigravityFields(t *testing.T) {
 		"gemini_validation_message": "Workspace validation required",
 		"gemini_validation_url": "https://example.com/validate",
 		"gemini_provider_checked_at": "2026-03-24T12:00:00Z",
+		"gemini_protected_models": ["gemini-3.1-pro-high"],
 		"antigravity_quota": {
 			"is_forbidden": true,
-			"forbidden_reason": "quota exhausted"
+			"forbidden_reason": "quota exhausted",
+			"last_updated": 1774353900,
+			"model_forwarding_rules": {
+				"gemini-1.5-pro": "gemini-2.5-pro"
+			},
+			"models": [
+				{
+					"name": "gemini-3.1-pro-high",
+					"percentage": 67,
+					"reset_time": "2026-03-24T15:00:00Z",
+					"display_name": "Gemini 3.1 Pro High",
+					"supports_images": true,
+					"supports_thinking": true,
+					"thinking_budget": 24576,
+					"recommended": true,
+					"max_tokens": 1048576,
+					"max_output_tokens": 65535
+				}
+			]
 		}
 	}`)
 
@@ -222,6 +242,109 @@ func TestGeminiProviderLoadAccountLoadsAntigravityFields(t *testing.T) {
 	}
 	if got := acc.GeminiProviderCheckedAt.UTC().Format(time.RFC3339); got != "2026-03-24T12:00:00Z" {
 		t.Fatalf("GeminiProviderCheckedAt = %q", got)
+	}
+	if acc.GeminiProviderTruthReady {
+		t.Fatal("expected GeminiProviderTruthReady to stay false for blocked seat")
+	}
+	if acc.GeminiProviderTruthState != geminiProviderTruthStateProxyDisabled {
+		t.Fatalf("GeminiProviderTruthState = %q", acc.GeminiProviderTruthState)
+	}
+	if acc.GeminiProviderTruthReason != "provider marked seat proxy_disabled" {
+		t.Fatalf("GeminiProviderTruthReason = %q", acc.GeminiProviderTruthReason)
+	}
+	if len(acc.GeminiProtectedModels) != 1 || acc.GeminiProtectedModels[0] != "gemini-3.1-pro-high" {
+		t.Fatalf("GeminiProtectedModels = %#v", acc.GeminiProtectedModels)
+	}
+	if got := acc.GeminiQuotaUpdatedAt.UTC().Format(time.RFC3339); got != "2026-03-24T12:05:00Z" {
+		t.Fatalf("GeminiQuotaUpdatedAt = %q", got)
+	}
+	if len(acc.GeminiQuotaModels) != 1 {
+		t.Fatalf("GeminiQuotaModels = %#v", acc.GeminiQuotaModels)
+	}
+	if acc.GeminiQuotaModels[0].Name != "gemini-3.1-pro-high" || acc.GeminiQuotaModels[0].MaxOutputTokens != 65535 {
+		t.Fatalf("GeminiQuotaModels[0] = %#v", acc.GeminiQuotaModels[0])
+	}
+	if acc.GeminiQuotaModels[0].ThinkingBudget != 24576 {
+		t.Fatalf("GeminiQuotaModels[0].ThinkingBudget = %d", acc.GeminiQuotaModels[0].ThinkingBudget)
+	}
+	if got := acc.GeminiModelForwardingRules["gemini-1.5-pro"]; got != "gemini-2.5-pro" {
+		t.Fatalf("GeminiModelForwardingRules = %#v", acc.GeminiModelForwardingRules)
+	}
+}
+
+func TestGeminiProviderLoadAccountFiltersPersistedCodexQuotaModels(t *testing.T) {
+	raw := []byte(`{
+		"access_token": "access-token",
+		"refresh_token": "refresh-token",
+		"oauth_profile_id": "antigravity_public",
+		"antigravity_source": "browser_oauth",
+		"gemini_quota_models": [
+			{
+				"name": "claude-sonnet-4-6",
+				"percentage": 62
+			},
+			{
+				"name": "gpt-oss-120b-medium",
+				"percentage": 91
+			},
+			{
+				"name": "gemini-2.5-flash",
+				"percentage": 73
+			}
+		]
+	}`)
+
+	acc, err := (&GeminiProvider{}).LoadAccount("gemini_mixed_quota.json", "/tmp/gemini_mixed_quota.json", raw)
+	if err != nil {
+		t.Fatalf("LoadAccount error: %v", err)
+	}
+	if acc == nil {
+		t.Fatal("expected Gemini account")
+	}
+	if len(acc.GeminiQuotaModels) != 2 {
+		t.Fatalf("GeminiQuotaModels = %#v", acc.GeminiQuotaModels)
+	}
+	if acc.GeminiQuotaModels[0].Name != "gemini-2.5-flash" || acc.GeminiQuotaModels[0].RouteProvider != "gemini" {
+		t.Fatalf("GeminiQuotaModels[0] = %#v", acc.GeminiQuotaModels[0])
+	}
+	if acc.GeminiQuotaModels[1].Name != "claude-sonnet-4-6" || acc.GeminiQuotaModels[1].RouteProvider != "claude" {
+		t.Fatalf("GeminiQuotaModels[1] = %#v", acc.GeminiQuotaModels[1])
+	}
+	for _, model := range acc.GeminiQuotaModels {
+		if model.Name == "gpt-oss-120b-medium" {
+			t.Fatalf("unexpected codex quota model: %#v", acc.GeminiQuotaModels)
+		}
+	}
+}
+
+func TestGeminiProviderLoadAccountNormalizesAllowlistedRestrictedHealthStatus(t *testing.T) {
+	raw := []byte(`{
+		"access_token": "access-token",
+		"refresh_token": "refresh-token",
+		"antigravity_source": "browser_oauth",
+		"antigravity_validation_blocked": true,
+		"gemini_validation_reason_code": "UNSUPPORTED_LOCATION",
+		"gemini_validation_message": "region blocked",
+		"gemini_provider_checked_at": "2026-03-27T10:00:00Z",
+		"health_status": "validation_blocked",
+		"health_error": "managed gemini seat provider truth not ready: validation_blocked: region blocked"
+	}`)
+
+	acc, err := (&GeminiProvider{}).LoadAccount("gemini_restricted.json", "/tmp/gemini_restricted.json", raw)
+	if err != nil {
+		t.Fatalf("LoadAccount error: %v", err)
+	}
+	if acc == nil {
+		t.Fatal("expected Gemini account")
+	}
+	if acc.GeminiProviderTruthState != geminiProviderTruthStateRestricted {
+		t.Fatalf("GeminiProviderTruthState = %q", acc.GeminiProviderTruthState)
+	}
+	if acc.HealthStatus != "restricted" {
+		t.Fatalf("HealthStatus = %q", acc.HealthStatus)
+	}
+	if acc.HealthError != "" {
+		t.Fatalf("HealthError = %q", acc.HealthError)
 	}
 }
 
@@ -379,6 +502,23 @@ func TestSaveGeminiAccountPersistsAntigravityFields(t *testing.T) {
 		GeminiValidationMessage:      "Workspace validation required",
 		GeminiValidationURL:          "https://example.com/validate",
 		GeminiProviderCheckedAt:      time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC),
+		GeminiProtectedModels:        []string{"gemini-3.1-pro-high"},
+		GeminiQuotaUpdatedAt:         time.Date(2026, 3, 24, 12, 5, 0, 0, time.UTC),
+		GeminiQuotaModels: []GeminiModelQuotaSnapshot{{
+			Name:             "gemini-3.1-pro-high",
+			Percentage:       67,
+			ResetTime:        "2026-03-24T15:00:00Z",
+			DisplayName:      "Gemini 3.1 Pro High",
+			SupportsImages:   true,
+			SupportsThinking: true,
+			ThinkingBudget:   24576,
+			Recommended:      true,
+			MaxTokens:        1048576,
+			MaxOutputTokens:  65535,
+		}},
+		GeminiModelForwardingRules: map[string]string{
+			"gemini-1.5-pro": "gemini-2.5-pro",
+		},
 		AntigravityQuota: map[string]any{
 			"is_forbidden":     true,
 			"forbidden_reason": "quota exhausted",
@@ -430,9 +570,81 @@ func TestSaveGeminiAccountPersistsAntigravityFields(t *testing.T) {
 	if root["gemini_provider_checked_at"] != "2026-03-24T12:00:00Z" {
 		t.Fatalf("gemini_provider_checked_at = %#v", root["gemini_provider_checked_at"])
 	}
+	if root["gemini_provider_truth_ready"] != false {
+		t.Fatalf("gemini_provider_truth_ready = %#v", root["gemini_provider_truth_ready"])
+	}
+	if root["gemini_provider_truth_state"] != geminiProviderTruthStateProxyDisabled {
+		t.Fatalf("gemini_provider_truth_state = %#v", root["gemini_provider_truth_state"])
+	}
+	if root["gemini_provider_truth_reason"] != "provider marked seat proxy_disabled" {
+		t.Fatalf("gemini_provider_truth_reason = %#v", root["gemini_provider_truth_reason"])
+	}
+	if root["gemini_quota_updated_at"] != "2026-03-24T12:05:00Z" {
+		t.Fatalf("gemini_quota_updated_at = %#v", root["gemini_quota_updated_at"])
+	}
+	protectedModels, _ := root["gemini_protected_models"].([]any)
+	if len(protectedModels) != 1 || protectedModels[0] != "gemini-3.1-pro-high" {
+		t.Fatalf("gemini_protected_models = %#v", root["gemini_protected_models"])
+	}
+	quotaModels, _ := root["gemini_quota_models"].([]any)
+	if len(quotaModels) != 1 {
+		t.Fatalf("gemini_quota_models = %#v", root["gemini_quota_models"])
+	}
+	quotaModel, _ := quotaModels[0].(map[string]any)
+	if quotaModel["name"] != "gemini-3.1-pro-high" || quotaModel["max_output_tokens"] != float64(65535) {
+		t.Fatalf("gemini_quota_models[0] = %#v", quotaModel)
+	}
+	forwardingRules, _ := root["gemini_model_forwarding_rules"].(map[string]any)
+	if forwardingRules["gemini-1.5-pro"] != "gemini-2.5-pro" {
+		t.Fatalf("gemini_model_forwarding_rules = %#v", root["gemini_model_forwarding_rules"])
+	}
 	quota, _ := root["antigravity_quota"].(map[string]any)
 	if quota["forbidden_reason"] != "quota exhausted" {
 		t.Fatalf("antigravity quota = %#v", root["antigravity_quota"])
+	}
+}
+
+func TestSaveGeminiAccountPersistsProviderTruthReadyState(t *testing.T) {
+	accFile := filepath.Join(t.TempDir(), "gemini_provider_truth_ready.json")
+	if err := os.WriteFile(accFile, []byte(`{
+		"access_token": "old-access",
+		"refresh_token": "old-refresh"
+	}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	acc := &Account{
+		ID:                       "gemini_provider_truth_ready",
+		Type:                     AccountTypeGemini,
+		File:                     accFile,
+		AccessToken:              "new-access",
+		RefreshToken:             "new-refresh",
+		AntigravityProjectID:     "project-1",
+		GeminiProviderCheckedAt:  time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC),
+		GeminiSubscriptionTierID: "standard-tier",
+	}
+
+	if err := saveGeminiAccount(acc); err != nil {
+		t.Fatalf("saveGeminiAccount error: %v", err)
+	}
+
+	var root map[string]any
+	saved, err := os.ReadFile(accFile)
+	if err != nil {
+		t.Fatalf("read auth file: %v", err)
+	}
+	if err := json.Unmarshal(saved, &root); err != nil {
+		t.Fatalf("unmarshal saved file: %v", err)
+	}
+
+	if root["gemini_provider_truth_ready"] != true {
+		t.Fatalf("gemini_provider_truth_ready = %#v", root["gemini_provider_truth_ready"])
+	}
+	if root["gemini_provider_truth_state"] != geminiProviderTruthStateReady {
+		t.Fatalf("gemini_provider_truth_state = %#v", root["gemini_provider_truth_state"])
+	}
+	if _, ok := root["gemini_provider_truth_reason"]; ok {
+		t.Fatalf("expected gemini_provider_truth_reason to be omitted for ready state: %#v", root["gemini_provider_truth_reason"])
 	}
 }
 
@@ -470,14 +682,23 @@ func TestFinalizeProxyResponsePersistsHealthyGeminiRecovery(t *testing.T) {
 	if !acc.RateLimitUntil.IsZero() {
 		t.Fatalf("rate_limit_until=%v", acc.RateLimitUntil)
 	}
-	if acc.HealthStatus != "healthy" {
+	if acc.HealthStatus != "auth_only" {
 		t.Fatalf("health_status=%q", acc.HealthStatus)
 	}
-	if acc.HealthError != "" {
+	if acc.HealthError != "provider truth not hydrated" {
 		t.Fatalf("health_error=%q", acc.HealthError)
 	}
-	if acc.HealthCheckedAt.IsZero() || acc.LastHealthyAt.IsZero() {
-		t.Fatal("expected health timestamps to be updated")
+	if acc.HealthCheckedAt.IsZero() {
+		t.Fatal("expected health_checked_at to be updated")
+	}
+	if !acc.LastHealthyAt.IsZero() {
+		t.Fatalf("expected last_healthy_at to stay zero, got %v", acc.LastHealthyAt)
+	}
+	if acc.GeminiOperationalState != geminiOperationalTruthStateDegradedOK {
+		t.Fatalf("gemini_operational_state=%q", acc.GeminiOperationalState)
+	}
+	if acc.GeminiOperationalCheckedAt.IsZero() || acc.GeminiOperationalLastSuccessAt.IsZero() {
+		t.Fatal("expected operational timestamps to be updated")
 	}
 
 	saved, err := os.ReadFile(accFile)
@@ -494,8 +715,11 @@ func TestFinalizeProxyResponsePersistsHealthyGeminiRecovery(t *testing.T) {
 	if _, ok := root["dead"]; ok {
 		t.Fatalf("expected saved file to clear dead flag: %s", string(saved))
 	}
-	if root["health_status"] != "healthy" {
+	if root["health_status"] != "auth_only" {
 		t.Fatalf("saved health_status = %#v", root["health_status"])
+	}
+	if root["gemini_operational_state"] != geminiOperationalTruthStateDegradedOK {
+		t.Fatalf("saved gemini_operational_state = %#v", root["gemini_operational_state"])
 	}
 }
 
@@ -519,11 +743,20 @@ func TestFinalizeProxyResponsePersistsHealthyGeminiStateFromUnknown(t *testing.T
 
 	h.finalizeProxyResponse("req-test", &GeminiProvider{}, acc, "pool-user", http.StatusOK, true, false, "", 0, 0, nil)
 
-	if acc.HealthStatus != "healthy" {
+	if acc.HealthStatus != "auth_only" {
 		t.Fatalf("health_status=%q", acc.HealthStatus)
 	}
-	if acc.HealthCheckedAt.IsZero() || acc.LastHealthyAt.IsZero() {
-		t.Fatal("expected health timestamps to be populated")
+	if acc.HealthCheckedAt.IsZero() {
+		t.Fatal("expected health_checked_at to be populated")
+	}
+	if !acc.LastHealthyAt.IsZero() {
+		t.Fatalf("expected last_healthy_at to stay zero, got %v", acc.LastHealthyAt)
+	}
+	if acc.GeminiOperationalState != geminiOperationalTruthStateDegradedOK {
+		t.Fatalf("gemini_operational_state=%q", acc.GeminiOperationalState)
+	}
+	if acc.GeminiOperationalCheckedAt.IsZero() || acc.GeminiOperationalLastSuccessAt.IsZero() {
+		t.Fatal("expected operational timestamps to be populated")
 	}
 
 	saved, err := os.ReadFile(accFile)
@@ -534,14 +767,23 @@ func TestFinalizeProxyResponsePersistsHealthyGeminiStateFromUnknown(t *testing.T
 	if err := json.Unmarshal(saved, &root); err != nil {
 		t.Fatalf("unmarshal saved file: %v", err)
 	}
-	if root["health_status"] != "healthy" {
+	if root["health_status"] != "auth_only" {
 		t.Fatalf("saved health_status = %#v", root["health_status"])
 	}
 	if _, ok := root["health_checked_at"]; !ok {
 		t.Fatalf("expected health_checked_at to be persisted: %s", string(saved))
 	}
-	if _, ok := root["last_healthy_at"]; !ok {
-		t.Fatalf("expected last_healthy_at to be persisted: %s", string(saved))
+	if _, ok := root["last_healthy_at"]; ok {
+		t.Fatalf("expected last_healthy_at to stay absent: %s", string(saved))
+	}
+	if root["gemini_operational_state"] != geminiOperationalTruthStateDegradedOK {
+		t.Fatalf("saved gemini_operational_state = %#v", root["gemini_operational_state"])
+	}
+	if _, ok := root["gemini_operational_checked_at"]; !ok {
+		t.Fatalf("expected gemini_operational_checked_at to be persisted: %s", string(saved))
+	}
+	if _, ok := root["gemini_operational_last_success_at"]; !ok {
+		t.Fatalf("expected gemini_operational_last_success_at to be persisted: %s", string(saved))
 	}
 }
 
@@ -567,8 +809,20 @@ func TestFinalizeProxyResponsePersistsHealthyGeminiTimestampsWhenAlreadyHealthy(
 
 	h.finalizeProxyResponse("req-test", &GeminiProvider{}, acc, "pool-user", http.StatusOK, true, false, "", 0, 0, nil)
 
-	if acc.HealthCheckedAt.IsZero() || acc.LastHealthyAt.IsZero() {
-		t.Fatal("expected health timestamps to be populated")
+	if acc.HealthStatus != "auth_only" {
+		t.Fatalf("health_status=%q", acc.HealthStatus)
+	}
+	if acc.HealthCheckedAt.IsZero() {
+		t.Fatal("expected health_checked_at to be populated")
+	}
+	if !acc.LastHealthyAt.IsZero() {
+		t.Fatalf("expected last_healthy_at to stay zero, got %v", acc.LastHealthyAt)
+	}
+	if acc.GeminiOperationalState != geminiOperationalTruthStateDegradedOK {
+		t.Fatalf("gemini_operational_state=%q", acc.GeminiOperationalState)
+	}
+	if acc.GeminiOperationalCheckedAt.IsZero() || acc.GeminiOperationalLastSuccessAt.IsZero() {
+		t.Fatal("expected operational timestamps to be populated")
 	}
 
 	saved, err := os.ReadFile(accFile)
@@ -582,8 +836,14 @@ func TestFinalizeProxyResponsePersistsHealthyGeminiTimestampsWhenAlreadyHealthy(
 	if _, ok := root["health_checked_at"]; !ok {
 		t.Fatalf("expected health_checked_at to be persisted: %s", string(saved))
 	}
-	if _, ok := root["last_healthy_at"]; !ok {
-		t.Fatalf("expected last_healthy_at to be persisted: %s", string(saved))
+	if _, ok := root["last_healthy_at"]; ok {
+		t.Fatalf("expected last_healthy_at to stay absent: %s", string(saved))
+	}
+	if root["health_status"] != "auth_only" {
+		t.Fatalf("saved health_status = %#v", root["health_status"])
+	}
+	if root["gemini_operational_state"] != geminiOperationalTruthStateDegradedOK {
+		t.Fatalf("saved gemini_operational_state = %#v", root["gemini_operational_state"])
 	}
 }
 
@@ -607,11 +867,20 @@ func TestFinalizeWebSocketSuccessStatePersistsHealthyGeminiState(t *testing.T) {
 
 	h.finalizeWebSocketSuccessState(acc, "", http.StatusSwitchingProtocols)
 
-	if acc.HealthStatus != "healthy" {
+	if acc.HealthStatus != "auth_only" {
 		t.Fatalf("health_status=%q", acc.HealthStatus)
 	}
-	if acc.HealthCheckedAt.IsZero() || acc.LastHealthyAt.IsZero() {
-		t.Fatal("expected health timestamps to be populated")
+	if acc.HealthCheckedAt.IsZero() {
+		t.Fatal("expected health_checked_at to be populated")
+	}
+	if !acc.LastHealthyAt.IsZero() {
+		t.Fatalf("expected last_healthy_at to stay zero, got %v", acc.LastHealthyAt)
+	}
+	if acc.GeminiOperationalState != geminiOperationalTruthStateDegradedOK {
+		t.Fatalf("gemini_operational_state=%q", acc.GeminiOperationalState)
+	}
+	if acc.GeminiOperationalCheckedAt.IsZero() || acc.GeminiOperationalLastSuccessAt.IsZero() {
+		t.Fatal("expected operational timestamps to be populated")
 	}
 
 	saved, err := os.ReadFile(accFile)
@@ -622,14 +891,17 @@ func TestFinalizeWebSocketSuccessStatePersistsHealthyGeminiState(t *testing.T) {
 	if err := json.Unmarshal(saved, &root); err != nil {
 		t.Fatalf("unmarshal saved file: %v", err)
 	}
-	if root["health_status"] != "healthy" {
+	if root["health_status"] != "auth_only" {
 		t.Fatalf("saved health_status = %#v", root["health_status"])
 	}
 	if _, ok := root["health_checked_at"]; !ok {
 		t.Fatalf("expected health_checked_at to be persisted: %s", string(saved))
 	}
-	if _, ok := root["last_healthy_at"]; !ok {
-		t.Fatalf("expected last_healthy_at to be persisted: %s", string(saved))
+	if _, ok := root["last_healthy_at"]; ok {
+		t.Fatalf("expected last_healthy_at to stay absent: %s", string(saved))
+	}
+	if root["gemini_operational_state"] != geminiOperationalTruthStateDegradedOK {
+		t.Fatalf("saved gemini_operational_state = %#v", root["gemini_operational_state"])
 	}
 }
 
@@ -1035,5 +1307,52 @@ func testGeminiProviderRefreshTokenFallsBackOnRetryableBadRequest(t *testing.T, 
 	}
 	if acc.OAuthClientID != "" || acc.OAuthClientSecret != "" {
 		t.Fatalf("expected raw client credentials to be cleared, got %q / %q", acc.OAuthClientID, acc.OAuthClientSecret)
+	}
+}
+
+func TestGeminiProviderRefreshTokenLogsFallbackTrace(t *testing.T) {
+	setGeminiOAuthTestProfiles(t)
+
+	accFile := filepath.Join(t.TempDir(), "gemini_refresh_trace.json")
+	if err := os.WriteFile(accFile, []byte(`{"access_token":"seed-access","refresh_token":"seed-refresh"}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	acc := &Account{
+		ID:           "gemini_refresh_trace",
+		Type:         AccountTypeGemini,
+		File:         accFile,
+		AuthMode:     accountAuthModeOAuth,
+		AccessToken:  "seed-access",
+		RefreshToken: "seed-refresh",
+	}
+
+	var calls int
+	transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		calls++
+		switch calls {
+		case 1:
+			return jsonResponse(http.StatusBadRequest, `{"error":"invalid_grant","error_description":"retry another client"}`), nil
+		case 2:
+			return jsonResponse(http.StatusOK, `{"access_token":"fresh-access","expires_in":3600,"token_type":"Bearer","scope":"scope"}`), nil
+		default:
+			t.Fatalf("unexpected refresh call #%d", calls)
+		}
+		return nil, nil
+	})
+
+	logs := captureLogs(t, func() {
+		if err := (&GeminiProvider{}).RefreshToken(testTraceContext("req-gemini-refresh"), acc, transport); err != nil {
+			t.Fatalf("RefreshToken error: %v", err)
+		}
+	})
+
+	if !strings.Contains(logs, "[req-gemini-refresh] trace auth_fallback") {
+		t.Fatalf("missing auth_fallback log: %s", logs)
+	}
+	if !strings.Contains(logs, "[req-gemini-refresh] trace token_refresh") {
+		t.Fatalf("missing token_refresh log: %s", logs)
+	}
+	if !strings.Contains(logs, `provider=gemini`) || !strings.Contains(logs, `result=fallback`) || !strings.Contains(logs, `result=ok`) {
+		t.Fatalf("unexpected refresh trace logs: %s", logs)
 	}
 }

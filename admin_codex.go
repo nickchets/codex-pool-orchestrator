@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -121,6 +122,7 @@ type codexExchangeRequest struct {
 	Verifier    string
 	State       string
 	CallbackURL string
+	Lane        string
 }
 
 type codexExchangeResult struct {
@@ -283,11 +285,12 @@ func (h *proxyHandler) handleCodexExchange(w http.ResponseWriter, r *http.Reques
 		req.Verifier = r.FormValue("verifier")
 	}
 
-	result, err := h.completeCodexExchange(codexExchangeRequest{
+	result, err := h.completeCodexExchange(r.Context(), codexExchangeRequest{
 		Code:        req.Code,
 		Verifier:    req.Verifier,
 		State:       req.State,
 		CallbackURL: req.CallbackURL,
+		Lane:        "admin",
 	})
 	if err != nil {
 		status := http.StatusInternalServerError
@@ -308,7 +311,15 @@ func (h *proxyHandler) handleCodexExchange(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func (h *proxyHandler) completeCodexExchange(req codexExchangeRequest) (codexExchangeResult, error) {
+func (h *proxyHandler) completeCodexExchange(ctx context.Context, req codexExchangeRequest) (codexExchangeResult, error) {
+	trace := requestTraceFromContext(ctx)
+	startedAt := time.Now()
+	lane := firstNonEmpty(strings.TrimSpace(req.Lane), "admin")
+	fail := func(err error) (codexExchangeResult, error) {
+		trace.noteOAuthExchange(AccountTypeCodex, lane, "fail", "", false, time.Since(startedAt), err)
+		return codexExchangeResult{}, err
+	}
+
 	code := strings.TrimSpace(req.Code)
 	verifier := strings.TrimSpace(req.Verifier)
 	state := strings.TrimSpace(req.State)
@@ -317,7 +328,7 @@ func (h *proxyHandler) completeCodexExchange(req codexExchangeRequest) (codexExc
 	if callbackURL != "" {
 		parsed, err := url.Parse(callbackURL)
 		if err != nil {
-			return codexExchangeResult{}, fmt.Errorf("invalid callback_url: %w", err)
+			return fail(fmt.Errorf("invalid callback_url: %w", err))
 		}
 		query := parsed.Query()
 		if code == "" {
@@ -336,18 +347,18 @@ func (h *proxyHandler) completeCodexExchange(req codexExchangeRequest) (codexExc
 	}
 
 	if code == "" {
-		return codexExchangeResult{}, fmt.Errorf("code and verifier are required (or provide callback_url/state for state-based lookup)")
+		return fail(fmt.Errorf("code and verifier are required (or provide callback_url/state for state-based lookup)"))
 	}
 	if verifier == "" {
 		if state != "" {
-			return codexExchangeResult{}, fmt.Errorf("invalid or expired session")
+			return fail(fmt.Errorf("invalid or expired session"))
 		}
-		return codexExchangeResult{}, fmt.Errorf("code and verifier are required (or provide callback_url/state for state-based lookup)")
+		return fail(fmt.Errorf("code and verifier are required (or provide callback_url/state for state-based lookup)"))
 	}
 
 	_, _, ok := claimCodexSession(verifier, state)
 	if !ok {
-		return codexExchangeResult{}, fmt.Errorf("invalid or expired session")
+		return fail(fmt.Errorf("invalid or expired session"))
 	}
 	finalizeSession := false
 	defer func() {
@@ -360,14 +371,14 @@ func (h *proxyHandler) completeCodexExchange(req codexExchangeRequest) (codexExc
 
 	tokens, err := codexExchangeCode(code, verifier)
 	if err != nil {
-		return codexExchangeResult{}, fmt.Errorf("token exchange failed: %w", err)
+		return fail(fmt.Errorf("token exchange failed: %w", err))
 	}
 
 	accountID := generateCodexAccountID(tokens.IDToken)
 	poolDir := filepath.Join(h.cfg.poolDir, "codex")
 	savedAccountID, _, refreshedExisting, err := saveNewCodexAccount(poolDir, accountID, tokens)
 	if err != nil {
-		return codexExchangeResult{}, fmt.Errorf("failed to save account: %w", err)
+		return fail(fmt.Errorf("failed to save account: %w", err))
 	}
 	finalizeSession = true
 
@@ -375,6 +386,7 @@ func (h *proxyHandler) completeCodexExchange(req codexExchangeRequest) (codexExc
 		h.reloadAccounts()
 	}
 
+	trace.noteOAuthExchange(AccountTypeCodex, lane, "ok", savedAccountID, refreshedExisting, time.Since(startedAt), nil)
 	return codexExchangeResult{
 		AccountID:         savedAccountID,
 		RefreshedExisting: refreshedExisting,

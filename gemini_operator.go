@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -16,6 +17,9 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,7 +35,17 @@ const (
 	antigravityOAuthSessionTTL    = 15 * time.Minute
 	antigravityOAuthCallbackPath  = "/oauth-callback"
 	antigravityCodeAssistPollWait = 500 * time.Millisecond
+	antigravityIDEVersion         = "4.1.30"
+	antigravityIDEName            = "antigravity-insiders"
+	antigravityUpdateChannel      = "stable"
+	antigravityCodeAssistUA       = "Antigravity/" + antigravityIDEVersion + " (" + antigravityIDEName + ")"
 )
+
+var antigravityGeminiQuotaBaseURLs = []string{
+	"https://daily-cloudcode-pa.sandbox.googleapis.com",
+	"https://daily-cloudcode-pa.googleapis.com",
+	"https://cloudcode-pa.googleapis.com",
+}
 
 var managedGeminiOAuthScopes = []string{
 	"https://www.googleapis.com/auth/cloud-platform",
@@ -47,15 +61,19 @@ var antigravityGeminiOAuthScopes = []string{
 	"https://www.googleapis.com/auth/experimentsandconfigs",
 }
 
-type managedGeminiSeatAddOutcome struct {
-	AccountID     string
-	Created       bool
-	ProbeOK       bool
-	ProbeError    string
-	HealthStatus  string
-	HealthError   string
-	Dead          bool
-	AuthExpiresAt string
+type geminiSeatAddOutcome struct {
+	AccountID           string
+	Created             bool
+	ProbeOK             bool
+	ProbeError          string
+	HealthStatus        string
+	HealthError         string
+	Dead                bool
+	AuthExpiresAt       string
+	ProviderTruthReady  bool
+	ProviderTruthState  string
+	ProviderTruthReason string
+	ProviderProjectID   string
 }
 
 type managedGeminiOAuthSession struct {
@@ -88,10 +106,14 @@ type antigravityGeminiOAuthSession struct {
 }
 
 type antigravityCodeAssistMetadata struct {
-	IdeType     string `json:"ideType,omitempty"`
-	Platform    string `json:"platform,omitempty"`
-	PluginType  string `json:"pluginType,omitempty"`
-	DuetProject string `json:"duetProject,omitempty"`
+	IdeType       string `json:"ideType,omitempty"`
+	IdeVersion    string `json:"ideVersion,omitempty"`
+	PluginVersion string `json:"pluginVersion,omitempty"`
+	Platform      string `json:"platform,omitempty"`
+	UpdateChannel string `json:"updateChannel,omitempty"`
+	PluginType    string `json:"pluginType,omitempty"`
+	IdeName       string `json:"ideName,omitempty"`
+	DuetProject   string `json:"duetProject,omitempty"`
 }
 
 type antigravityLoadCodeAssistRequest struct {
@@ -126,6 +148,10 @@ type antigravityOnboardUserRequest struct {
 	Metadata                antigravityCodeAssistMetadata `json:"metadata,omitempty"`
 }
 
+type antigravityFetchAvailableModelsRequest struct {
+	Project string `json:"project,omitempty"`
+}
+
 type antigravityOperationProject struct {
 	ID string `json:"id,omitempty"`
 }
@@ -140,6 +166,30 @@ type antigravityOperationResponse struct {
 	Response *antigravityOnboardUserResponse `json:"response,omitempty"`
 }
 
+type geminiCodeAssistHTTPError struct {
+	StatusCode int
+	Status     string
+	Message    string
+}
+
+func (e *geminiCodeAssistHTTPError) Error() string {
+	if e == nil {
+		return ""
+	}
+	status := strings.TrimSpace(e.Status)
+	message := strings.TrimSpace(e.Message)
+	if status == "" && e.StatusCode > 0 {
+		status = http.StatusText(e.StatusCode)
+	}
+	if status == "" {
+		status = "request failed"
+	}
+	if message == "" {
+		return "gemini code assist request failed: " + status
+	}
+	return fmt.Sprintf("gemini code assist request failed: %s: %s", status, message)
+}
+
 type antigravityGeminiProviderTruth struct {
 	ProjectID            string
 	SubscriptionTierID   string
@@ -148,6 +198,379 @@ type antigravityGeminiProviderTruth struct {
 	ValidationMessage    string
 	ValidationURL        string
 	ProviderCheckedAt    time.Time
+}
+
+func hasAntigravityValidationTruth(truth antigravityGeminiProviderTruth) bool {
+	return hasGeminiValidationTruth(truth.ValidationReasonCode, truth.ValidationMessage, truth.ValidationURL)
+}
+
+func antigravityGeminiProviderTruthTraceState(truth antigravityGeminiProviderTruth) string {
+	if geminiValidationRestricted(false, truth.ValidationReasonCode, truth.ValidationMessage, truth.ValidationURL) {
+		return geminiProviderTruthStateRestricted
+	}
+	if geminiValidationQuarantined(false, truth.ValidationReasonCode, truth.ValidationMessage, truth.ValidationURL) {
+		return geminiProviderTruthStateValidationBlocked
+	}
+	return "ok"
+}
+
+func hasAntigravityProviderTruthMaterialized(truth antigravityGeminiProviderTruth) bool {
+	return strings.TrimSpace(truth.ProjectID) != "" ||
+		strings.TrimSpace(truth.SubscriptionTierID) != "" ||
+		strings.TrimSpace(truth.SubscriptionTierName) != "" ||
+		hasAntigravityValidationTruth(truth) ||
+		!truth.ProviderCheckedAt.IsZero()
+}
+
+func applyAntigravityGeminiProviderTruthLocked(acc *Account, truth antigravityGeminiProviderTruth) {
+	if acc == nil {
+		return
+	}
+	if projectID := strings.TrimSpace(truth.ProjectID); projectID != "" {
+		acc.AntigravityProjectID = projectID
+	}
+	acc.GeminiSubscriptionTierID = strings.TrimSpace(truth.SubscriptionTierID)
+	acc.GeminiSubscriptionTierName = strings.TrimSpace(truth.SubscriptionTierName)
+	acc.GeminiValidationReasonCode = strings.TrimSpace(truth.ValidationReasonCode)
+	acc.GeminiValidationMessage = strings.TrimSpace(truth.ValidationMessage)
+	acc.GeminiValidationURL = strings.TrimSpace(truth.ValidationURL)
+	if !truth.ProviderCheckedAt.IsZero() {
+		acc.GeminiProviderCheckedAt = truth.ProviderCheckedAt.UTC()
+	}
+	acc.AntigravityValidationBlocked = geminiValidationQuarantined(false, truth.ValidationReasonCode, truth.ValidationMessage, truth.ValidationURL)
+	syncGeminiProviderTruthStateLocked(acc)
+}
+
+func applyAntigravityGeminiQuotaLocked(acc *Account, quota map[string]any) {
+	if acc == nil || len(quota) == 0 {
+		return
+	}
+	acc.AntigravityQuota = quota
+	acc.AntigravityQuotaForbidden, acc.AntigravityQuotaForbiddenReason = antigravityQuotaDisposition(quota)
+	acc.GeminiQuotaModels, acc.GeminiQuotaUpdatedAt, acc.GeminiModelForwardingRules, _ = decodeGeminiQuotaSnapshot(quota)
+	syncGeminiProviderTruthStateLocked(acc)
+}
+
+func applyAntigravityGeminiQuotaSnapshotLocked(acc *Account, quota map[string]any, protectedModels []string) {
+	if acc == nil {
+		return
+	}
+	if len(quota) > 0 {
+		applyAntigravityGeminiQuotaLocked(acc, quota)
+	}
+	if normalized := normalizeStringSlice(protectedModels); len(normalized) > 0 {
+		acc.GeminiProtectedModels = normalized
+	}
+}
+
+func applyAntigravityGeminiQuotaRefreshLocked(acc *Account, quota map[string]any, protectedModels []string, observedAt time.Time) {
+	if acc == nil {
+		return
+	}
+	if len(quota) > 0 || len(protectedModels) > 0 {
+		applyAntigravityGeminiQuotaSnapshotLocked(acc, quota, protectedModels)
+		return
+	}
+	acc.AntigravityQuota = nil
+	acc.AntigravityQuotaForbidden = false
+	acc.AntigravityQuotaForbiddenReason = ""
+	acc.GeminiQuotaModels = nil
+	acc.GeminiProtectedModels = nil
+	acc.GeminiModelForwardingRules = nil
+	if !observedAt.IsZero() {
+		acc.GeminiQuotaUpdatedAt = observedAt.UTC()
+	}
+	syncGeminiProviderTruthStateLocked(acc)
+}
+
+func antigravityGeminiQuotaHydrationEligibleLocked(acc *Account) bool {
+	if acc == nil || acc.Type != AccountTypeGemini || !isAntigravityGeminiSeat(acc) {
+		return false
+	}
+	if strings.TrimSpace(acc.AccessToken) == "" {
+		return false
+	}
+	if acc.AntigravityProxyDisabled ||
+		geminiValidationQuarantined(acc.AntigravityValidationBlocked, acc.GeminiValidationReasonCode, acc.GeminiValidationMessage, acc.GeminiValidationURL) ||
+		acc.AntigravityQuotaForbidden {
+		return false
+	}
+	if !acc.GeminiProviderTruthReady && effectiveGeminiCodeAssistProjectID(acc) == "" {
+		return false
+	}
+	return len(acc.AntigravityQuota) == 0 && len(acc.GeminiQuotaModels) == 0
+}
+
+func (h *proxyHandler) hydrateAntigravityGeminiQuotaForAccount(ctx context.Context, acc *Account) error {
+	if h == nil || acc == nil {
+		return nil
+	}
+
+	acc.mu.Lock()
+	if !antigravityGeminiQuotaHydrationEligibleLocked(acc) {
+		acc.mu.Unlock()
+		return nil
+	}
+	accountID := strings.TrimSpace(acc.ID)
+	accountEmail := firstNonEmpty(strings.TrimSpace(acc.OperatorEmail), strings.TrimSpace(acc.AntigravityEmail))
+	accessToken := strings.TrimSpace(acc.AccessToken)
+	projectID := strings.TrimSpace(acc.AntigravityProjectID)
+	acc.mu.Unlock()
+
+	quota, protectedModels, err := h.fetchAntigravityGeminiQuota(ctx, accessToken, projectID)
+	if err != nil {
+		return err
+	}
+	if len(quota) == 0 && len(protectedModels) == 0 {
+		return nil
+	}
+
+	acc.mu.Lock()
+	applyAntigravityGeminiQuotaSnapshotLocked(acc, quota, protectedModels)
+	quotaModelCount := len(acc.GeminiQuotaModels)
+	protectedModelCount := len(acc.GeminiProtectedModels)
+	providerTruthState := strings.TrimSpace(acc.GeminiProviderTruthState)
+	acc.mu.Unlock()
+
+	if err := saveAccount(acc); err != nil {
+		return err
+	}
+
+	log.Printf(
+		"antigravity gemini quota hydrated for %s (%s): models=%d protected_models=%d state=%s",
+		accountID,
+		accountEmail,
+		quotaModelCount,
+		protectedModelCount,
+		providerTruthState,
+	)
+	return nil
+}
+
+func (h *proxyHandler) hydrateMissingAntigravityGeminiQuotaOnStartup() {
+	if h == nil || h.pool == nil {
+		return
+	}
+
+	accounts := h.pool.allAccounts()
+	targets := make([]*Account, 0, len(accounts))
+	for _, acc := range accounts {
+		if acc == nil {
+			continue
+		}
+		acc.mu.Lock()
+		eligible := antigravityGeminiQuotaHydrationEligibleLocked(acc)
+		acc.mu.Unlock()
+		if eligible {
+			targets = append(targets, acc)
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+
+	log.Printf("hydrating missing antigravity gemini quota for %d ready seats", len(targets))
+	updated := 0
+	for _, acc := range targets {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		err := h.hydrateAntigravityGeminiQuotaForAccount(ctx, acc)
+		cancel()
+		if err != nil {
+			log.Printf("warning: failed to hydrate antigravity gemini quota for %s: %v", acc.ID, err)
+			continue
+		}
+		updated++
+	}
+	if updated > 0 {
+		h.reloadAccounts()
+	}
+}
+
+const staleAntigravityGeminiTruthRefreshInterval = 10 * time.Minute
+
+func staleAntigravityGeminiTruthRefreshEligibleLocked(acc *Account, now time.Time) bool {
+	if acc == nil || acc.Type != AccountTypeGemini || !isAntigravityGeminiSeat(acc) {
+		return false
+	}
+	if strings.TrimSpace(acc.AccessToken) == "" {
+		return false
+	}
+	if acc.AntigravityProxyDisabled ||
+		geminiValidationQuarantined(acc.AntigravityValidationBlocked, acc.GeminiValidationReasonCode, acc.GeminiValidationMessage, acc.GeminiValidationURL) ||
+		acc.AntigravityQuotaForbidden {
+		return false
+	}
+	syncGeminiProviderTruthStateLocked(acc)
+	freshness := geminiProviderTruthFreshnessStatus(acc.GeminiProviderTruthState, acc.GeminiProviderCheckedAt, acc.GeminiQuotaUpdatedAt, now)
+	return freshness.Stale
+}
+
+func (h *proxyHandler) refreshStaleAntigravityGeminiTruthForAccount(ctx context.Context, acc *Account) error {
+	if h == nil || acc == nil || acc.Type != AccountTypeGemini || !isAntigravityGeminiSeat(acc) {
+		return nil
+	}
+	if !h.cfg.disableRefresh && h.needsRefresh(acc) {
+		if err := h.refreshAccount(ctx, acc); err != nil {
+			return err
+		}
+	}
+
+	acc.mu.Lock()
+	accountID := strings.TrimSpace(acc.ID)
+	accountEmail := firstNonEmpty(strings.TrimSpace(acc.OperatorEmail), strings.TrimSpace(acc.AntigravityEmail))
+	accessToken := strings.TrimSpace(acc.AccessToken)
+	projectID := strings.TrimSpace(acc.AntigravityProjectID)
+	acc.mu.Unlock()
+
+	if accessToken == "" {
+		return fmt.Errorf("stale gemini truth refresh %s has empty access token", accountID)
+	}
+
+	var (
+		truth         antigravityGeminiProviderTruth
+		providerErr   error
+		quotaErr      error
+		quota         map[string]any
+		protectedList []string
+	)
+	if projectID != "" {
+		loadRes, err := h.loadAntigravityGeminiCodeAssist(ctx, accessToken, projectID, "")
+		if err != nil {
+			providerErr = err
+		} else {
+			truth = antigravityGeminiProviderTruthFromLoad(loadRes, projectID, time.Now().UTC())
+		}
+	}
+	if projectID == "" || providerErr != nil {
+		resolvedTruth, err := h.resolveAntigravityGeminiProviderTruth(ctx, accessToken)
+		if err != nil && !hasAntigravityProviderTruthMaterialized(resolvedTruth) {
+			return err
+		}
+		truth = resolvedTruth
+		providerErr = err
+	}
+
+	acc.mu.Lock()
+	applyAntigravityGeminiProviderTruthLocked(acc, truth)
+	projectID = strings.TrimSpace(acc.AntigravityProjectID)
+	acc.mu.Unlock()
+
+	if projectID != "" {
+		quotaObservedAt := time.Now().UTC()
+		quota, protectedList, quotaErr = h.fetchAntigravityGeminiQuota(ctx, accessToken, projectID)
+		if quotaErr == nil {
+			acc.mu.Lock()
+			applyAntigravityGeminiQuotaRefreshLocked(acc, quota, protectedList, quotaObservedAt)
+			acc.mu.Unlock()
+		}
+	}
+
+	if err := saveAccount(acc); err != nil {
+		return err
+	}
+
+	if providerErr != nil {
+		return providerErr
+	}
+	if quotaErr != nil {
+		return quotaErr
+	}
+
+	log.Printf(
+		"antigravity gemini truth refreshed for %s (%s): project=%s quota_models=%d protected_models=%d",
+		accountID,
+		accountEmail,
+		projectID,
+		len(quota),
+		len(protectedList),
+	)
+	return nil
+}
+
+func (h *proxyHandler) refreshStaleAntigravityGeminiTruthBatch(reason string) {
+	if h == nil || h.pool == nil {
+		return
+	}
+
+	now := time.Now().UTC()
+	accounts := h.pool.allAccounts()
+	targets := make([]*Account, 0, len(accounts))
+	for _, acc := range accounts {
+		if acc == nil {
+			continue
+		}
+		acc.mu.Lock()
+		eligible := staleAntigravityGeminiTruthRefreshEligibleLocked(acc, now)
+		acc.mu.Unlock()
+		if eligible {
+			targets = append(targets, acc)
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+
+	log.Printf("refreshing stale antigravity gemini truth for %d seats (%s)", len(targets), reason)
+	for _, acc := range targets {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		err := h.refreshStaleAntigravityGeminiTruthForAccount(ctx, acc)
+		cancel()
+		if err != nil {
+			log.Printf("warning: failed to refresh stale antigravity gemini truth for %s: %v", acc.ID, err)
+		}
+	}
+}
+
+func (h *proxyHandler) refreshStaleAntigravityGeminiTruthOnStartup() {
+	h.refreshStaleAntigravityGeminiTruthBatch("startup")
+}
+
+func (h *proxyHandler) startStaleAntigravityGeminiTruthPoller() {
+	if h == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(staleAntigravityGeminiTruthRefreshInterval)
+		defer ticker.Stop()
+		for range ticker.C {
+			h.refreshStaleAntigravityGeminiTruthBatch("poller")
+		}
+	}()
+}
+
+func managedGeminiProviderTruthProbeError(state, reason string) error {
+	state = strings.TrimSpace(state)
+	reason = strings.TrimSpace(reason)
+	if state == "" || state == geminiProviderTruthStateReady {
+		return nil
+	}
+	if reason == "" {
+		reason = state
+	}
+	return fmt.Errorf("managed gemini seat provider truth not ready: %s: %s", state, reason)
+}
+
+func managedGeminiHealthStatusForProviderTruthState(state string) string {
+	switch strings.TrimSpace(state) {
+	case "", geminiProviderTruthStateReady:
+		return "healthy"
+	case geminiProviderTruthStateRestricted:
+		return "restricted"
+	case geminiProviderTruthStateValidationBlocked:
+		return "validation_blocked"
+	case geminiProviderTruthStateQuotaForbidden:
+		return "quota_forbidden"
+	case geminiProviderTruthStateProxyDisabled:
+		return "proxy_disabled"
+	case geminiProviderTruthStateMissingProjectID:
+		return "missing_project_id"
+	case geminiProviderTruthStateProjectOnlyUnverified:
+		return "project_only_unverified"
+	case geminiProviderTruthStateAuthOnly:
+		return "auth_only"
+	default:
+		return strings.TrimSpace(state)
+	}
 }
 
 var managedGeminiOAuthSessions = struct {
@@ -173,7 +596,7 @@ func managedGeminiSeatID(refreshToken, accessToken string) string {
 	return fmt.Sprintf("gemini_seat_%x", sum[:6])
 }
 
-func saveManagedGeminiSeat(poolDir, rawAuthJSON, operatorSource string) (*Account, bool, error) {
+func saveGeminiSeatFromAuthJSON(poolDir, rawAuthJSON, operatorSource string) (*Account, bool, error) {
 	payload := strings.TrimSpace(rawAuthJSON)
 	if payload == "" {
 		return nil, false, fmt.Errorf("auth_json is empty")
@@ -247,17 +670,24 @@ func primeImportedAntigravityGeminiSeat(acc *Account) error {
 		acc.HealthStatus = "disabled"
 	case acc.AntigravityProxyDisabled:
 		acc.HealthStatus = "proxy_disabled"
-	case acc.AntigravityValidationBlocked:
+	case geminiValidationQuarantined(acc.AntigravityValidationBlocked, acc.GeminiValidationReasonCode, acc.GeminiValidationMessage, acc.GeminiValidationURL):
 		acc.HealthStatus = "validation_blocked"
 	case acc.AntigravityQuotaForbidden:
 		acc.HealthStatus = "quota_forbidden"
 		acc.HealthError = sanitizeStatusMessage(acc.AntigravityQuotaForbiddenReason)
 	default:
-		// Imported Antigravity seats may arrive with a stale access token but a
-		// valid refresh token. Do not mark them dead during add; let the normal
-		// refresh/probe paths classify them on real use.
-		acc.HealthStatus = "imported"
+		// Browser-added Antigravity seats can land with partial provider truth
+		// (for example missing project_id) before any real request runs.
+		status := managedGeminiHealthStatusForProviderTruthState(acc.GeminiProviderTruthState)
+		if status == "" {
+			status = "imported"
+		}
+		acc.HealthStatus = status
+		if warmErr := managedGeminiProviderTruthProbeError(acc.GeminiProviderTruthState, acc.GeminiProviderTruthReason); warmErr != nil {
+			acc.HealthError = sanitizeStatusMessage(warmErr.Error())
+		}
 	}
+	syncGeminiProviderTruthStateLocked(acc)
 	acc.mu.Unlock()
 	return saveAccount(acc)
 }
@@ -266,10 +696,14 @@ func (h *proxyHandler) probeManagedGeminiSeat(ctx context.Context, acc *Account)
 	if h == nil || acc == nil || acc.Type != AccountTypeGemini {
 		return nil
 	}
+	trace := requestTraceFromContext(ctx)
+	startedAt := time.Now()
 
 	provider := h.registry.ForType(AccountTypeGemini)
 	if provider == nil {
-		return fmt.Errorf("no provider for account type %s", AccountTypeGemini)
+		err := fmt.Errorf("no provider for account type %s", AccountTypeGemini)
+		trace.noteProbe(AccountTypeGemini, acc, "error", time.Since(startedAt), err)
+		return err
 	}
 
 	transport := h.operatorGeminiTransport()
@@ -279,22 +713,60 @@ func (h *proxyHandler) probeManagedGeminiSeat(ctx context.Context, acc *Account)
 	err := provider.RefreshToken(probeCtx, acc, transport)
 	now := time.Now().UTC()
 	if err == nil {
+		var (
+			providerTruthErr error
+			providerTruth    antigravityGeminiProviderTruth
+		)
+		acc.mu.Lock()
+		accessToken := acc.AccessToken
+		needsProviderTruth := strings.TrimSpace(acc.AntigravityProjectID) == "" || acc.GeminiProviderCheckedAt.IsZero()
+		acc.mu.Unlock()
+		if needsProviderTruth && strings.TrimSpace(accessToken) != "" {
+			truth, resolveErr := h.resolveAntigravityGeminiProviderTruth(probeCtx, accessToken)
+			providerTruth = truth
+			if resolveErr != nil {
+				providerTruthErr = resolveErr
+				log.Printf("warning: managed gemini seat %s provider truth hydrate failed after refresh: %v", acc.ID, resolveErr)
+			}
+			acc.mu.Lock()
+			applyAntigravityGeminiProviderTruthLocked(acc, truth)
+			acc.mu.Unlock()
+		}
+
+		healthStatus := "healthy"
+		var warmErr error
 		acc.mu.Lock()
 		acc.AuthMode = accountAuthModeOAuth
 		setAccountDeadStateLocked(acc, false, now)
-		acc.HealthStatus = "healthy"
-		acc.HealthError = ""
 		acc.HealthCheckedAt = now
-		acc.LastHealthyAt = now
 		acc.RateLimitUntil = time.Time{}
+		syncGeminiProviderTruthStateLocked(acc)
+		if providerTruthErr != nil && strings.TrimSpace(acc.GeminiProviderTruthReason) == "" {
+			acc.GeminiProviderTruthReason = sanitizeStatusMessage(providerTruthErr.Error())
+		}
+		healthStatus = managedGeminiHealthStatusForProviderTruthState(acc.GeminiProviderTruthState)
+		warmErr = managedGeminiProviderTruthProbeError(acc.GeminiProviderTruthState, acc.GeminiProviderTruthReason)
+		acc.HealthStatus = healthStatus
+		if warmErr == nil {
+			acc.HealthError = ""
+			acc.LastHealthyAt = now
+		} else {
+			acc.HealthError = sanitizeStatusMessage(warmErr.Error())
+		}
 		acc.mu.Unlock()
 		if saveErr := saveAccount(acc); saveErr != nil {
 			log.Printf("warning: failed to persist managed gemini seat %s probe success: %v", acc.ID, saveErr)
 		}
-		return nil
+		traceErr := warmErr
+		if traceErr == nil && providerTruthErr != nil && strings.TrimSpace(providerTruth.ProjectID) == "" && !hasAntigravityValidationTruth(providerTruth) {
+			traceErr = providerTruthErr
+		}
+		trace.noteProbe(AccountTypeGemini, acc, healthStatus, time.Since(startedAt), traceErr)
+		return warmErr
 	}
 
 	msg := strings.ToLower(err.Error())
+	healthStatus := "error"
 	acc.mu.Lock()
 	acc.AuthMode = accountAuthModeOAuth
 	setAccountDeadStateLocked(acc, false, now)
@@ -317,34 +789,43 @@ func (h *proxyHandler) probeManagedGeminiSeat(ctx context.Context, acc *Account)
 	default:
 		acc.HealthStatus = "error"
 	}
+	healthStatus = firstNonEmpty(strings.TrimSpace(acc.HealthStatus), healthStatus)
 	acc.mu.Unlock()
 
 	if saveErr := saveAccount(acc); saveErr != nil {
 		log.Printf("warning: failed to persist managed gemini seat %s probe failure: %v", acc.ID, saveErr)
 	}
-	return fmt.Errorf("managed gemini seat probe failed: %w", err)
+	probeErr := fmt.Errorf("managed gemini seat probe failed: %w", err)
+	trace.noteProbe(AccountTypeGemini, acc, healthStatus, time.Since(startedAt), probeErr)
+	return probeErr
 }
 
-func (h *proxyHandler) addManagedGeminiSeat(ctx context.Context, rawAuthJSON string) (*managedGeminiSeatAddOutcome, error) {
-	acc, created, err := saveManagedGeminiSeat(h.cfg.poolDir, rawAuthJSON, geminiOperatorSourceManualImport)
+func (h *proxyHandler) addGeminiSeatFromAuthJSON(ctx context.Context, rawAuthJSON string) (*geminiSeatAddOutcome, error) {
+	acc, created, err := saveGeminiSeatFromAuthJSON(h.cfg.poolDir, rawAuthJSON, geminiOperatorSourceManualImport)
 	if err != nil {
 		return nil, err
 	}
+	trace := requestTraceFromContext(ctx)
+	probeStartedAt := time.Now()
 
 	probeErr := error(nil)
 	if strings.TrimSpace(acc.AntigravitySource) != "" {
 		probeErr = primeImportedAntigravityGeminiSeat(acc)
+		acc.mu.Lock()
+		healthStatus := firstNonEmpty(strings.TrimSpace(acc.HealthStatus), "imported")
+		acc.mu.Unlock()
+		trace.noteProbe(AccountTypeGemini, acc, healthStatus, time.Since(probeStartedAt), probeErr)
 	} else {
 		probeErr = h.probeManagedGeminiSeat(ctx, acc)
 	}
 	if probeErr != nil {
-		log.Printf("managed gemini seat %s probe failed during add: %v", acc.ID, probeErr)
+		log.Printf("gemini seat %s probe failed during add: %v", acc.ID, probeErr)
 	}
 
 	h.reloadAccounts()
 
 	live, liveOK := h.snapshotAccountByID(acc.ID, time.Now())
-	outcome := &managedGeminiSeatAddOutcome{
+	outcome := &geminiSeatAddOutcome{
 		AccountID: acc.ID,
 		Created:   created,
 		ProbeOK:   probeErr == nil,
@@ -354,14 +835,22 @@ func (h *proxyHandler) addManagedGeminiSeat(ctx context.Context, rawAuthJSON str
 			}
 			return probeErr.Error()
 		}()),
-		HealthStatus: firstNonEmpty(strings.TrimSpace(acc.HealthStatus), "unknown"),
-		HealthError:  sanitizeStatusMessage(acc.HealthError),
-		Dead:         acc.Dead,
+		HealthStatus:        firstNonEmpty(strings.TrimSpace(acc.HealthStatus), "unknown"),
+		HealthError:         sanitizeStatusMessage(acc.HealthError),
+		Dead:                acc.Dead,
+		ProviderTruthReady:  acc.GeminiProviderTruthReady,
+		ProviderTruthState:  strings.TrimSpace(acc.GeminiProviderTruthState),
+		ProviderTruthReason: sanitizeStatusMessage(acc.GeminiProviderTruthReason),
+		ProviderProjectID:   strings.TrimSpace(acc.AntigravityProjectID),
 	}
 	if liveOK {
 		outcome.HealthStatus = firstNonEmpty(strings.TrimSpace(live.HealthStatus), "unknown")
 		outcome.HealthError = sanitizeStatusMessage(live.HealthError)
 		outcome.Dead = live.Dead
+		outcome.ProviderTruthReady = live.GeminiProviderTruthReady
+		outcome.ProviderTruthState = strings.TrimSpace(live.GeminiProviderTruthState)
+		outcome.ProviderTruthReason = sanitizeStatusMessage(live.GeminiProviderTruthReason)
+		outcome.ProviderProjectID = strings.TrimSpace(live.AntigravityProjectID)
 		if !live.ExpiresAt.IsZero() {
 			outcome.AuthExpiresAt = live.ExpiresAt.UTC().Format(time.RFC3339)
 		}
@@ -370,40 +859,6 @@ func (h *proxyHandler) addManagedGeminiSeat(ctx context.Context, rawAuthJSON str
 	}
 
 	return outcome, nil
-}
-
-func (h *proxyHandler) handleOperatorGeminiSeatAdd(w http.ResponseWriter, r *http.Request) {
-	var payload struct {
-		AuthJSON string `json:"auth_json"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 256*1024)).Decode(&payload); err != nil {
-		respondJSONError(w, http.StatusBadRequest, "invalid json body")
-		return
-	}
-
-	authJSON := strings.TrimSpace(payload.AuthJSON)
-	if authJSON == "" {
-		respondJSONError(w, http.StatusBadRequest, "auth_json is required")
-		return
-	}
-
-	outcome, err := h.addManagedGeminiSeat(r.Context(), authJSON)
-	if err != nil {
-		respondJSONError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	respondJSON(w, map[string]any{
-		"status":          "ok",
-		"account_id":      outcome.AccountID,
-		"created":         outcome.Created,
-		"probe_ok":        outcome.ProbeOK,
-		"probe_error":     outcome.ProbeError,
-		"health_status":   outcome.HealthStatus,
-		"health_error":    outcome.HealthError,
-		"dead":            outcome.Dead,
-		"auth_expires_at": outcome.AuthExpiresAt,
-	})
 }
 
 func generateGeminiOAuthState() (string, error) {
@@ -452,6 +907,7 @@ func buildAntigravityGeminiOAuthURL(redirectURI, state string) (string, error) {
 	q.Set("access_type", "offline")
 	q.Set("scope", strings.Join(antigravityGeminiOAuthScopes, " "))
 	q.Set("prompt", "consent")
+	q.Set("include_granted_scopes", "true")
 	q.Set("state", state)
 	u.RawQuery = q.Encode()
 	return u.String(), nil
@@ -497,14 +953,42 @@ func cleanupAntigravityGeminiOAuthSessions() {
 
 func buildAntigravityCodeAssistMetadata(projectID string) antigravityCodeAssistMetadata {
 	metadata := antigravityCodeAssistMetadata{
-		IdeType:    "IDE_UNSPECIFIED",
-		Platform:   "PLATFORM_UNSPECIFIED",
-		PluginType: "GEMINI",
+		IdeType:       "ANTIGRAVITY",
+		IdeVersion:    antigravityIDEVersion,
+		PluginVersion: antigravityIDEVersion,
+		Platform:      antigravityCodeAssistPlatform(),
+		UpdateChannel: antigravityUpdateChannel,
+		PluginType:    "GEMINI",
+		IdeName:       antigravityIDEName,
 	}
 	if strings.TrimSpace(projectID) != "" {
 		metadata.DuetProject = strings.TrimSpace(projectID)
 	}
 	return metadata
+}
+
+func antigravityCodeAssistPlatform() string {
+	switch runtime.GOOS {
+	case "darwin":
+		switch runtime.GOARCH {
+		case "amd64":
+			return "DARWIN_AMD64"
+		case "arm64":
+			return "DARWIN_ARM64"
+		}
+	case "linux":
+		switch runtime.GOARCH {
+		case "amd64":
+			return "LINUX_AMD64"
+		case "arm64":
+			return "LINUX_ARM64"
+		}
+	case "windows":
+		if runtime.GOARCH == "amd64" {
+			return "WINDOWS_AMD64"
+		}
+	}
+	return "PLATFORM_UNSPECIFIED"
 }
 
 func (h *proxyHandler) geminiCodeAssistBaseURL() *url.URL {
@@ -520,11 +1004,57 @@ func (h *proxyHandler) geminiCodeAssistBaseURL() *url.URL {
 	return base
 }
 
-func (h *proxyHandler) doGeminiCodeAssistJSON(ctx context.Context, method, requestPath, accessToken string, body any, out any) error {
+func antigravityGeminiCodeAssistBaseCandidates(primary *url.URL) []*url.URL {
+	knownQuotaBase := make(map[string]struct{}, len(antigravityGeminiQuotaBaseURLs))
+	for _, raw := range antigravityGeminiQuotaBaseURLs {
+		if parsed, err := url.Parse(strings.TrimSpace(raw)); err == nil && parsed != nil {
+			knownQuotaBase[strings.TrimSpace(parsed.String())] = struct{}{}
+		}
+	}
+
+	seen := make(map[string]struct{})
+	var bases []*url.URL
+	add := func(raw string) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			return
+		}
+		base, err := url.Parse(raw)
+		if err != nil || base == nil {
+			return
+		}
+		key := strings.TrimSpace(base.String())
+		if key == "" {
+			return
+		}
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		bases = append(bases, base)
+	}
+
+	if primary != nil {
+		if _, ok := knownQuotaBase[strings.TrimSpace(primary.String())]; !ok {
+			add(primary.String())
+		}
+	}
+	for _, raw := range antigravityGeminiQuotaBaseURLs {
+		add(raw)
+	}
+	if primary != nil {
+		add(primary.String())
+	}
+	return bases
+}
+
+func (h *proxyHandler) doGeminiCodeAssistJSONWithBase(ctx context.Context, base *url.URL, method, requestPath, accessToken string, body any, out any) error {
 	if strings.TrimSpace(accessToken) == "" {
 		return fmt.Errorf("access token is required")
 	}
-	base := h.geminiCodeAssistBaseURL()
+	if base == nil {
+		base = h.geminiCodeAssistBaseURL()
+	}
 	target := *base
 	target.Path = singleJoin(base.Path, requestPath)
 
@@ -543,7 +1073,7 @@ func (h *proxyHandler) doGeminiCodeAssistJSON(ctx context.Context, method, reque
 	}
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(accessToken))
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "codex-pool-proxy")
+	req.Header.Set("User-Agent", antigravityCodeAssistUA)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -556,10 +1086,11 @@ func (h *proxyHandler) doGeminiCodeAssistJSON(ctx context.Context, method, reque
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
-		if len(bytes.TrimSpace(msg)) > 0 {
-			return fmt.Errorf("gemini code assist request failed: %s: %s", resp.Status, safeText(msg))
+		return &geminiCodeAssistHTTPError{
+			StatusCode: resp.StatusCode,
+			Status:     strings.TrimSpace(resp.Status),
+			Message:    safeText(msg),
 		}
-		return fmt.Errorf("gemini code assist request failed: %s", resp.Status)
 	}
 	if out == nil {
 		return nil
@@ -567,7 +1098,13 @@ func (h *proxyHandler) doGeminiCodeAssistJSON(ctx context.Context, method, reque
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
+func (h *proxyHandler) doGeminiCodeAssistJSON(ctx context.Context, method, requestPath, accessToken string, body any, out any) error {
+	return h.doGeminiCodeAssistJSONWithBase(ctx, h.geminiCodeAssistBaseURL(), method, requestPath, accessToken, body, out)
+}
+
 func (h *proxyHandler) loadAntigravityGeminiCodeAssist(ctx context.Context, accessToken, projectID, mode string) (*antigravityLoadCodeAssistResponse, error) {
+	trace := requestTraceFromContext(ctx)
+	startedAt := time.Now()
 	req := antigravityLoadCodeAssistRequest{
 		CloudaicompanionProject: strings.TrimSpace(projectID),
 		Metadata:                buildAntigravityCodeAssistMetadata(projectID),
@@ -577,9 +1114,429 @@ func (h *proxyHandler) loadAntigravityGeminiCodeAssist(ctx context.Context, acce
 	}
 	var resp antigravityLoadCodeAssistResponse
 	if err := h.doGeminiCodeAssistJSON(ctx, http.MethodPost, "/v1internal:loadCodeAssist", accessToken, req, &resp); err != nil {
+		trace.noteProviderTruth(AccountTypeGemini, "load_code_assist", "fail", projectID, "", "", time.Since(startedAt), err)
 		return nil, err
 	}
+	trace.noteProviderTruth(AccountTypeGemini, "load_code_assist", "ok", firstNonEmpty(strings.TrimSpace(resp.CloudaicompanionProject), strings.TrimSpace(projectID)), func() string {
+		if resp.CurrentTier == nil {
+			return ""
+		}
+		return strings.TrimSpace(resp.CurrentTier.ID)
+	}(), func() string {
+		for _, tier := range resp.IneligibleTiers {
+			if reason := strings.TrimSpace(tier.ReasonCode); reason != "" {
+				return reason
+			}
+		}
+		return ""
+	}(), time.Since(startedAt), nil)
 	return &resp, nil
+}
+
+func antigravityQuotaField(raw map[string]any, keys ...string) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		if value, ok := raw[key]; ok {
+			return value
+		}
+	}
+	return nil
+}
+
+func antigravityQuotaString(raw map[string]any, keys ...string) string {
+	value := antigravityQuotaField(raw, keys...)
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	case fmt.Stringer:
+		return strings.TrimSpace(typed.String())
+	case nil:
+		return ""
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", typed))
+	}
+}
+
+func antigravityQuotaBool(raw map[string]any, keys ...string) (bool, bool) {
+	value := antigravityQuotaField(raw, keys...)
+	switch typed := value.(type) {
+	case bool:
+		return typed, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(typed)) {
+		case "true":
+			return true, true
+		case "false":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+func antigravityQuotaInt(raw map[string]any, keys ...string) (int, bool) {
+	value := antigravityQuotaField(raw, keys...)
+	switch typed := value.(type) {
+	case int:
+		return typed, true
+	case int32:
+		return int(typed), true
+	case int64:
+		return int(typed), true
+	case float64:
+		return int(typed), true
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil {
+			return int(parsed), true
+		}
+	case string:
+		if parsed, err := strconv.Atoi(strings.TrimSpace(typed)); err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
+func antigravityQuotaFloat(raw map[string]any, keys ...string) (float64, bool) {
+	value := antigravityQuotaField(raw, keys...)
+	switch typed := value.(type) {
+	case float64:
+		return typed, true
+	case float32:
+		return float64(typed), true
+	case int:
+		return float64(typed), true
+	case int32:
+		return float64(typed), true
+	case int64:
+		return float64(typed), true
+	case json.Number:
+		if parsed, err := typed.Float64(); err == nil {
+			return parsed, true
+		}
+	case string:
+		if parsed, err := strconv.ParseFloat(strings.TrimSpace(typed), 64); err == nil {
+			return parsed, true
+		}
+	}
+	return 0, false
+}
+
+func antigravityQuotaUnix(raw map[string]any, keys ...string) (int64, bool) {
+	value := antigravityQuotaField(raw, keys...)
+	switch typed := value.(type) {
+	case int:
+		return int64(typed), true
+	case int32:
+		return int64(typed), true
+	case int64:
+		return typed, true
+	case float64:
+		return int64(typed), true
+	case json.Number:
+		if parsed, err := typed.Int64(); err == nil {
+			return parsed, true
+		}
+	case string:
+		trimmed := strings.TrimSpace(typed)
+		if trimmed == "" {
+			return 0, false
+		}
+		if parsed, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
+			return parsed, true
+		}
+		if parsedTime, err := time.Parse(time.RFC3339, trimmed); err == nil {
+			return parsedTime.UTC().Unix(), true
+		}
+	}
+	return 0, false
+}
+
+func antigravityQuotaStringMap(raw map[string]any, keys ...string) map[string]string {
+	value := antigravityQuotaField(raw, keys...)
+	items, _ := value.(map[string]any)
+	if len(items) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(items))
+	for key, item := range items {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		switch typed := item.(type) {
+		case string:
+			typed = strings.TrimSpace(typed)
+			if typed != "" {
+				out[key] = typed
+			}
+		default:
+			str := strings.TrimSpace(fmt.Sprintf("%v", typed))
+			if str != "" {
+				out[key] = str
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func antigravityQuotaBoolMap(raw map[string]any, keys ...string) map[string]bool {
+	value := antigravityQuotaField(raw, keys...)
+	items, _ := value.(map[string]any)
+	if len(items) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(items))
+	for key, item := range items {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		switch typed := item.(type) {
+		case bool:
+			out[key] = typed
+		case string:
+			out[key] = strings.EqualFold(strings.TrimSpace(typed), "true")
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func antigravityQuotaModelAllowed(name string) bool {
+	return geminiQuotaModelAllowedInOperatorTruth(name)
+}
+
+func normalizeAntigravityGeminiQuotaModelEntry(nameHint string, entry map[string]any) (GeminiModelQuotaSnapshot, bool) {
+	if len(entry) == 0 {
+		return GeminiModelQuotaSnapshot{}, false
+	}
+	model := GeminiModelQuotaSnapshot{
+		Name:        firstNonEmpty(antigravityQuotaString(entry, "name", "model", "id"), strings.TrimSpace(nameHint)),
+		ResetTime:   antigravityQuotaString(entry, "reset_time", "resetTime"),
+		DisplayName: antigravityQuotaString(entry, "display_name", "displayName"),
+	}
+	model.RouteProvider = geminiQuotaModelRouteProvider(model.Name)
+	if percentage, ok := antigravityQuotaInt(entry, "percentage"); ok {
+		model.Percentage = percentage
+	} else if quotaInfo, _ := antigravityQuotaField(entry, "quotaInfo", "quota_info").(map[string]any); len(quotaInfo) > 0 {
+		if remainingFraction, ok := antigravityQuotaFloat(quotaInfo, "remainingFraction", "remaining_fraction"); ok {
+			model.Percentage = int(remainingFraction * 100.0)
+		}
+		if strings.TrimSpace(model.ResetTime) == "" {
+			model.ResetTime = antigravityQuotaString(quotaInfo, "resetTime", "reset_time")
+		}
+	}
+	if supportsImages, ok := antigravityQuotaBool(entry, "supports_images", "supportsImages"); ok {
+		model.SupportsImages = supportsImages
+	}
+	if supportsThinking, ok := antigravityQuotaBool(entry, "supports_thinking", "supportsThinking"); ok {
+		model.SupportsThinking = supportsThinking
+	}
+	if thinkingBudget, ok := antigravityQuotaInt(entry, "thinking_budget", "thinkingBudget"); ok {
+		model.ThinkingBudget = thinkingBudget
+	}
+	if recommended, ok := antigravityQuotaBool(entry, "recommended", "isRecommended"); ok {
+		model.Recommended = recommended
+	}
+	if maxTokens, ok := antigravityQuotaInt(entry, "max_tokens", "maxTokens"); ok {
+		model.MaxTokens = maxTokens
+	}
+	if maxOutputTokens, ok := antigravityQuotaInt(entry, "max_output_tokens", "maxOutputTokens"); ok {
+		model.MaxOutputTokens = maxOutputTokens
+	}
+	if supportedMimeTypes := antigravityQuotaBoolMap(entry, "supported_mime_types", "supportedMimeTypes"); len(supportedMimeTypes) > 0 {
+		model.SupportedMimeTypes = supportedMimeTypes
+	}
+	if strings.TrimSpace(model.Name) == "" || !antigravityQuotaModelAllowed(model.Name) {
+		return GeminiModelQuotaSnapshot{}, false
+	}
+	return model, true
+}
+
+func normalizeAntigravityGeminiQuotaModels(raw any) []GeminiModelQuotaSnapshot {
+	var models []GeminiModelQuotaSnapshot
+	switch typed := raw.(type) {
+	case []any:
+		models = make([]GeminiModelQuotaSnapshot, 0, len(typed))
+		for _, item := range typed {
+			entry, _ := item.(map[string]any)
+			if model, ok := normalizeAntigravityGeminiQuotaModelEntry("", entry); ok {
+				models = append(models, model)
+			}
+		}
+	case map[string]any:
+		models = make([]GeminiModelQuotaSnapshot, 0, len(typed))
+		names := make([]string, 0, len(typed))
+		for name := range typed {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			item := typed[name]
+			entry, _ := item.(map[string]any)
+			if model, ok := normalizeAntigravityGeminiQuotaModelEntry(name, entry); ok {
+				models = append(models, model)
+			}
+		}
+	}
+	sort.Slice(models, func(i, j int) bool {
+		if models[i].Name == models[j].Name {
+			return models[i].DisplayName < models[j].DisplayName
+		}
+		return models[i].Name < models[j].Name
+	})
+	return cloneGeminiModelQuotaSnapshots(models)
+}
+
+func normalizeAntigravityGeminiQuotaForwardingRules(raw any) map[string]string {
+	items, _ := raw.(map[string]any)
+	if len(items) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(items))
+	for key, item := range items {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		switch typed := item.(type) {
+		case string:
+			if value := strings.TrimSpace(typed); value != "" {
+				out[key] = value
+			}
+		case map[string]any:
+			if value := antigravityQuotaString(typed, "newModelId", "new_model_id", "model", "id"); value != "" {
+				out[key] = value
+			}
+		default:
+			if value := strings.TrimSpace(fmt.Sprintf("%v", typed)); value != "" {
+				out[key] = value
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeAntigravityGeminiQuotaPayload(raw map[string]any, fetchedAt time.Time) (map[string]any, []string) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]any)
+	if forbidden, ok := antigravityQuotaBool(raw, "is_forbidden", "isForbidden"); ok {
+		out["is_forbidden"] = forbidden
+	}
+	if reason := antigravityQuotaString(raw, "forbidden_reason", "forbiddenReason"); reason != "" {
+		out["forbidden_reason"] = reason
+	}
+	if updatedAt, ok := antigravityQuotaUnix(raw, "last_updated", "lastUpdated"); ok && updatedAt > 0 {
+		out["last_updated"] = updatedAt
+	}
+	if subscriptionTier := antigravityQuotaString(raw, "subscription_tier", "subscriptionTier"); subscriptionTier != "" {
+		out["subscription_tier"] = subscriptionTier
+	}
+	if rules := normalizeAntigravityGeminiQuotaForwardingRules(antigravityQuotaField(raw, "deprecatedModelIds", "deprecated_model_ids", "model_forwarding_rules", "modelForwardingRules")); len(rules) > 0 {
+		out["model_forwarding_rules"] = rules
+	}
+	if models := normalizeAntigravityGeminiQuotaModels(antigravityQuotaField(raw, "models", "availableModels", "available_models")); len(models) > 0 {
+		out["models"] = models
+	}
+	protectedModels := normalizeStringSliceFromAny(antigravityQuotaField(raw, "protected_models", "protectedModels"))
+	if _, ok := out["last_updated"]; !ok && !fetchedAt.IsZero() {
+		if len(out) > 0 || len(protectedModels) > 0 {
+			out["last_updated"] = fetchedAt.UTC().Unix()
+		}
+	}
+	if len(out) == 0 {
+		out = nil
+	}
+	return out, protectedModels
+}
+
+func (h *proxyHandler) fetchAntigravityGeminiQuota(ctx context.Context, accessToken, projectID string) (map[string]any, []string, error) {
+	trace := requestTraceFromContext(ctx)
+	startedAt := time.Now()
+	trimmedProjectID := strings.TrimSpace(projectID)
+	requests := []antigravityFetchAvailableModelsRequest{{
+		Project: trimmedProjectID,
+	}}
+	if trimmedProjectID != "" {
+		requests = append(requests, antigravityFetchAvailableModelsRequest{})
+	}
+
+	bases := antigravityGeminiCodeAssistBaseCandidates(h.geminiCodeAssistBaseURL())
+	var lastErr error
+	var forbiddenQuota map[string]any
+	var forbiddenProtectedModels []string
+	for idx, base := range bases {
+		for reqIdx, req := range requests {
+			fetchedAt := time.Now().UTC()
+			var raw map[string]any
+			err := h.doGeminiCodeAssistJSONWithBase(ctx, base, http.MethodPost, "/v1internal:fetchAvailableModels", accessToken, req, &raw)
+			if err != nil {
+				var httpErr *geminiCodeAssistHTTPError
+				if errors.As(err, &httpErr) {
+					if httpErr.StatusCode == http.StatusForbidden {
+						normalizedQuota, protectedModels := normalizeAntigravityGeminiQuotaPayload(map[string]any{
+							"is_forbidden":     true,
+							"forbidden_reason": strings.TrimSpace(httpErr.Message),
+						}, fetchedAt)
+						trace.noteProviderTruth(AccountTypeGemini, "fetch_available_models", "forbidden", req.Project, "", "", time.Since(startedAt), fmt.Errorf("%s: %w", base.String(), err))
+						forbiddenQuota = normalizedQuota
+						forbiddenProtectedModels = protectedModels
+						if trimmedProjectID != "" && strings.TrimSpace(req.Project) != "" && reqIdx+1 < len(requests) {
+							continue
+						}
+						return normalizedQuota, protectedModels, nil
+					}
+					if httpErr.StatusCode != http.StatusTooManyRequests && httpErr.StatusCode < 500 {
+						trace.noteProviderTruth(AccountTypeGemini, "fetch_available_models", "fail", req.Project, "", "", time.Since(startedAt), fmt.Errorf("%s: %w", base.String(), err))
+						if trimmedProjectID != "" && strings.TrimSpace(req.Project) != "" && reqIdx+1 < len(requests) {
+							lastErr = err
+							continue
+						}
+						return nil, nil, err
+					}
+				}
+				lastErr = err
+				trace.noteProviderTruth(AccountTypeGemini, "fetch_available_models", "fail", req.Project, "", "", time.Since(startedAt), fmt.Errorf("%s: %w", base.String(), err))
+				if idx+1 >= len(bases) && reqIdx+1 >= len(requests) {
+					break
+				}
+				continue
+			}
+			if raw == nil {
+				raw = map[string]any{}
+			}
+			normalizedQuota, protectedModels := normalizeAntigravityGeminiQuotaPayload(raw, fetchedAt)
+			if len(normalizedQuota) == 0 && len(protectedModels) == 0 && trimmedProjectID != "" && strings.TrimSpace(req.Project) != "" && reqIdx+1 < len(requests) {
+				trace.noteProviderTruth(AccountTypeGemini, "fetch_available_models", "retry_without_project", req.Project, "", "", time.Since(startedAt), nil)
+				continue
+			}
+			trace.noteProviderTruth(AccountTypeGemini, "fetch_available_models", "ok", req.Project, "", "", time.Since(startedAt), nil)
+			return normalizedQuota, protectedModels, nil
+		}
+	}
+	if len(forbiddenQuota) > 0 || len(forbiddenProtectedModels) > 0 {
+		return forbiddenQuota, forbiddenProtectedModels, nil
+	}
+	if lastErr != nil {
+		return nil, nil, lastErr
+	}
+	return nil, nil, fmt.Errorf("fetch available models returned no result")
 }
 
 func antigravityOperationProjectID(op *antigravityOperationResponse) string {
@@ -625,17 +1582,22 @@ func antigravityGeminiProviderTruthFromLoad(res *antigravityLoadCodeAssistRespon
 		truth.SubscriptionTierID = strings.TrimSpace(res.CurrentTier.ID)
 		truth.SubscriptionTierName = strings.TrimSpace(res.CurrentTier.Name)
 	}
-	for _, tier := range res.IneligibleTiers {
-		reasonCode := strings.TrimSpace(tier.ReasonCode)
-		reasonMessage := strings.TrimSpace(tier.ReasonMessage)
-		validationURL := strings.TrimSpace(tier.ValidationURL)
-		if reasonCode == "" && reasonMessage == "" && validationURL == "" {
-			continue
+	usableProjectReady := strings.TrimSpace(truth.ProjectID) != ""
+	usableTierReady := res.CurrentTier != nil &&
+		(strings.TrimSpace(res.CurrentTier.ID) != "" || strings.TrimSpace(res.CurrentTier.Name) != "")
+	if !usableProjectReady && !usableTierReady {
+		for _, tier := range res.IneligibleTiers {
+			reasonCode := strings.TrimSpace(tier.ReasonCode)
+			reasonMessage := strings.TrimSpace(tier.ReasonMessage)
+			validationURL := strings.TrimSpace(tier.ValidationURL)
+			if reasonCode == "" && reasonMessage == "" && validationURL == "" {
+				continue
+			}
+			truth.ValidationReasonCode = reasonCode
+			truth.ValidationMessage = reasonMessage
+			truth.ValidationURL = validationURL
+			break
 		}
-		truth.ValidationReasonCode = reasonCode
-		truth.ValidationMessage = reasonMessage
-		truth.ValidationURL = validationURL
-		break
 	}
 	return truth
 }
@@ -673,28 +1635,37 @@ func antigravityOnboardTierCandidates(res *antigravityLoadCodeAssistResponse) []
 }
 
 func (h *proxyHandler) onboardAntigravityGeminiCodeAssist(ctx context.Context, accessToken, tierID string) (*antigravityOperationResponse, error) {
+	trace := requestTraceFromContext(ctx)
+	startedAt := time.Now()
 	req := antigravityOnboardUserRequest{
 		TierID:   strings.TrimSpace(tierID),
 		Metadata: buildAntigravityCodeAssistMetadata(""),
 	}
 	var op antigravityOperationResponse
 	if err := h.doGeminiCodeAssistJSON(ctx, http.MethodPost, "/v1internal:onboardUser", accessToken, req, &op); err != nil {
+		trace.noteProviderTruth(AccountTypeGemini, "onboard", "fail", "", tierID, "", time.Since(startedAt), err)
 		return nil, err
 	}
 	for !op.Done && strings.TrimSpace(op.Name) != "" {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			err := ctx.Err()
+			trace.noteProviderTruth(AccountTypeGemini, "onboard", "fail", antigravityOperationProjectID(&op), tierID, "", time.Since(startedAt), err)
+			return nil, err
 		case <-time.After(antigravityCodeAssistPollWait):
 		}
 		if err := h.doGeminiCodeAssistJSON(ctx, http.MethodGet, "/v1internal/"+strings.TrimPrefix(strings.TrimSpace(op.Name), "/"), accessToken, nil, &op); err != nil {
+			trace.noteProviderTruth(AccountTypeGemini, "onboard", "fail", antigravityOperationProjectID(&op), tierID, "", time.Since(startedAt), err)
 			return nil, err
 		}
 	}
+	trace.noteProviderTruth(AccountTypeGemini, "onboard", "ok", antigravityOperationProjectID(&op), tierID, "", time.Since(startedAt), nil)
 	return &op, nil
 }
 
 func (h *proxyHandler) resolveAntigravityGeminiProviderTruth(ctx context.Context, accessToken string) (antigravityGeminiProviderTruth, error) {
+	trace := requestTraceFromContext(ctx)
+	startedAt := time.Now()
 	var (
 		lastErr error
 		tried   = make(map[string]struct{})
@@ -719,21 +1690,46 @@ func (h *proxyHandler) resolveAntigravityGeminiProviderTruth(ctx context.Context
 		if projectID := antigravityOperationProjectID(op); projectID != "" {
 			loadRes, err := h.loadAntigravityGeminiCodeAssist(ctx, accessToken, projectID, "")
 			if err != nil {
-				return antigravityGeminiProviderTruth{ProjectID: projectID}, nil
+				truth := antigravityGeminiProviderTruth{ProjectID: projectID}
+				trace.noteProviderTruth(AccountTypeGemini, "resolve", "ok", truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), nil)
+				return truth, nil
 			}
-			return antigravityGeminiProviderTruthFromLoad(loadRes, projectID, time.Now().UTC()), nil
+			truth := antigravityGeminiProviderTruthFromLoad(loadRes, projectID, time.Now().UTC())
+			trace.noteProviderTruth(AccountTypeGemini, "resolve", "ok", truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), nil)
+			return truth, nil
+		}
+		reloaded, err := h.loadAntigravityGeminiCodeAssist(ctx, accessToken, "", "")
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if projectID := strings.TrimSpace(reloaded.CloudaicompanionProject); projectID != "" {
+			truth := antigravityGeminiProviderTruthFromLoad(reloaded, projectID, time.Now().UTC())
+			trace.noteProviderTruth(AccountTypeGemini, "resolve", "ok", truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), nil)
+			return truth, nil
+		}
+		if message := antigravityLoadValidationMessage(reloaded); message != "" {
+			truth := antigravityGeminiProviderTruthFromLoad(reloaded, "", time.Now().UTC())
+			validationErr := fmt.Errorf("%s", message)
+			trace.noteProviderTruth(AccountTypeGemini, "resolve", antigravityGeminiProviderTruthTraceState(truth), truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), validationErr)
+			return truth, validationErr
 		}
 	}
 
 	loadRes, err := h.loadAntigravityGeminiCodeAssist(ctx, accessToken, "", "")
 	if err != nil {
 		if lastErr != nil {
-			return antigravityGeminiProviderTruth{}, fmt.Errorf("antigravity onboarding failed before loadCodeAssist: %v; load code assist failed: %w", lastErr, err)
+			wrappedErr := fmt.Errorf("antigravity onboarding failed before loadCodeAssist: %v; load code assist failed: %w", lastErr, err)
+			trace.noteProviderTruth(AccountTypeGemini, "resolve", "fail", "", "", "", time.Since(startedAt), wrappedErr)
+			return antigravityGeminiProviderTruth{}, wrappedErr
 		}
+		trace.noteProviderTruth(AccountTypeGemini, "resolve", "fail", "", "", "", time.Since(startedAt), err)
 		return antigravityGeminiProviderTruth{}, err
 	}
 	if projectID := strings.TrimSpace(loadRes.CloudaicompanionProject); projectID != "" {
-		return antigravityGeminiProviderTruthFromLoad(loadRes, projectID, time.Now().UTC()), nil
+		truth := antigravityGeminiProviderTruthFromLoad(loadRes, projectID, time.Now().UTC())
+		trace.noteProviderTruth(AccountTypeGemini, "resolve", "ok", truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), nil)
+		return truth, nil
 	}
 
 	for _, tierID := range antigravityOnboardTierCandidates(loadRes) {
@@ -753,9 +1749,13 @@ func (h *proxyHandler) resolveAntigravityGeminiProviderTruth(ctx context.Context
 		if projectID := antigravityOperationProjectID(op); projectID != "" {
 			loadRes, err := h.loadAntigravityGeminiCodeAssist(ctx, accessToken, projectID, "")
 			if err != nil {
-				return antigravityGeminiProviderTruth{ProjectID: projectID}, nil
+				truth := antigravityGeminiProviderTruth{ProjectID: projectID}
+				trace.noteProviderTruth(AccountTypeGemini, "resolve", "ok", truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), nil)
+				return truth, nil
 			}
-			return antigravityGeminiProviderTruthFromLoad(loadRes, projectID, time.Now().UTC()), nil
+			truth := antigravityGeminiProviderTruthFromLoad(loadRes, projectID, time.Now().UTC())
+			trace.noteProviderTruth(AccountTypeGemini, "resolve", "ok", truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), nil)
+			return truth, nil
 		}
 		reloaded, err := h.loadAntigravityGeminiCodeAssist(ctx, accessToken, "", "")
 		if err != nil {
@@ -763,33 +1763,41 @@ func (h *proxyHandler) resolveAntigravityGeminiProviderTruth(ctx context.Context
 			continue
 		}
 		if projectID := strings.TrimSpace(reloaded.CloudaicompanionProject); projectID != "" {
-			return antigravityGeminiProviderTruthFromLoad(reloaded, projectID, time.Now().UTC()), nil
+			truth := antigravityGeminiProviderTruthFromLoad(reloaded, projectID, time.Now().UTC())
+			trace.noteProviderTruth(AccountTypeGemini, "resolve", "ok", truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), nil)
+			return truth, nil
 		}
 	}
 
 	if message := antigravityLoadValidationMessage(loadRes); message != "" {
-		return antigravityGeminiProviderTruth{}, fmt.Errorf("%s", message)
+		truth := antigravityGeminiProviderTruthFromLoad(loadRes, "", time.Now().UTC())
+		validationErr := fmt.Errorf("%s", message)
+		trace.noteProviderTruth(AccountTypeGemini, "resolve", antigravityGeminiProviderTruthTraceState(truth), truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), validationErr)
+		return truth, validationErr
 	}
 	if lastErr != nil {
+		trace.noteProviderTruth(AccountTypeGemini, "resolve", "fail", "", "", "", time.Since(startedAt), lastErr)
 		return antigravityGeminiProviderTruth{}, lastErr
 	}
-	return antigravityGeminiProviderTruth{}, fmt.Errorf("antigravity auth did not yield a Code Assist project id")
+	finalErr := fmt.Errorf("antigravity auth did not yield a Code Assist project id")
+	truth := antigravityGeminiProviderTruthFromLoad(loadRes, "", time.Now().UTC())
+	trace.noteProviderTruth(AccountTypeGemini, "resolve", "fail", truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), finalErr)
+	return truth, finalErr
 }
 
-func buildAntigravityGeminiAuthJSON(tokens *managedGeminiOAuthTokens, userInfo *managedGeminiOAuthUserInfo, truth antigravityGeminiProviderTruth) (string, error) {
+func buildAntigravityGeminiAuthJSON(tokens *managedGeminiOAuthTokens, userInfo *managedGeminiOAuthUserInfo, truth antigravityGeminiProviderTruth, quota map[string]any, protectedModels []string) (string, error) {
 	if tokens == nil {
 		return "", fmt.Errorf("gemini oauth tokens are required")
 	}
 	projectID := strings.TrimSpace(truth.ProjectID)
-	if projectID == "" {
-		return "", fmt.Errorf("antigravity project id is required")
-	}
 
 	token := map[string]any{
 		"access_token":  strings.TrimSpace(tokens.AccessToken),
 		"refresh_token": strings.TrimSpace(tokens.RefreshToken),
 		"token_type":    firstNonEmpty(strings.TrimSpace(tokens.TokenType), "Bearer"),
-		"project_id":    projectID,
+	}
+	if projectID != "" {
+		token["project_id"] = projectID
 	}
 	if tokens.ExpiresIn > 0 {
 		token["expiry_timestamp"] = time.Now().Add(time.Duration(tokens.ExpiresIn) * time.Second).Unix()
@@ -805,6 +1813,9 @@ func buildAntigravityGeminiAuthJSON(tokens *managedGeminiOAuthTokens, userInfo *
 		"oauth_profile_id":   geminiOAuthAntigravityProfileID,
 		"client_id":          geminiOAuthAntigravityClientID,
 		"antigravity_source": "browser_oauth",
+	}
+	if hasAntigravityValidationTruth(truth) {
+		root["validation_blocked"] = true
 	}
 	if strings.TrimSpace(truth.SubscriptionTierID) != "" {
 		root["gemini_subscription_tier_id"] = strings.TrimSpace(truth.SubscriptionTierID)
@@ -824,6 +1835,25 @@ func buildAntigravityGeminiAuthJSON(tokens *managedGeminiOAuthTokens, userInfo *
 	if !truth.ProviderCheckedAt.IsZero() {
 		root["gemini_provider_checked_at"] = truth.ProviderCheckedAt.UTC().Format(time.RFC3339)
 	}
+	if len(protectedModels) > 0 {
+		root["protected_models"] = protectedModels
+	}
+	if len(quota) > 0 {
+		root["quota"] = quota
+		quotaModels, quotaUpdatedAt, modelForwardingRules, subscriptionTier := decodeGeminiQuotaSnapshot(quota)
+		if len(quotaModels) > 0 {
+			root["gemini_quota_models"] = quotaModels
+		}
+		if !quotaUpdatedAt.IsZero() {
+			root["gemini_quota_updated_at"] = quotaUpdatedAt.UTC().Format(time.RFC3339)
+		}
+		if len(modelForwardingRules) > 0 {
+			root["gemini_model_forwarding_rules"] = modelForwardingRules
+		}
+		if strings.TrimSpace(truth.SubscriptionTierID) == "" && strings.TrimSpace(truth.SubscriptionTierName) == "" && strings.TrimSpace(subscriptionTier) != "" {
+			root["gemini_subscription_tier_name"] = strings.TrimSpace(subscriptionTier)
+		}
+	}
 	if userInfo != nil {
 		if email := strings.TrimSpace(userInfo.Email); email != "" {
 			root["email"] = email
@@ -841,8 +1871,12 @@ func buildAntigravityGeminiAuthJSON(tokens *managedGeminiOAuthTokens, userInfo *
 }
 
 func (h *proxyHandler) exchangeAntigravityGeminiOAuthCode(ctx context.Context, code string, session *antigravityGeminiOAuthSession) (*managedGeminiOAuthTokens, error) {
+	trace := requestTraceFromContext(ctx)
+	startedAt := time.Now()
 	if session == nil {
-		return nil, fmt.Errorf("antigravity oauth session is required")
+		err := fmt.Errorf("antigravity oauth session is required")
+		trace.noteOAuthExchange(AccountTypeGemini, "antigravity", "fail", "", false, time.Since(startedAt), err)
+		return nil, err
 	}
 	form := url.Values{}
 	form.Set("client_id", geminiOAuthAntigravityClientID)
@@ -855,54 +1889,126 @@ func (h *proxyHandler) exchangeAntigravityGeminiOAuthCode(ctx context.Context, c
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, geminiOAuthTokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
+		trace.noteOAuthExchange(AccountTypeGemini, "antigravity", "fail", "", false, time.Since(startedAt), err)
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "codex-pool-proxy")
+	req.Header.Set("User-Agent", antigravityCodeAssistUA)
 
 	resp, err := h.operatorGeminiTransport().RoundTrip(req)
 	if err != nil {
+		trace.noteOAuthExchange(AccountTypeGemini, "antigravity", "fail", "", false, time.Since(startedAt), err)
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
 		if len(strings.TrimSpace(string(body))) > 0 {
-			return nil, fmt.Errorf("antigravity gemini oauth exchange failed: %s: %s", resp.Status, safeText(body))
+			err = fmt.Errorf("antigravity gemini oauth exchange failed: %s: %s", resp.Status, safeText(body))
+			trace.noteOAuthExchange(AccountTypeGemini, "antigravity", "fail", "", false, time.Since(startedAt), err)
+			return nil, err
 		}
-		return nil, fmt.Errorf("antigravity gemini oauth exchange failed: %s", resp.Status)
+		err = fmt.Errorf("antigravity gemini oauth exchange failed: %s", resp.Status)
+		trace.noteOAuthExchange(AccountTypeGemini, "antigravity", "fail", "", false, time.Since(startedAt), err)
+		return nil, err
 	}
 
 	var payload managedGeminiOAuthTokens
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		trace.noteOAuthExchange(AccountTypeGemini, "antigravity", "fail", "", false, time.Since(startedAt), err)
 		return nil, err
 	}
 	if strings.TrimSpace(payload.AccessToken) == "" {
-		return nil, fmt.Errorf("antigravity gemini oauth exchange returned an empty access token")
+		err := fmt.Errorf("antigravity gemini oauth exchange returned an empty access token")
+		trace.noteOAuthExchange(AccountTypeGemini, "antigravity", "fail", "", false, time.Since(startedAt), err)
+		return nil, err
 	}
 	if strings.TrimSpace(payload.RefreshToken) == "" {
-		return nil, fmt.Errorf("antigravity gemini oauth exchange did not return a refresh token")
+		err := fmt.Errorf("antigravity gemini oauth exchange did not return a refresh token")
+		trace.noteOAuthExchange(AccountTypeGemini, "antigravity", "fail", "", false, time.Since(startedAt), err)
+		return nil, err
 	}
 	payload.TokenType = firstNonEmpty(strings.TrimSpace(payload.TokenType), "Bearer")
+	trace.noteOAuthExchange(AccountTypeGemini, "antigravity", "ok", "", false, time.Since(startedAt), nil)
 	return &payload, nil
 }
 
-func (h *proxyHandler) completeAntigravityGeminiOAuth(ctx context.Context, code string, session *antigravityGeminiOAuthSession) (*managedGeminiSeatAddOutcome, error) {
+func (h *proxyHandler) completeAntigravityGeminiOAuth(ctx context.Context, code string, session *antigravityGeminiOAuthSession) (*geminiSeatAddOutcome, error) {
+	trace := requestTraceFromContext(ctx)
+	startedAt := time.Now()
 	tokens, err := h.exchangeAntigravityGeminiOAuthCode(ctx, code, session)
 	if err != nil {
 		return nil, err
 	}
 	userInfo, _ := h.fetchManagedGeminiOAuthUserInfo(ctx, tokens.AccessToken)
-	providerTruth, err := h.resolveAntigravityGeminiProviderTruth(ctx, tokens.AccessToken)
+	providerTruth, resolveErr := h.resolveAntigravityGeminiProviderTruth(ctx, tokens.AccessToken)
+	if resolveErr != nil && !hasAntigravityProviderTruthMaterialized(providerTruth) {
+		trace.noteOAuthExchange(AccountTypeGemini, "antigravity", "fail", "", false, time.Since(startedAt), resolveErr)
+		return nil, resolveErr
+	}
+	var (
+		quota           map[string]any
+		protectedModels []string
+	)
+	if fetchedQuota, fetchedProtectedModels, quotaErr := h.fetchAntigravityGeminiQuota(ctx, tokens.AccessToken, providerTruth.ProjectID); quotaErr != nil {
+		log.Printf("warning: antigravity gemini quota fetch failed after oauth for project %q: %v", providerTruth.ProjectID, quotaErr)
+	} else {
+		quota = fetchedQuota
+		protectedModels = fetchedProtectedModels
+	}
+	authJSON, err := buildAntigravityGeminiAuthJSON(tokens, userInfo, providerTruth, quota, protectedModels)
 	if err != nil {
+		trace.noteOAuthExchange(AccountTypeGemini, "antigravity", "fail", "", false, time.Since(startedAt), err)
 		return nil, err
 	}
-	authJSON, err := buildAntigravityGeminiAuthJSON(tokens, userInfo, providerTruth)
+	outcome, err := h.addGeminiSeatFromAuthJSON(ctx, authJSON)
 	if err != nil {
+		trace.noteOAuthExchange(AccountTypeGemini, "antigravity", "fail", "", false, time.Since(startedAt), err)
 		return nil, err
 	}
-	return h.addManagedGeminiSeat(ctx, authJSON)
+	if len(quota) > 0 || len(protectedModels) > 0 {
+		for _, liveAcc := range h.pool.accounts {
+			if liveAcc == nil || liveAcc.ID != outcome.AccountID {
+				continue
+			}
+			liveAcc.mu.Lock()
+			applyAntigravityGeminiQuotaSnapshotLocked(liveAcc, quota, protectedModels)
+			if status := managedGeminiHealthStatusForProviderTruthState(liveAcc.GeminiProviderTruthState); status != "" && status != "healthy" {
+				liveAcc.HealthStatus = status
+			}
+			if liveAcc.GeminiProviderTruthState == geminiProviderTruthStateQuotaForbidden {
+				liveAcc.HealthError = sanitizeStatusMessage(liveAcc.AntigravityQuotaForbiddenReason)
+			}
+			liveAcc.mu.Unlock()
+			if saveErr := saveAccount(liveAcc); saveErr != nil {
+				log.Printf("warning: failed to persist antigravity gemini quota snapshot for %s: %v", liveAcc.ID, saveErr)
+			}
+			h.reloadAccounts()
+			if refreshed, ok := h.snapshotAccountByID(outcome.AccountID, time.Now()); ok {
+				outcome.HealthStatus = firstNonEmpty(strings.TrimSpace(refreshed.HealthStatus), outcome.HealthStatus)
+				outcome.HealthError = sanitizeStatusMessage(refreshed.HealthError)
+				outcome.Dead = refreshed.Dead
+				outcome.ProviderTruthReady = refreshed.GeminiProviderTruthReady
+				outcome.ProviderTruthState = strings.TrimSpace(refreshed.GeminiProviderTruthState)
+				outcome.ProviderTruthReason = sanitizeStatusMessage(refreshed.GeminiProviderTruthReason)
+				outcome.ProviderProjectID = strings.TrimSpace(refreshed.AntigravityProjectID)
+				if !refreshed.ExpiresAt.IsZero() {
+					outcome.AuthExpiresAt = refreshed.ExpiresAt.UTC().Format(time.RFC3339)
+				}
+			}
+			break
+		}
+	}
+	if resolveErr != nil {
+		outcome.ProbeOK = false
+		outcome.ProbeError = sanitizeStatusMessage(resolveErr.Error())
+		if strings.TrimSpace(outcome.HealthError) == "" {
+			outcome.HealthError = sanitizeStatusMessage(resolveErr.Error())
+		}
+	}
+	trace.noteOAuthExchange(AccountTypeGemini, "antigravity", "seat_added", outcome.AccountID, !outcome.Created, time.Since(startedAt), nil)
+	return outcome, nil
 }
 
 func (h *proxyHandler) handleOperatorGeminiAntigravityOAuthStart(w http.ResponseWriter, r *http.Request) {
@@ -935,7 +2041,7 @@ func (h *proxyHandler) handleOperatorGeminiAntigravityOAuthStart(w http.Response
 	})
 }
 
-func serveAntigravityGeminiOAuthPopupResult(w http.ResponseWriter, ok bool, outcome *managedGeminiSeatAddOutcome, errMessage string) {
+func serveAntigravityGeminiOAuthPopupResult(w http.ResponseWriter, ok bool, outcome *geminiSeatAddOutcome, errMessage string) {
 	payload := map[string]any{
 		"type": "gemini_oauth_result",
 		"ok":   ok,
@@ -952,6 +2058,11 @@ func serveAntigravityGeminiOAuthPopupResult(w http.ResponseWriter, ok bool, outc
 			heading = "Antigravity Gemini seat refreshed"
 			body = "Antigravity Gemini auth completed. An existing Gemini seat was refreshed."
 		}
+		if !outcome.ProbeOK || (!outcome.ProviderTruthReady && strings.TrimSpace(outcome.ProviderTruthState) != "") {
+			title = "Antigravity Gemini Auth Saved Partial Seat"
+			heading = "Antigravity Gemini seat saved with provider block"
+			body = "Antigravity Gemini auth completed, but the seat is not eligible yet. Reloading the operator dashboard."
+		}
 		payload["account_id"] = outcome.AccountID
 		payload["created"] = outcome.Created
 		payload["probe_ok"] = outcome.ProbeOK
@@ -959,6 +2070,10 @@ func serveAntigravityGeminiOAuthPopupResult(w http.ResponseWriter, ok bool, outc
 		payload["health_error"] = outcome.HealthError
 		payload["dead"] = outcome.Dead
 		payload["auth_expires_at"] = outcome.AuthExpiresAt
+		payload["provider_truth_ready"] = outcome.ProviderTruthReady
+		payload["provider_truth_state"] = outcome.ProviderTruthState
+		payload["provider_truth_reason"] = outcome.ProviderTruthReason
+		payload["provider_project_id"] = outcome.ProviderProjectID
 		payload["message"] = body
 	} else {
 		if body == "" {
@@ -1112,7 +2227,9 @@ func (h *proxyHandler) handleOperatorGeminiOAuthCallback(w http.ResponseWriter, 
 	serveManagedGeminiOAuthPopupResult(w, true, outcome, "")
 }
 
-func (h *proxyHandler) completeManagedGeminiOAuth(ctx context.Context, code string, session *managedGeminiOAuthSession) (*managedGeminiSeatAddOutcome, error) {
+func (h *proxyHandler) completeManagedGeminiOAuth(ctx context.Context, code string, session *managedGeminiOAuthSession) (*geminiSeatAddOutcome, error) {
+	trace := requestTraceFromContext(ctx)
+	startedAt := time.Now()
 	tokens, err := h.exchangeManagedGeminiOAuthCode(ctx, code, session)
 	if err != nil {
 		return nil, err
@@ -1121,10 +2238,12 @@ func (h *proxyHandler) completeManagedGeminiOAuth(ctx context.Context, code stri
 	userInfo, _ := h.fetchManagedGeminiOAuthUserInfo(ctx, tokens.AccessToken)
 	authJSON, err := buildManagedGeminiOAuthAuthJSON(tokens, userInfo, session)
 	if err != nil {
+		trace.noteOAuthExchange(AccountTypeGemini, "managed", "fail", "", false, time.Since(startedAt), err)
 		return nil, err
 	}
-	acc, created, err := saveManagedGeminiSeat(h.cfg.poolDir, authJSON, geminiOperatorSourceManagedOAuth)
+	acc, created, err := saveGeminiSeatFromAuthJSON(h.cfg.poolDir, authJSON, geminiOperatorSourceManagedOAuth)
 	if err != nil {
+		trace.noteOAuthExchange(AccountTypeGemini, "managed", "fail", "", false, time.Since(startedAt), err)
 		return nil, err
 	}
 
@@ -1136,7 +2255,7 @@ func (h *proxyHandler) completeManagedGeminiOAuth(ctx context.Context, code stri
 	h.reloadAccounts()
 
 	live, liveOK := h.snapshotAccountByID(acc.ID, time.Now())
-	outcome := &managedGeminiSeatAddOutcome{
+	outcome := &geminiSeatAddOutcome{
 		AccountID: acc.ID,
 		Created:   created,
 		ProbeOK:   probeErr == nil,
@@ -1154,16 +2273,27 @@ func (h *proxyHandler) completeManagedGeminiOAuth(ctx context.Context, code stri
 		outcome.HealthStatus = firstNonEmpty(strings.TrimSpace(live.HealthStatus), "unknown")
 		outcome.HealthError = sanitizeStatusMessage(live.HealthError)
 		outcome.Dead = live.Dead
+		outcome.ProviderTruthReady = live.GeminiProviderTruthReady
+		outcome.ProviderTruthState = strings.TrimSpace(live.GeminiProviderTruthState)
+		outcome.ProviderTruthReason = sanitizeStatusMessage(live.GeminiProviderTruthReason)
+		outcome.ProviderProjectID = strings.TrimSpace(live.AntigravityProjectID)
 		if !live.ExpiresAt.IsZero() {
 			outcome.AuthExpiresAt = live.ExpiresAt.UTC().Format(time.RFC3339)
 		}
 	} else if !acc.ExpiresAt.IsZero() {
 		outcome.AuthExpiresAt = acc.ExpiresAt.UTC().Format(time.RFC3339)
+		outcome.ProviderTruthReady = acc.GeminiProviderTruthReady
+		outcome.ProviderTruthState = strings.TrimSpace(acc.GeminiProviderTruthState)
+		outcome.ProviderTruthReason = sanitizeStatusMessage(acc.GeminiProviderTruthReason)
+		outcome.ProviderProjectID = strings.TrimSpace(acc.AntigravityProjectID)
 	}
+	trace.noteOAuthExchange(AccountTypeGemini, "managed", "seat_added", outcome.AccountID, !outcome.Created, time.Since(startedAt), nil)
 	return outcome, nil
 }
 
 func (h *proxyHandler) exchangeManagedGeminiOAuthCode(ctx context.Context, code string, session *managedGeminiOAuthSession) (*managedGeminiOAuthTokens, error) {
+	trace := requestTraceFromContext(ctx)
+	startedAt := time.Now()
 	profile, ok := geminiOAuthProfileByID(session.ProfileID)
 	if !ok {
 		profile = geminiOAuthClientProfile{
@@ -1176,7 +2306,9 @@ func (h *proxyHandler) exchangeManagedGeminiOAuthCode(ctx context.Context, code 
 		profile = geminiOAuthDefaultProfile()
 	}
 	if strings.TrimSpace(profile.ID) == "" || strings.TrimSpace(profile.Secret) == "" {
-		return nil, geminiOAuthConfigError()
+		err := geminiOAuthConfigError()
+		trace.noteOAuthExchange(AccountTypeGemini, "managed", "fail", "", false, time.Since(startedAt), err)
+		return nil, err
 	}
 
 	form := url.Values{}
@@ -1191,6 +2323,7 @@ func (h *proxyHandler) exchangeManagedGeminiOAuthCode(ctx context.Context, code 
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, geminiOAuthTokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
+		trace.noteOAuthExchange(AccountTypeGemini, "managed", "fail", "", false, time.Since(startedAt), err)
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -1199,6 +2332,7 @@ func (h *proxyHandler) exchangeManagedGeminiOAuthCode(ctx context.Context, code 
 
 	resp, err := h.operatorGeminiTransport().RoundTrip(req)
 	if err != nil {
+		trace.noteOAuthExchange(AccountTypeGemini, "managed", "fail", "", false, time.Since(startedAt), err)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -1206,22 +2340,32 @@ func (h *proxyHandler) exchangeManagedGeminiOAuthCode(ctx context.Context, code 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
 		if len(strings.TrimSpace(string(body))) > 0 {
-			return nil, fmt.Errorf("gemini oauth exchange failed: %s: %s", resp.Status, safeText(body))
+			err = fmt.Errorf("gemini oauth exchange failed: %s: %s", resp.Status, safeText(body))
+			trace.noteOAuthExchange(AccountTypeGemini, "managed", "fail", "", false, time.Since(startedAt), err)
+			return nil, err
 		}
-		return nil, fmt.Errorf("gemini oauth exchange failed: %s", resp.Status)
+		err = fmt.Errorf("gemini oauth exchange failed: %s", resp.Status)
+		trace.noteOAuthExchange(AccountTypeGemini, "managed", "fail", "", false, time.Since(startedAt), err)
+		return nil, err
 	}
 
 	var payload managedGeminiOAuthTokens
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		trace.noteOAuthExchange(AccountTypeGemini, "managed", "fail", "", false, time.Since(startedAt), err)
 		return nil, err
 	}
 	if strings.TrimSpace(payload.AccessToken) == "" {
-		return nil, fmt.Errorf("gemini oauth exchange returned an empty access token")
+		err := fmt.Errorf("gemini oauth exchange returned an empty access token")
+		trace.noteOAuthExchange(AccountTypeGemini, "managed", "fail", "", false, time.Since(startedAt), err)
+		return nil, err
 	}
 	if strings.TrimSpace(payload.RefreshToken) == "" {
-		return nil, fmt.Errorf("gemini oauth exchange did not return a refresh token; retry and approve offline access")
+		err := fmt.Errorf("gemini oauth exchange did not return a refresh token; retry and approve offline access")
+		trace.noteOAuthExchange(AccountTypeGemini, "managed", "fail", "", false, time.Since(startedAt), err)
+		return nil, err
 	}
 	payload.TokenType = firstNonEmpty(strings.TrimSpace(payload.TokenType), "Bearer")
+	trace.noteOAuthExchange(AccountTypeGemini, "managed", "ok", "", false, time.Since(startedAt), nil)
 	return &payload, nil
 }
 
@@ -1431,7 +2575,7 @@ func cleanupManagedGeminiOAuthSessions() {
 	managedGeminiOAuthSessions.Unlock()
 }
 
-func serveManagedGeminiOAuthPopupResult(w http.ResponseWriter, ok bool, outcome *managedGeminiSeatAddOutcome, errMessage string) {
+func serveManagedGeminiOAuthPopupResult(w http.ResponseWriter, ok bool, outcome *geminiSeatAddOutcome, errMessage string) {
 	payload := map[string]any{
 		"type": "gemini_oauth_result",
 		"ok":   ok,
@@ -1455,6 +2599,10 @@ func serveManagedGeminiOAuthPopupResult(w http.ResponseWriter, ok bool, outcome 
 		payload["health_error"] = outcome.HealthError
 		payload["dead"] = outcome.Dead
 		payload["auth_expires_at"] = outcome.AuthExpiresAt
+		payload["provider_truth_ready"] = outcome.ProviderTruthReady
+		payload["provider_truth_state"] = outcome.ProviderTruthState
+		payload["provider_truth_reason"] = outcome.ProviderTruthReason
+		payload["provider_project_id"] = outcome.ProviderProjectID
 		payload["message"] = body
 	} else {
 		if body == "" {

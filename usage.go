@@ -174,7 +174,27 @@ func parseAnthropicMessageStartUsage(obj map[string]any) *RequestUsage {
 func parseGeminiUsagePayload(obj map[string]any) *RequestUsage {
 	usageMap, ok := obj["usageMetadata"].(map[string]any)
 	if !ok || usageMap == nil {
-		return nil
+		usageMap, ok = obj["usage"].(map[string]any)
+		if !ok || usageMap == nil {
+			return nil
+		}
+		ru := &RequestUsage{Timestamp: time.Now()}
+		ru.InputTokens = readInt64(usageMap, "prompt_tokens")
+		ru.OutputTokens = readInt64(usageMap, "completion_tokens")
+		ru.BillableTokens = readInt64(usageMap, "total_tokens")
+		if details, ok := usageMap["prompt_tokens_details"].(map[string]any); ok {
+			ru.CachedInputTokens = readInt64(details, "cached_tokens")
+		}
+		if ru.BillableTokens == 0 {
+			ru.BillableTokens = clampNonNegative(ru.InputTokens - ru.CachedInputTokens + ru.OutputTokens)
+		}
+		if ru.InputTokens == 0 && ru.OutputTokens == 0 {
+			return nil
+		}
+		if model, ok := obj["model"].(string); ok {
+			ru.Model = model
+		}
+		return ru
 	}
 	ru := &RequestUsage{Timestamp: time.Now()}
 	ru.InputTokens = readInt64(usageMap, "promptTokenCount")

@@ -1034,6 +1034,115 @@ echo "Run 'source ~/.zshrc' or start a new terminal, then run 'gemini'."
 	w.Write([]byte(script))
 }
 
+func (h *proxyHandler) serveOpenCodeSetupScript(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.URL.Path, "/setup/opencode/")
+	if token == "" || strings.Contains(token, "/") {
+		http.Error(w, "invalid token", http.StatusBadRequest)
+		return
+	}
+	if h.poolUsers == nil {
+		http.Error(w, "pool users not configured", http.StatusServiceUnavailable)
+		return
+	}
+	user := h.poolUsers.GetByToken(token)
+	if user == nil {
+		http.Error(w, "invalid token", http.StatusNotFound)
+		return
+	}
+	if user.Disabled {
+		http.Error(w, "user disabled", http.StatusForbidden)
+		return
+	}
+
+	configURL := h.getEffectivePublicURL(r) + "/config/opencode/" + token
+
+	if wantsPowerShell(r) {
+		script := fmt.Sprintf(`#requires -Version 5.1
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$ConfigUrl = '%s'
+$OpenCodeDir = Join-Path $HOME '.config/opencode'
+$ConfigFile = Join-Path $OpenCodeDir 'opencode.json'
+$AccountsFile = Join-Path $OpenCodeDir 'antigravity-accounts.json'
+
+function Set-Utf8NoBom {
+  param([string]$Path, [string]$Value)
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Value, $utf8)
+}
+
+Write-Host 'Configuring OpenCode for the pure Antigravity pool line...'
+Write-Host ''
+
+$payload = Invoke-RestMethod -Uri $ConfigUrl -Method Get
+New-Item -ItemType Directory -Force -Path $OpenCodeDir | Out-Null
+
+if (Test-Path $ConfigFile) {
+  Copy-Item $ConfigFile ($ConfigFile + '.codex-pool.bak') -Force
+}
+if (Test-Path $AccountsFile) {
+  Copy-Item $AccountsFile ($AccountsFile + '.codex-pool.bak') -Force
+}
+
+Set-Utf8NoBom -Path $ConfigFile -Value (($payload.opencode_config | ConvertTo-Json -Depth 20) + [Environment]::NewLine)
+Set-Utf8NoBom -Path $AccountsFile -Value (($payload.antigravity_accounts | ConvertTo-Json -Depth 20) + [Environment]::NewLine)
+
+Write-Host ('Updated ' + $ConfigFile)
+Write-Host ('Updated ' + $AccountsFile)
+Write-Host ''
+Write-Host ('Provider: ' + $payload.provider_id)
+Write-Host ('Base URL: ' + $payload.base_url)
+Write-Host 'OpenCode will use the Antigravity pool line via /v1.'
+`, configURL)
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte(script))
+		return
+	}
+
+	script := fmt.Sprintf(`#!/bin/bash
+set -e
+CONFIG_URL="%s"
+OPENCODE_DIR="$HOME/.config/opencode"
+CONFIG_FILE="$OPENCODE_DIR/opencode.json"
+ACCOUNTS_FILE="$OPENCODE_DIR/antigravity-accounts.json"
+
+echo "Configuring OpenCode for the pure Antigravity pool line..."
+echo ""
+
+mkdir -p "$OPENCODE_DIR"
+if [ -f "$CONFIG_FILE" ]; then
+  cp "$CONFIG_FILE" "$CONFIG_FILE.codex-pool.bak"
+fi
+if [ -f "$ACCOUNTS_FILE" ]; then
+  cp "$ACCOUNTS_FILE" "$ACCOUNTS_FILE.codex-pool.bak"
+fi
+
+TMP_JSON="$(mktemp)"
+curl -fsSL "$CONFIG_URL" -o "$TMP_JSON"
+
+export TMP_JSON OPENCODE_DIR CONFIG_FILE ACCOUNTS_FILE
+node <<'NODE'
+const fs = require('fs');
+const payload = JSON.parse(fs.readFileSync(process.env.TMP_JSON, 'utf8'));
+fs.mkdirSync(process.env.OPENCODE_DIR, { recursive: true });
+fs.writeFileSync(process.env.CONFIG_FILE, JSON.stringify(payload.opencode_config, null, 2) + '\n', { mode: 0o600 });
+fs.writeFileSync(process.env.ACCOUNTS_FILE, JSON.stringify(payload.antigravity_accounts, null, 2) + '\n', { mode: 0o600 });
+NODE
+chmod 600 "$CONFIG_FILE" "$ACCOUNTS_FILE"
+rm -f "$TMP_JSON"
+
+echo "Updated $CONFIG_FILE"
+echo "Updated $ACCOUNTS_FILE"
+echo ""
+echo "OpenCode will use the Antigravity pool line via /v1."
+`, configURL)
+
+	w.Header().Set("Content-Type", "text/x-shellscript")
+	w.Write([]byte(script))
+}
+
 func (h *proxyHandler) serveClaudeSetupScript(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimPrefix(r.URL.Path, "/setup/claude/")
 	if token == "" || strings.Contains(token, "/") {

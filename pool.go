@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,18 +38,58 @@ const (
 	geminiOperatorSourceManualImportLegacy = "manual_import_legacy"
 )
 
+const (
+	geminiProviderTruthStateReady                 = "ready"
+	geminiProviderTruthStateRestricted            = "restricted"
+	geminiProviderTruthStateAuthOnly              = "auth_only"
+	geminiProviderTruthStateProjectOnlyUnverified = "project_only_unverified"
+	geminiProviderTruthStateMissingProjectID      = "missing_project_id"
+	geminiProviderTruthStateProxyDisabled         = "proxy_disabled"
+	geminiProviderTruthStateValidationBlocked     = "validation_blocked"
+	geminiProviderTruthStateQuotaForbidden        = "quota_forbidden"
+)
+
+const (
+	geminiProviderTruthFreshnessStateFresh = "fresh"
+	geminiProviderTruthFreshnessStateStale = "stale"
+	geminiProviderTruthFreshnessWindow     = 30 * time.Minute
+)
+
+const (
+	geminiOperationalTruthStateCleanOK    = "clean_ok"
+	geminiOperationalTruthStateDegradedOK = "degraded_ok"
+	geminiOperationalTruthStateHardFail   = "hard_fail"
+)
+
+const (
+	routingDisplayStateEnabled         = "enabled"
+	routingDisplayStateDegradedEnabled = "degraded_enabled"
+	routingDisplayStateQuarantined     = "quarantined"
+	routingDisplayStateCooldown        = "cooldown"
+	routingDisplayStateBlocked         = "blocked"
+)
+
 // Codex seats leave rotation once usage reaches 90%, i.e. when remaining headroom is 10% or below.
 const codexPreemptiveUsedThreshold = 0.90
 
 type routingState struct {
-	Eligible             bool
-	BlockReason          string
-	PrimaryUsed          float64
-	SecondaryUsed        float64
-	PrimaryHeadroom      float64
-	SecondaryHeadroom    float64
-	RecoveryAt           time.Time
-	CodexRateLimitBypass bool
+	Eligible               bool
+	BlockReason            string
+	PrimaryUsed            float64
+	SecondaryUsed          float64
+	PrimaryHeadroom        float64
+	SecondaryHeadroom      float64
+	PrimaryHeadroomKnown   bool
+	SecondaryHeadroomKnown bool
+	RecoveryAt             time.Time
+	CodexRateLimitBypass   bool
+}
+
+type geminiProviderTruthFreshness struct {
+	State      string
+	Stale      bool
+	Reason     string
+	FreshUntil time.Time
 }
 
 func usagePercentOrLegacy(percentValue, rawValue float64) float64 {
@@ -77,6 +118,23 @@ func effectiveUsageForRouting(snapshot UsageSnapshot, now time.Time) (float64, f
 	return primaryUsed, secondaryUsed
 }
 
+func usageSnapshotHasObservedHeadroom(snapshot UsageSnapshot) bool {
+	if snapshot.PrimaryUsed != 0 || snapshot.SecondaryUsed != 0 ||
+		snapshot.PrimaryUsedPercent != 0 || snapshot.SecondaryUsedPercent != 0 {
+		return true
+	}
+	if !snapshot.RetrievedAt.IsZero() || strings.TrimSpace(snapshot.Source) != "" {
+		return true
+	}
+	if !snapshot.PrimaryResetAt.IsZero() || !snapshot.SecondaryResetAt.IsZero() {
+		return true
+	}
+	if snapshot.PrimaryWindowMinutes > 0 || snapshot.SecondaryWindowMinutes > 0 {
+		return true
+	}
+	return false
+}
+
 func usageAtOrAbovePreemptiveThreshold(used float64) bool {
 	return used >= codexPreemptiveUsedThreshold
 }
@@ -101,11 +159,17 @@ func routingStateLocked(a *Account, now time.Time, accountType AccountType, requ
 	isManagedCodexAPI := isManagedCodexAPIKeyAccount(a)
 	primaryUsed, secondaryUsed := effectiveUsageForRouting(a.Usage, now)
 	state := routingState{
-		Eligible:          true,
-		PrimaryUsed:       primaryUsed,
-		SecondaryUsed:     secondaryUsed,
-		PrimaryHeadroom:   1.0 - primaryUsed,
-		SecondaryHeadroom: 1.0 - secondaryUsed,
+		Eligible:               true,
+		PrimaryUsed:            primaryUsed,
+		SecondaryUsed:          secondaryUsed,
+		PrimaryHeadroom:        1.0 - primaryUsed,
+		SecondaryHeadroom:      1.0 - secondaryUsed,
+		PrimaryHeadroomKnown:   true,
+		SecondaryHeadroomKnown: true,
+	}
+	if a.Type == AccountTypeGemini && !usageSnapshotHasObservedHeadroom(a.Usage) {
+		state.PrimaryHeadroomKnown = false
+		state.SecondaryHeadroomKnown = false
 	}
 	if a.Dead {
 		state.Eligible = false
@@ -133,18 +197,63 @@ func routingStateLocked(a *Account, now time.Time, accountType AccountType, requ
 		return state
 	}
 	if a.Type == AccountTypeGemini {
+		syncGeminiProviderTruthStateLocked(a)
+		freshness := geminiProviderTruthFreshnessStatus(a.GeminiProviderTruthState, a.GeminiProviderCheckedAt, a.GeminiQuotaUpdatedAt, now)
 		switch {
 		case a.AntigravityProxyDisabled:
 			state.Eligible = false
 			state.BlockReason = "proxy_disabled"
 			return state
 		case a.AntigravityValidationBlocked:
-			state.Eligible = false
-			state.BlockReason = "validation_blocked"
-			return state
+			if !canRouteValidationBlockedAntigravityGemini(a) {
+				state.Eligible = false
+				state.BlockReason = "validation_blocked"
+				return state
+			}
 		case a.AntigravityQuotaForbidden:
 			state.Eligible = false
 			state.BlockReason = "quota_forbidden"
+			return state
+		}
+		switch strings.TrimSpace(a.GeminiOperationalState) {
+		case geminiOperationalTruthStateHardFail:
+			state.Eligible = false
+			state.BlockReason = "operational_hard_fail"
+			return state
+		}
+		switch strings.TrimSpace(a.GeminiProviderTruthState) {
+		case geminiProviderTruthStateMissingProjectID:
+			state.Eligible = false
+			state.BlockReason = "missing_project_id"
+			return state
+		case geminiProviderTruthStateRestricted, geminiProviderTruthStateProjectOnlyUnverified, geminiProviderTruthStateAuthOnly:
+			if !geminiHasOperationalProof(a.GeminiOperationalState) {
+				state.Eligible = false
+				state.BlockReason = "not_warmed"
+				return state
+			}
+		}
+		if freshness.Stale {
+			state.Eligible = false
+			state.BlockReason = "stale_provider_truth"
+			if !freshness.FreshUntil.IsZero() {
+				state.RecoveryAt = freshness.FreshUntil
+			}
+			return state
+		}
+		primaryBlocked := state.PrimaryHeadroomKnown && usageAtOrAbovePreemptiveThreshold(primaryUsed)
+		secondaryBlocked := state.SecondaryHeadroomKnown && usageAtOrAbovePreemptiveThreshold(secondaryUsed)
+		if primaryBlocked || secondaryBlocked {
+			state.Eligible = false
+			state.BlockReason = "quota_pressured"
+			switch {
+			case primaryBlocked && secondaryBlocked:
+				state.RecoveryAt = earliestFutureTime(now, a.Usage.PrimaryResetAt, a.Usage.SecondaryResetAt)
+			case primaryBlocked:
+				state.RecoveryAt = earliestFutureTime(now, a.Usage.PrimaryResetAt)
+			default:
+				state.RecoveryAt = earliestFutureTime(now, a.Usage.SecondaryResetAt)
+			}
 			return state
 		}
 	}
@@ -209,6 +318,18 @@ type Account struct {
 	GeminiValidationMessage         string
 	GeminiValidationURL             string
 	GeminiProviderCheckedAt         time.Time
+	GeminiProviderTruthReady        bool
+	GeminiProviderTruthState        string
+	GeminiProviderTruthReason       string
+	GeminiOperationalState          string
+	GeminiOperationalReason         string
+	GeminiOperationalSource         string
+	GeminiOperationalCheckedAt      time.Time
+	GeminiOperationalLastSuccessAt  time.Time
+	GeminiProtectedModels           []string
+	GeminiQuotaModels               []GeminiModelQuotaSnapshot
+	GeminiQuotaUpdatedAt            time.Time
+	GeminiModelForwardingRules      map[string]string
 	// AccountID corresponds to Codex `auth.json` field `tokens.account_id`.
 	// Codex uses this value as the `ChatGPT-Account-ID` header.
 	AccountID string
@@ -428,46 +549,449 @@ type TokenData struct {
 	AccountID    *string `json:"account_id"`
 }
 
+type GeminiModelQuotaSnapshot struct {
+	Name               string          `json:"name"`
+	RouteProvider      string          `json:"route_provider,omitempty"`
+	Percentage         int             `json:"percentage"`
+	ResetTime          string          `json:"reset_time,omitempty"`
+	DisplayName        string          `json:"display_name,omitempty"`
+	SupportsImages     bool            `json:"supports_images,omitempty"`
+	SupportsThinking   bool            `json:"supports_thinking,omitempty"`
+	ThinkingBudget     int             `json:"thinking_budget,omitempty"`
+	Recommended        bool            `json:"recommended,omitempty"`
+	MaxTokens          int             `json:"max_tokens,omitempty"`
+	MaxOutputTokens    int             `json:"max_output_tokens,omitempty"`
+	SupportedMimeTypes map[string]bool `json:"supported_mime_types,omitempty"`
+}
+
+type geminiQuotaSnapshotPayload struct {
+	Models               []GeminiModelQuotaSnapshot `json:"models,omitempty"`
+	LastUpdated          int64                      `json:"last_updated,omitempty"`
+	SubscriptionTier     string                     `json:"subscription_tier,omitempty"`
+	ModelForwardingRules map[string]string          `json:"model_forwarding_rules,omitempty"`
+}
+
 // GeminiAuthJSON is the format for Gemini oauth_creds.json files.
 // Files should be named gemini_*.json in the pool folder.
 type GeminiAuthJSON struct {
-	AccessToken                  string         `json:"access_token"`
-	RefreshToken                 string         `json:"refresh_token"`
-	TokenType                    string         `json:"token_type"`
-	Scope                        string         `json:"scope"`
-	OAuthProfileID               string         `json:"oauth_profile_id,omitempty"`
-	ClientID                     string         `json:"client_id,omitempty"`
-	ClientSecret                 string         `json:"client_secret,omitempty"`
-	OperatorSource               string         `json:"operator_source,omitempty"`
-	OperatorEmail                string         `json:"operator_email,omitempty"`
-	OperatorName                 string         `json:"operator_name,omitempty"`
-	ExpiryDate                   int64          `json:"expiry_date"`  // Unix timestamp in milliseconds
-	PlanType                     string         `json:"plan_type"`    // e.g., "ultra", "gemini"
-	LastRefresh                  string         `json:"last_refresh"` // RFC3339 timestamp of last refresh attempt
-	LastHealthyAt                *time.Time     `json:"last_healthy_at,omitempty"`
-	HealthCheckedAt              *time.Time     `json:"health_checked_at,omitempty"`
-	DeadSince                    *time.Time     `json:"dead_since,omitempty"`
-	HealthStatus                 string         `json:"health_status,omitempty"`
-	HealthError                  string         `json:"health_error,omitempty"`
-	RateLimitUntil               *time.Time     `json:"rate_limit_until,omitempty"`
-	Disabled                     bool           `json:"disabled,omitempty"`
-	Dead                         bool           `json:"dead,omitempty"`
-	AntigravitySource            string         `json:"antigravity_source,omitempty"`
-	AntigravityAccountID         string         `json:"antigravity_account_id,omitempty"`
-	AntigravityEmail             string         `json:"antigravity_email,omitempty"`
-	AntigravityName              string         `json:"antigravity_name,omitempty"`
-	AntigravityProjectID         string         `json:"antigravity_project_id,omitempty"`
-	AntigravityFile              string         `json:"antigravity_file,omitempty"`
-	AntigravityCurrent           bool           `json:"antigravity_current,omitempty"`
-	AntigravityProxyDisabled     bool           `json:"antigravity_proxy_disabled,omitempty"`
-	AntigravityValidationBlocked bool           `json:"antigravity_validation_blocked,omitempty"`
-	AntigravityQuota             map[string]any `json:"antigravity_quota,omitempty"`
-	GeminiSubscriptionTierID     string         `json:"gemini_subscription_tier_id,omitempty"`
-	GeminiSubscriptionTierName   string         `json:"gemini_subscription_tier_name,omitempty"`
-	GeminiValidationReasonCode   string         `json:"gemini_validation_reason_code,omitempty"`
-	GeminiValidationMessage      string         `json:"gemini_validation_message,omitempty"`
-	GeminiValidationURL          string         `json:"gemini_validation_url,omitempty"`
-	GeminiProviderCheckedAt      *time.Time     `json:"gemini_provider_checked_at,omitempty"`
+	AccessToken                    string                     `json:"access_token"`
+	RefreshToken                   string                     `json:"refresh_token"`
+	TokenType                      string                     `json:"token_type"`
+	Scope                          string                     `json:"scope"`
+	OAuthProfileID                 string                     `json:"oauth_profile_id,omitempty"`
+	ClientID                       string                     `json:"client_id,omitempty"`
+	ClientSecret                   string                     `json:"client_secret,omitempty"`
+	OperatorSource                 string                     `json:"operator_source,omitempty"`
+	OperatorEmail                  string                     `json:"operator_email,omitempty"`
+	OperatorName                   string                     `json:"operator_name,omitempty"`
+	ExpiryDate                     int64                      `json:"expiry_date"`  // Unix timestamp in milliseconds
+	PlanType                       string                     `json:"plan_type"`    // e.g., "ultra", "gemini"
+	LastRefresh                    string                     `json:"last_refresh"` // RFC3339 timestamp of last refresh attempt
+	LastHealthyAt                  *time.Time                 `json:"last_healthy_at,omitempty"`
+	HealthCheckedAt                *time.Time                 `json:"health_checked_at,omitempty"`
+	DeadSince                      *time.Time                 `json:"dead_since,omitempty"`
+	HealthStatus                   string                     `json:"health_status,omitempty"`
+	HealthError                    string                     `json:"health_error,omitempty"`
+	RateLimitUntil                 *time.Time                 `json:"rate_limit_until,omitempty"`
+	Disabled                       bool                       `json:"disabled,omitempty"`
+	Dead                           bool                       `json:"dead,omitempty"`
+	AntigravitySource              string                     `json:"antigravity_source,omitempty"`
+	AntigravityAccountID           string                     `json:"antigravity_account_id,omitempty"`
+	AntigravityEmail               string                     `json:"antigravity_email,omitempty"`
+	AntigravityName                string                     `json:"antigravity_name,omitempty"`
+	AntigravityProjectID           string                     `json:"antigravity_project_id,omitempty"`
+	AntigravityFile                string                     `json:"antigravity_file,omitempty"`
+	AntigravityCurrent             bool                       `json:"antigravity_current,omitempty"`
+	AntigravityProxyDisabled       bool                       `json:"antigravity_proxy_disabled,omitempty"`
+	AntigravityValidationBlocked   bool                       `json:"antigravity_validation_blocked,omitempty"`
+	AntigravityQuota               map[string]any             `json:"antigravity_quota,omitempty"`
+	GeminiSubscriptionTierID       string                     `json:"gemini_subscription_tier_id,omitempty"`
+	GeminiSubscriptionTierName     string                     `json:"gemini_subscription_tier_name,omitempty"`
+	GeminiValidationReasonCode     string                     `json:"gemini_validation_reason_code,omitempty"`
+	GeminiValidationMessage        string                     `json:"gemini_validation_message,omitempty"`
+	GeminiValidationURL            string                     `json:"gemini_validation_url,omitempty"`
+	GeminiProviderCheckedAt        *time.Time                 `json:"gemini_provider_checked_at,omitempty"`
+	GeminiProviderTruthReady       bool                       `json:"gemini_provider_truth_ready,omitempty"`
+	GeminiProviderTruthState       string                     `json:"gemini_provider_truth_state,omitempty"`
+	GeminiProviderTruthReason      string                     `json:"gemini_provider_truth_reason,omitempty"`
+	GeminiOperationalState         string                     `json:"gemini_operational_state,omitempty"`
+	GeminiOperationalReason        string                     `json:"gemini_operational_reason,omitempty"`
+	GeminiOperationalSource        string                     `json:"gemini_operational_source,omitempty"`
+	GeminiOperationalCheckedAt     *time.Time                 `json:"gemini_operational_checked_at,omitempty"`
+	GeminiOperationalLastSuccessAt *time.Time                 `json:"gemini_operational_last_success_at,omitempty"`
+	GeminiProtectedModels          []string                   `json:"gemini_protected_models,omitempty"`
+	GeminiQuotaModels              []GeminiModelQuotaSnapshot `json:"gemini_quota_models,omitempty"`
+	GeminiQuotaUpdatedAt           *time.Time                 `json:"gemini_quota_updated_at,omitempty"`
+	GeminiModelForwardingRules     map[string]string          `json:"gemini_model_forwarding_rules,omitempty"`
+}
+
+func syncGeminiProviderTruthState(acc *Account) {
+	if acc == nil || acc.Type != AccountTypeGemini {
+		return
+	}
+	syncGeminiProviderTruthStateLocked(acc)
+}
+
+func syncGeminiProviderTruthStateLocked(acc *Account) {
+	if acc == nil || acc.Type != AccountTypeGemini {
+		return
+	}
+
+	state := ""
+	reason := ""
+	ready := false
+	validationReasonCode := strings.TrimSpace(acc.GeminiValidationReasonCode)
+	validationMessage := strings.TrimSpace(acc.GeminiValidationMessage)
+	validationURL := strings.TrimSpace(acc.GeminiValidationURL)
+
+	switch {
+	case acc.AntigravityProxyDisabled:
+		state = geminiProviderTruthStateProxyDisabled
+		reason = "provider marked seat proxy_disabled"
+	case geminiValidationQuarantined(acc.AntigravityValidationBlocked, validationReasonCode, validationMessage, validationURL):
+		state = geminiProviderTruthStateValidationBlocked
+		reason = geminiValidationReasonSummary(validationReasonCode, validationMessage, validationURL, "provider validation blocked")
+	case geminiValidationRestricted(acc.AntigravityValidationBlocked, validationReasonCode, validationMessage, validationURL):
+		state = geminiProviderTruthStateRestricted
+		reason = geminiValidationReasonSummary(validationReasonCode, validationMessage, validationURL, "provider restriction detected")
+	case acc.AntigravityQuotaForbidden:
+		state = geminiProviderTruthStateQuotaForbidden
+		reason = firstNonEmpty(strings.TrimSpace(acc.AntigravityQuotaForbiddenReason), "provider quota forbidden")
+	case strings.TrimSpace(acc.AntigravityProjectID) != "" && !acc.GeminiProviderCheckedAt.IsZero():
+		state = geminiProviderTruthStateReady
+		ready = true
+	case strings.TrimSpace(acc.AntigravityProjectID) != "":
+		state = geminiProviderTruthStateProjectOnlyUnverified
+		reason = "project_id present without provider verification"
+	case !acc.GeminiProviderCheckedAt.IsZero():
+		state = geminiProviderTruthStateMissingProjectID
+		reason = "provider truth missing project_id"
+	case strings.TrimSpace(acc.AccessToken) != "" || strings.TrimSpace(acc.RefreshToken) != "":
+		state = geminiProviderTruthStateAuthOnly
+		reason = "provider truth not hydrated"
+	}
+
+	if state == geminiProviderTruthStateAuthOnly &&
+		strings.TrimSpace(acc.GeminiProviderTruthReason) != "" &&
+		(reason == "" || reason == "provider truth not hydrated") {
+		reason = strings.TrimSpace(acc.GeminiProviderTruthReason)
+	}
+
+	acc.GeminiProviderTruthReady = ready
+	acc.GeminiProviderTruthState = state
+	acc.GeminiProviderTruthReason = strings.TrimSpace(reason)
+}
+
+func hasGeminiValidationTruth(reasonCode, message, url string) bool {
+	return strings.TrimSpace(reasonCode) != "" ||
+		strings.TrimSpace(message) != "" ||
+		strings.TrimSpace(url) != ""
+}
+
+func geminiValidationQuarantined(markedBlocked bool, reasonCode, message, url string) bool {
+	reasonCode = strings.TrimSpace(reasonCode)
+	if hasGeminiValidationTruth(reasonCode, message, url) {
+		return !canRouteGeminiValidationBlockedReasonCode(reasonCode)
+	}
+	return markedBlocked
+}
+
+func geminiValidationRestricted(markedBlocked bool, reasonCode, message, url string) bool {
+	if geminiValidationQuarantined(markedBlocked, reasonCode, message, url) {
+		return false
+	}
+	if !hasGeminiValidationTruth(reasonCode, message, url) {
+		return false
+	}
+	return canRouteGeminiValidationBlockedReasonCode(reasonCode)
+}
+
+func geminiValidationReasonSummary(reasonCode, message, url, fallback string) string {
+	return firstNonEmpty(
+		strings.TrimSpace(message),
+		strings.TrimSpace(reasonCode),
+		strings.TrimSpace(url),
+		strings.TrimSpace(fallback),
+	)
+}
+
+func geminiHasOperationalProof(state string) bool {
+	switch strings.TrimSpace(state) {
+	case geminiOperationalTruthStateCleanOK, geminiOperationalTruthStateDegradedOK:
+		return true
+	default:
+		return false
+	}
+}
+
+func successfulGeminiOperationalStateLocked(acc *Account) (string, string) {
+	if acc == nil || acc.Type != AccountTypeGemini {
+		return geminiOperationalTruthStateCleanOK, ""
+	}
+	syncGeminiProviderTruthStateLocked(acc)
+	state := strings.TrimSpace(acc.GeminiProviderTruthState)
+	if state == "" || state == geminiProviderTruthStateReady {
+		return geminiOperationalTruthStateCleanOK, ""
+	}
+	return geminiOperationalTruthStateDegradedOK, sanitizeStatusMessage(firstNonEmpty(
+		strings.TrimSpace(acc.GeminiProviderTruthReason),
+		geminiValidationReasonSummary(acc.GeminiValidationReasonCode, acc.GeminiValidationMessage, acc.GeminiValidationURL, state),
+	))
+}
+
+func noteGeminiOperationalSuccessLocked(acc *Account, now time.Time, source string) {
+	if acc == nil || acc.Type != AccountTypeGemini {
+		return
+	}
+	state, reason := successfulGeminiOperationalStateLocked(acc)
+	acc.GeminiOperationalState = state
+	acc.GeminiOperationalReason = strings.TrimSpace(reason)
+	acc.GeminiOperationalSource = strings.TrimSpace(source)
+	acc.GeminiOperationalCheckedAt = now.UTC()
+	acc.GeminiOperationalLastSuccessAt = now.UTC()
+}
+
+func noteGeminiOperationalFailureLocked(acc *Account, now time.Time, source string, err error) {
+	if acc == nil || acc.Type != AccountTypeGemini || err == nil {
+		return
+	}
+	acc.GeminiOperationalState = geminiOperationalTruthStateHardFail
+	acc.GeminiOperationalReason = sanitizeStatusMessage(err.Error())
+	acc.GeminiOperationalSource = strings.TrimSpace(source)
+	acc.GeminiOperationalCheckedAt = now.UTC()
+}
+
+func geminiProviderTruthFreshnessStatus(providerTruthState string, providerCheckedAt, quotaUpdatedAt, now time.Time) geminiProviderTruthFreshness {
+	providerTruthState = strings.TrimSpace(providerTruthState)
+	if providerTruthState != geminiProviderTruthStateReady || providerCheckedAt.IsZero() {
+		return geminiProviderTruthFreshness{}
+	}
+
+	freshness := geminiProviderTruthFreshness{
+		State: geminiProviderTruthFreshnessStateFresh,
+	}
+	freshUntil := providerCheckedAt.Add(geminiProviderTruthFreshnessWindow)
+	providerStale := !freshUntil.After(now)
+	quotaStale := false
+
+	if !quotaUpdatedAt.IsZero() {
+		quotaFreshUntil := quotaUpdatedAt.Add(geminiProviderTruthFreshnessWindow)
+		if quotaFreshUntil.Before(freshUntil) {
+			freshUntil = quotaFreshUntil
+		}
+		quotaStale = !quotaFreshUntil.After(now)
+	}
+
+	freshness.FreshUntil = freshUntil.UTC()
+	if providerStale || quotaStale {
+		freshness.State = geminiProviderTruthFreshnessStateStale
+		freshness.Stale = true
+		switch {
+		case providerStale && quotaStale:
+			freshness.Reason = "provider and quota snapshots are older than the freshness window"
+		case quotaStale:
+			freshness.Reason = "quota snapshot is older than the freshness window"
+		default:
+			freshness.Reason = "provider snapshot is older than the freshness window"
+		}
+	}
+	return freshness
+}
+
+func normalizeStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeStringSliceFromAny(value any) []string {
+	if value == nil {
+		return nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var values []string
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil
+	}
+	return normalizeStringSlice(values)
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	normalized := make(map[string]string, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		keys = append(keys, key)
+		normalized[key] = value
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	sort.Strings(keys)
+	out := make(map[string]string, len(keys))
+	for _, key := range keys {
+		out[key] = normalized[key]
+	}
+	return out
+}
+
+func cloneSupportedMimeTypes(values map[string]bool) map[string]bool {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		key = strings.TrimSpace(key)
+		if key == "" {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	sort.Strings(keys)
+	out := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		out[key] = values[key]
+	}
+	return out
+}
+
+func cloneGeminiModelQuotaSnapshots(models []GeminiModelQuotaSnapshot) []GeminiModelQuotaSnapshot {
+	if len(models) == 0 {
+		return nil
+	}
+	out := make([]GeminiModelQuotaSnapshot, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		name := strings.TrimSpace(model.Name)
+		if name == "" {
+			continue
+		}
+		if !geminiQuotaModelAllowedInOperatorTruth(name) {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		routeProvider := firstNonEmpty(strings.TrimSpace(model.RouteProvider), geminiQuotaModelRouteProvider(name))
+		out = append(out, GeminiModelQuotaSnapshot{
+			Name:               name,
+			RouteProvider:      routeProvider,
+			Percentage:         model.Percentage,
+			ResetTime:          strings.TrimSpace(model.ResetTime),
+			DisplayName:        strings.TrimSpace(model.DisplayName),
+			SupportsImages:     model.SupportsImages,
+			SupportsThinking:   model.SupportsThinking,
+			ThinkingBudget:     model.ThinkingBudget,
+			Recommended:        model.Recommended,
+			MaxTokens:          model.MaxTokens,
+			MaxOutputTokens:    model.MaxOutputTokens,
+			SupportedMimeTypes: cloneSupportedMimeTypes(model.SupportedMimeTypes),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		leftRank := geminiQuotaModelRouteProviderSortRank(out[i].RouteProvider)
+		rightRank := geminiQuotaModelRouteProviderSortRank(out[j].RouteProvider)
+		if leftRank != rightRank {
+			return leftRank < rightRank
+		}
+		if out[i].Name == out[j].Name {
+			return out[i].DisplayName < out[j].DisplayName
+		}
+		return out[i].Name < out[j].Name
+	})
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func geminiQuotaModelRouteProvider(name string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	switch {
+	case strings.HasPrefix(name, "gemini"),
+		strings.HasPrefix(name, "image"),
+		strings.HasPrefix(name, "imagen"):
+		return "gemini"
+	case strings.HasPrefix(name, "claude"):
+		return "claude"
+	case strings.HasPrefix(name, "gpt"):
+		return "codex"
+	default:
+		return ""
+	}
+}
+
+func geminiQuotaModelAllowedInOperatorTruth(name string) bool {
+	switch geminiQuotaModelRouteProvider(name) {
+	case "gemini", "claude":
+		return true
+	default:
+		return false
+	}
+}
+
+func geminiQuotaModelRouteProviderSortRank(routeProvider string) int {
+	switch strings.ToLower(strings.TrimSpace(routeProvider)) {
+	case "gemini":
+		return 0
+	case "claude":
+		return 1
+	case "codex":
+		return 2
+	default:
+		return 9
+	}
+}
+
+func decodeGeminiQuotaSnapshot(raw map[string]any) ([]GeminiModelQuotaSnapshot, time.Time, map[string]string, string) {
+	if len(raw) == 0 {
+		return nil, time.Time{}, nil, ""
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil, time.Time{}, nil, ""
+	}
+	var payload geminiQuotaSnapshotPayload
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		return nil, time.Time{}, nil, ""
+	}
+	updatedAt := time.Time{}
+	if payload.LastUpdated > 0 {
+		updatedAt = time.Unix(payload.LastUpdated, 0).UTC()
+	}
+	return cloneGeminiModelQuotaSnapshots(payload.Models), updatedAt, cloneStringMap(payload.ModelForwardingRules), strings.TrimSpace(payload.SubscriptionTier)
 }
 
 // ClaudeAuthJSON is the format for Claude auth files.
@@ -629,14 +1153,15 @@ func parseClaims(idToken string) jwtClaims {
 
 // poolState wraps accounts with a mutex.
 type poolState struct {
-	mu            sync.RWMutex
-	accounts      []*Account
-	convPin       map[string]string // conversation_id -> account ID
-	activeCodexID string
-	activeAPIID   string
-	debug         bool
-	rr            uint64
-	tierThreshold float64 // secondary usage % at which we stop preferring a tier
+	mu             sync.RWMutex
+	accounts       []*Account
+	convPin        map[string]string // conversation_id -> account ID
+	activeCodexID  string
+	activeAPIID    string
+	activeGeminiID string
+	debug          bool
+	rr             uint64
+	tierThreshold  float64 // secondary usage % at which we stop preferring a tier
 }
 
 type accountRuntimeState struct {
@@ -842,18 +1367,54 @@ func (p *poolState) stickyEligibleCandidateLocked(now time.Time, exclude map[str
 			return isManagedCodexAPIKeyAccount(a)
 		})
 	}
+	if accountType == AccountTypeGemini {
+		if acc := p.activeGeminiCandidateLocked(now, exclude, requiredPlan); acc != nil {
+			return acc
+		}
+	}
 	return p.stickyEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, nil)
 }
 
 func (p *poolState) rememberSelectedSeatLocked(accountType AccountType, acc *Account) {
-	if accountType != AccountTypeCodex || acc == nil {
+	if acc == nil {
 		return
 	}
-	if isManagedCodexAPIKeyAccount(acc) {
-		p.activeAPIID = acc.ID
-		return
+	switch accountType {
+	case AccountTypeCodex:
+		if isManagedCodexAPIKeyAccount(acc) {
+			p.activeAPIID = acc.ID
+			return
+		}
+		p.activeCodexID = acc.ID
+	case AccountTypeGemini:
+		p.activeGeminiID = acc.ID
 	}
-	p.activeCodexID = acc.ID
+}
+
+func (p *poolState) activeGeminiCandidateLocked(now time.Time, exclude map[string]bool, requiredPlan string) *Account {
+	if p.activeGeminiID == "" {
+		return nil
+	}
+	if exclude != nil && exclude[p.activeGeminiID] {
+		return nil
+	}
+
+	a := p.getLocked(p.activeGeminiID)
+	if a == nil {
+		p.activeGeminiID = ""
+		return nil
+	}
+
+	a.mu.Lock()
+	expired := !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now)
+	routing := routingStateLocked(a, now, AccountTypeGemini, requiredPlan)
+	ok := routing.Eligible && !expired
+	a.mu.Unlock()
+	if !ok {
+		p.activeGeminiID = ""
+		return nil
+	}
+	return a
 }
 
 func (p *poolState) activeCodexCandidateLocked(now time.Time, exclude map[string]bool, requiredPlan string, managed bool) *Account {
@@ -1322,6 +1883,8 @@ func saveCodexAccount(a *Account) error {
 }
 
 func saveGeminiAccount(a *Account) error {
+	syncGeminiProviderTruthState(a)
+
 	// Preserve existing fields in the file
 	raw, err := os.ReadFile(a.File)
 	if err != nil {
@@ -1386,6 +1949,23 @@ func saveGeminiAccount(a *Account) error {
 	setJSONField(root, "gemini_validation_message", strings.TrimSpace(a.GeminiValidationMessage), strings.TrimSpace(a.GeminiValidationMessage) != "")
 	setJSONField(root, "gemini_validation_url", strings.TrimSpace(a.GeminiValidationURL), strings.TrimSpace(a.GeminiValidationURL) != "")
 	setJSONTimeField(root, "gemini_provider_checked_at", a.GeminiProviderCheckedAt)
+	providerTruthState := strings.TrimSpace(a.GeminiProviderTruthState)
+	providerTruthReason := strings.TrimSpace(a.GeminiProviderTruthReason)
+	setJSONField(root, "gemini_provider_truth_ready", a.GeminiProviderTruthReady, a.GeminiProviderTruthReady || providerTruthState != "" || providerTruthReason != "")
+	setJSONField(root, "gemini_provider_truth_state", providerTruthState, providerTruthState != "")
+	setJSONField(root, "gemini_provider_truth_reason", providerTruthReason, providerTruthReason != "")
+	setJSONField(root, "gemini_operational_state", strings.TrimSpace(a.GeminiOperationalState), strings.TrimSpace(a.GeminiOperationalState) != "")
+	setJSONField(root, "gemini_operational_reason", strings.TrimSpace(a.GeminiOperationalReason), strings.TrimSpace(a.GeminiOperationalReason) != "")
+	setJSONField(root, "gemini_operational_source", strings.TrimSpace(a.GeminiOperationalSource), strings.TrimSpace(a.GeminiOperationalSource) != "")
+	setJSONTimeField(root, "gemini_operational_checked_at", a.GeminiOperationalCheckedAt)
+	setJSONTimeField(root, "gemini_operational_last_success_at", a.GeminiOperationalLastSuccessAt)
+	geminiProtectedModels := normalizeStringSlice(a.GeminiProtectedModels)
+	geminiQuotaModels := cloneGeminiModelQuotaSnapshots(a.GeminiQuotaModels)
+	geminiModelForwardingRules := cloneStringMap(a.GeminiModelForwardingRules)
+	setJSONField(root, "gemini_protected_models", geminiProtectedModels, len(geminiProtectedModels) > 0)
+	setJSONField(root, "gemini_quota_models", geminiQuotaModels, len(geminiQuotaModels) > 0)
+	setJSONTimeField(root, "gemini_quota_updated_at", a.GeminiQuotaUpdatedAt)
+	setJSONField(root, "gemini_model_forwarding_rules", geminiModelForwardingRules, len(geminiModelForwardingRules) > 0)
 	if !a.ExpiresAt.IsZero() {
 		root["expiry_date"] = a.ExpiresAt.UnixMilli()
 	}
@@ -1491,6 +2071,12 @@ func (p *poolState) getLocked(id string) *Account {
 		}
 	}
 	return nil
+}
+
+func (p *poolState) getByID(id string) *Account {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.getLocked(id)
 }
 
 // averageUsage produces a synthetic usage payload across all alive accounts.

@@ -642,12 +642,181 @@ func TestRoutingStateBlocksRateLimitedLocalCodexSeat(t *testing.T) {
 	}
 }
 
+func TestRoutingStateAllowsRoutableValidationBlockedAntigravityGeminiSeat(t *testing.T) {
+	now := time.Now()
+	seat := &Account{
+		ID:                           "gemini-seat",
+		Type:                         AccountTypeGemini,
+		OAuthProfileID:               geminiOAuthAntigravityProfileID,
+		OperatorSource:               geminiOperatorSourceAntigravityImport,
+		AntigravityValidationBlocked: true,
+		GeminiValidationReasonCode:   "UNSUPPORTED_LOCATION",
+		GeminiOperationalState:       geminiOperationalTruthStateDegradedOK,
+	}
+
+	seat.mu.Lock()
+	routing := routingStateLocked(seat, now, AccountTypeGemini, "")
+	seat.mu.Unlock()
+
+	if !routing.Eligible {
+		t.Fatalf("expected allowlisted validation-blocked Gemini seat to stay eligible, got %+v", routing)
+	}
+	if routing.BlockReason != "" {
+		t.Fatalf("block_reason=%q", routing.BlockReason)
+	}
+}
+
+func TestRoutingStateBlocksRestrictedGeminiSeatWithoutOperationalProof(t *testing.T) {
+	now := time.Now()
+	seat := &Account{
+		ID:                           "gemini-seat",
+		Type:                         AccountTypeGemini,
+		OAuthProfileID:               geminiOAuthAntigravityProfileID,
+		OperatorSource:               geminiOperatorSourceAntigravityImport,
+		AntigravityValidationBlocked: true,
+		GeminiValidationReasonCode:   "UNSUPPORTED_LOCATION",
+	}
+
+	seat.mu.Lock()
+	routing := routingStateLocked(seat, now, AccountTypeGemini, "")
+	seat.mu.Unlock()
+
+	if routing.Eligible {
+		t.Fatalf("expected restricted Gemini seat without operational proof to be blocked")
+	}
+	if routing.BlockReason != "not_warmed" {
+		t.Fatalf("block_reason=%q", routing.BlockReason)
+	}
+}
+
+func TestRoutingStateBlocksMissingProjectGeminiSeat(t *testing.T) {
+	now := time.Now()
+	seat := &Account{
+		ID:                        "gemini-seat",
+		Type:                      AccountTypeGemini,
+		GeminiProviderCheckedAt:   now.Add(-time.Minute),
+		GeminiProviderTruthReason: "provider truth missing project_id",
+		GeminiOperationalState:    geminiOperationalTruthStateDegradedOK,
+	}
+
+	seat.mu.Lock()
+	routing := routingStateLocked(seat, now, AccountTypeGemini, "")
+	seat.mu.Unlock()
+
+	if routing.Eligible {
+		t.Fatalf("expected missing-project Gemini seat to be blocked")
+	}
+	if routing.BlockReason != "missing_project_id" {
+		t.Fatalf("block_reason=%q", routing.BlockReason)
+	}
+}
+
+func TestRoutingStateBlocksGeminiOperationalHardFail(t *testing.T) {
+	now := time.Now()
+	seat := &Account{
+		ID:                      "gemini-seat",
+		Type:                    AccountTypeGemini,
+		AntigravityProjectID:    "project-1",
+		GeminiProviderCheckedAt: now.Add(-time.Minute),
+		GeminiOperationalState:  geminiOperationalTruthStateHardFail,
+		GeminiOperationalReason: "upstream 503",
+	}
+
+	seat.mu.Lock()
+	routing := routingStateLocked(seat, now, AccountTypeGemini, "")
+	seat.mu.Unlock()
+
+	if routing.Eligible {
+		t.Fatalf("expected hard-fail Gemini seat to be blocked")
+	}
+	if routing.BlockReason != "operational_hard_fail" {
+		t.Fatalf("block_reason=%q", routing.BlockReason)
+	}
+}
+
+func TestRoutingStateBlocksStaleProviderTruthGeminiSeat(t *testing.T) {
+	now := time.Now()
+	seat := &Account{
+		ID:                      "gemini-seat",
+		Type:                    AccountTypeGemini,
+		AntigravityProjectID:    "project-1",
+		GeminiProviderCheckedAt: now.Add(-45 * time.Minute),
+		GeminiQuotaUpdatedAt:    now.Add(-10 * time.Minute),
+	}
+
+	seat.mu.Lock()
+	routing := routingStateLocked(seat, now, AccountTypeGemini, "")
+	seat.mu.Unlock()
+
+	if routing.Eligible {
+		t.Fatalf("expected stale provider-truth Gemini seat to be blocked")
+	}
+	if routing.BlockReason != "stale_provider_truth" {
+		t.Fatalf("block_reason=%q", routing.BlockReason)
+	}
+	if routing.RecoveryAt.IsZero() {
+		t.Fatal("expected stale provider truth to publish a recovery_at hint")
+	}
+}
+
+func TestRoutingStateBlocksQuotaPressuredGeminiSeat(t *testing.T) {
+	now := time.Now()
+	seat := &Account{
+		ID:                      "gemini-seat",
+		Type:                    AccountTypeGemini,
+		AntigravityProjectID:    "project-1",
+		GeminiProviderCheckedAt: now.Add(-time.Minute),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.91,
+			SecondaryUsedPercent: 0.25,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+		},
+	}
+
+	seat.mu.Lock()
+	routing := routingStateLocked(seat, now, AccountTypeGemini, "")
+	seat.mu.Unlock()
+
+	if routing.Eligible {
+		t.Fatalf("expected quota-pressured Gemini seat to be blocked")
+	}
+	if routing.BlockReason != "quota_pressured" {
+		t.Fatalf("block_reason=%q", routing.BlockReason)
+	}
+	if routing.RecoveryAt.IsZero() {
+		t.Fatal("expected quota-pressured Gemini seat to publish a recovery_at hint")
+	}
+}
+
+func TestStaleAntigravityGeminiTruthRefreshEligibleLocked(t *testing.T) {
+	now := time.Now()
+	seat := &Account{
+		ID:                      "gemini-seat",
+		Type:                    AccountTypeGemini,
+		OperatorSource:          geminiOperatorSourceAntigravityImport,
+		AntigravitySource:       "browser_auth",
+		AccessToken:             "ya29.test",
+		AntigravityProjectID:    "project-1",
+		GeminiProviderCheckedAt: now.Add(-45 * time.Minute),
+		GeminiQuotaUpdatedAt:    now.Add(-45 * time.Minute),
+	}
+
+	seat.mu.Lock()
+	eligible := staleAntigravityGeminiTruthRefreshEligibleLocked(seat, now)
+	seat.mu.Unlock()
+
+	if !eligible {
+		t.Fatal("expected stale antigravity Gemini seat to need truth refresh")
+	}
+}
+
 func TestRoutingStateBlocksValidationBlockedGeminiSeat(t *testing.T) {
 	now := time.Now()
 	seat := &Account{
 		ID:                           "gemini-seat",
 		Type:                         AccountTypeGemini,
 		AntigravityValidationBlocked: true,
+		GeminiValidationReasonCode:   "ACCOUNT_NEEDS_WORKSPACE",
 	}
 
 	seat.mu.Lock()
@@ -716,6 +885,122 @@ func TestCandidateSkipsRateLimitedLocalCodexSeat(t *testing.T) {
 	}
 	if p.activeCodexID != "healthy" {
 		t.Fatalf("expected active codex seat to move to healthy, got %q", p.activeCodexID)
+	}
+}
+
+func TestCandidateKeepsActiveGeminiSeatUntilBlocked(t *testing.T) {
+	now := time.Now()
+	active := &Account{
+		ID:                      "gemini-active",
+		Type:                    AccountTypeGemini,
+		PlanType:                "gemini",
+		AntigravityProjectID:    "project-a",
+		GeminiProviderCheckedAt: now.Add(-time.Minute),
+		LastUsed:                now.Add(-5 * time.Minute),
+	}
+	other := &Account{
+		ID:                      "gemini-other",
+		Type:                    AccountTypeGemini,
+		PlanType:                "gemini",
+		AntigravityProjectID:    "project-b",
+		GeminiProviderCheckedAt: now.Add(-time.Minute),
+		LastUsed:                now.Add(-time.Second),
+	}
+	p := newPoolState([]*Account{active, other}, false)
+	p.activeGeminiID = active.ID
+
+	got := p.peekCandidateAt(now, AccountTypeGemini, "")
+	if got == nil || got.ID != active.ID {
+		t.Fatalf("expected active Gemini seat, got %+v", got)
+	}
+}
+
+func TestCandidateDropsActiveGeminiSeatWhenBlocked(t *testing.T) {
+	now := time.Now()
+	blocked := &Account{
+		ID:                      "gemini-blocked",
+		Type:                    AccountTypeGemini,
+		PlanType:                "gemini",
+		GeminiProviderCheckedAt: now.Add(-time.Minute),
+		GeminiOperationalState:  geminiOperationalTruthStateDegradedOK,
+	}
+	healthy := &Account{
+		ID:                      "gemini-healthy",
+		Type:                    AccountTypeGemini,
+		PlanType:                "gemini",
+		AntigravityProjectID:    "project-b",
+		GeminiProviderCheckedAt: now.Add(-time.Minute),
+	}
+	p := newPoolState([]*Account{blocked, healthy}, false)
+	p.activeGeminiID = blocked.ID
+
+	got := p.peekCandidateAt(now, AccountTypeGemini, "")
+	if got == nil || got.ID != healthy.ID {
+		t.Fatalf("expected healthy Gemini seat after blocking active one, got %+v", got)
+	}
+	if p.activeGeminiID != "" {
+		t.Fatalf("expected blocked active Gemini seat to be cleared, got %q", p.activeGeminiID)
+	}
+}
+
+func TestCandidateDropsActiveGeminiSeatWhenStale(t *testing.T) {
+	now := time.Now()
+	stale := &Account{
+		ID:                      "gemini-stale",
+		Type:                    AccountTypeGemini,
+		PlanType:                "gemini",
+		AntigravityProjectID:    "project-a",
+		GeminiProviderCheckedAt: now.Add(-45 * time.Minute),
+	}
+	healthy := &Account{
+		ID:                      "gemini-healthy",
+		Type:                    AccountTypeGemini,
+		PlanType:                "gemini",
+		AntigravityProjectID:    "project-b",
+		GeminiProviderCheckedAt: now.Add(-time.Minute),
+	}
+	p := newPoolState([]*Account{stale, healthy}, false)
+	p.activeGeminiID = stale.ID
+
+	got := p.peekCandidateAt(now, AccountTypeGemini, "")
+	if got == nil || got.ID != healthy.ID {
+		t.Fatalf("expected healthy Gemini seat after stale active one, got %+v", got)
+	}
+	if p.activeGeminiID != "" {
+		t.Fatalf("expected stale active Gemini seat to be cleared, got %q", p.activeGeminiID)
+	}
+}
+
+func TestCandidateDropsActiveGeminiSeatWhenQuotaPressured(t *testing.T) {
+	now := time.Now()
+	pressured := &Account{
+		ID:                      "gemini-pressured",
+		Type:                    AccountTypeGemini,
+		PlanType:                "gemini",
+		AntigravityProjectID:    "project-a",
+		GeminiProviderCheckedAt: now.Add(-time.Minute),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.95,
+			SecondaryUsedPercent: 0.30,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+		},
+	}
+	healthy := &Account{
+		ID:                      "gemini-healthy",
+		Type:                    AccountTypeGemini,
+		PlanType:                "gemini",
+		AntigravityProjectID:    "project-b",
+		GeminiProviderCheckedAt: now.Add(-time.Minute),
+	}
+	p := newPoolState([]*Account{pressured, healthy}, false)
+	p.activeGeminiID = pressured.ID
+
+	got := p.peekCandidateAt(now, AccountTypeGemini, "")
+	if got == nil || got.ID != healthy.ID {
+		t.Fatalf("expected healthy Gemini seat after pressured active one, got %+v", got)
+	}
+	if p.activeGeminiID != "" {
+		t.Fatalf("expected quota-pressured active Gemini seat to be cleared, got %q", p.activeGeminiID)
 	}
 }
 

@@ -227,6 +227,40 @@ func TestCodexProviderLoadsManagedOpenAIAPIKeyAccount(t *testing.T) {
 	}
 }
 
+func TestCodexProviderRefreshTokenLogsTrace(t *testing.T) {
+	refreshBase, _ := url.Parse("https://auth.openai.com")
+	provider := NewCodexProvider(refreshBase, refreshBase, refreshBase, refreshBase)
+	accFile := filepath.Join(t.TempDir(), "codex_refresh_trace.json")
+	if err := os.WriteFile(accFile, []byte(`{"tokens":{"access_token":"seed-access","refresh_token":"seed-refresh"}}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+	acc := &Account{
+		ID:           "codex_refresh_trace",
+		Type:         AccountTypeCodex,
+		File:         accFile,
+		AuthMode:     accountAuthModeOAuth,
+		AccessToken:  "seed-access",
+		RefreshToken: "seed-refresh",
+	}
+
+	transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		return jsonResponse(http.StatusOK, `{"access_token":"fresh-access","refresh_token":"fresh-refresh"}`), nil
+	})
+
+	logs := captureLogs(t, func() {
+		if err := provider.RefreshToken(testTraceContext("req-codex-refresh"), acc, transport); err != nil {
+			t.Fatalf("RefreshToken error: %v", err)
+		}
+	})
+
+	if !strings.Contains(logs, "[req-codex-refresh] trace token_refresh") {
+		t.Fatalf("missing token_refresh log: %s", logs)
+	}
+	if !strings.Contains(logs, `provider=codex`) || !strings.Contains(logs, `result=ok`) {
+		t.Fatalf("unexpected codex trace logs: %s", logs)
+	}
+}
+
 func TestTryOnceManagedOpenAIAPIKeyUsesAPIBase(t *testing.T) {
 	var seenPaths []string
 	var seenAuth []string
@@ -283,7 +317,11 @@ func TestTryOnceManagedOpenAIAPIKeyUsesAPIBase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
-	resp, _, _, err := h.tryOnce(context.Background(), req, body, apiBase, provider, acc, "req-test")
+	resp, _, _, err := h.tryOnce(context.Background(), req, body, RoutePlan{
+		Provider:     provider,
+		TargetBase:   apiBase,
+		UpstreamPath: "/v1/responses",
+	}, acc, "req-test")
 	if err != nil {
 		t.Fatalf("tryOnce: %v", err)
 	}
@@ -401,7 +439,12 @@ func TestTryOnceGeminiFacadeForcesRefreshAfter401DespiteRecentLastRefresh(t *tes
 		t.Fatalf("new request: %v", err)
 	}
 
-	resp, _, _, err := h.tryOnce(context.Background(), req, body, geminiAPIBase, gemini, acc, "req-gemini")
+	resp, _, _, err := h.tryOnce(context.Background(), req, body, RoutePlan{
+		Provider:     gemini,
+		TargetBase:   geminiAPIBase,
+		UpstreamPath: "/v1beta/models/gemini-2.5-flash:generateContent",
+		Shape:        RequestShape{RequestedModel: "gemini-2.5-flash"},
+	}, acc, "req-gemini")
 	if err != nil {
 		t.Fatalf("tryOnce: %v", err)
 	}
@@ -425,6 +468,172 @@ func TestTryOnceGeminiFacadeForcesRefreshAfter401DespiteRecentLastRefresh(t *tes
 	}
 	if acc.AccessToken != "fresh-access" {
 		t.Fatalf("access_token=%q", acc.AccessToken)
+	}
+}
+
+func TestTryOnceOpenAIChatCompletionsGeminiUnwrapsCodeAssistEnvelope(t *testing.T) {
+	geminiBase, _ := url.Parse("https://cloudcode-pa.googleapis.com")
+	geminiAPIBase, _ := url.Parse("https://generativelanguage.googleapis.com")
+	codexBase, _ := url.Parse("https://chatgpt.com/backend-api/codex")
+	whamBase, _ := url.Parse("https://chatgpt.com/backend-api")
+	refreshBase, _ := url.Parse("https://auth.openai.com")
+
+	codex := NewCodexProvider(codexBase, whamBase, refreshBase, codexBase)
+	claude := NewClaudeProvider(codexBase)
+	gemini := NewGeminiProvider(geminiBase, geminiAPIBase)
+
+	acc := &Account{
+		ID:                   "gemini-antigravity-seat",
+		Type:                 AccountTypeGemini,
+		AccessToken:          "gemini-access",
+		RefreshToken:         "gemini-refresh",
+		OAuthProfileID:       geminiOAuthAntigravityProfileID,
+		AntigravitySource:    "browser_oauth",
+		AntigravityProjectID: "project-1",
+	}
+
+	upstreamCalls := 0
+	transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamCalls++
+		if r.URL.Host != geminiBase.Host {
+			t.Fatalf("unexpected host %s", r.URL.Host)
+		}
+		if r.URL.Path != "/v1internal:generateContent" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if got := r.Header.Get("User-Agent"); got != antigravityCodeAssistUA {
+			t.Fatalf("user-agent = %q", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"response":{"candidates":[{"content":{"parts":[{"text":"AG_POOL_OK"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4,"totalTokenCount":7}},"traceId":"trace-opencode-1"}`,
+			)),
+		}, nil
+	})
+
+	h := &proxyHandler{
+		cfg:              config{},
+		transport:        transport,
+		refreshTransport: transport,
+		registry:         NewProviderRegistry(codex, claude, gemini),
+	}
+
+	body := []byte(`{"model":"gemini-2.5-flash","messages":[{"role":"system","content":"sys"},{"role":"user","content":"Reply with exactly AG_POOL_OK."}]}`)
+	req := httptest.NewRequest(http.MethodPost, "http://pool.local/v1/chat/completions", strings.NewReader(string(body)))
+	shape := buildBufferedRequestShape(req, body, body)
+
+	routePlan, rewrittenBody, err := h.planRoute(AdmissionResult{Kind: AdmissionKindPoolUser, UserID: "u1"}, req, shape, body)
+	if err != nil {
+		t.Fatalf("planRoute: %v", err)
+	}
+
+	resp, _, _, err := h.tryOnce(context.Background(), req, rewrittenBody, routePlan, acc, "req-opencode")
+	if err != nil {
+		t.Fatalf("tryOnce: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if upstreamCalls != 1 {
+		t.Fatalf("upstreamCalls=%d", upstreamCalls)
+	}
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{`"object":"chat.completion"`, `"model":"gemini-2.5-flash"`, `"content":"AG_POOL_OK"`, `"finish_reason":"stop"`, `"total_tokens":7`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("response missing %q: %s", want, text)
+		}
+	}
+}
+
+func TestTryOnceGeminiCodeAssistFallsBackAcrossAntigravityHosts(t *testing.T) {
+	geminiBase, _ := url.Parse("https://cloudcode-pa.googleapis.com")
+	geminiAPIBase, _ := url.Parse("https://generativelanguage.googleapis.com")
+	codexBase, _ := url.Parse("https://chatgpt.com/backend-api/codex")
+	whamBase, _ := url.Parse("https://chatgpt.com/backend-api")
+	refreshBase, _ := url.Parse("https://auth.openai.com")
+
+	codex := NewCodexProvider(codexBase, whamBase, refreshBase, codexBase)
+	claude := NewClaudeProvider(codexBase)
+	gemini := NewGeminiProvider(geminiBase, geminiAPIBase)
+
+	acc := &Account{
+		ID:                   "gemini-antigravity-seat",
+		Type:                 AccountTypeGemini,
+		AccessToken:          "gemini-access",
+		RefreshToken:         "gemini-refresh",
+		OAuthProfileID:       geminiOAuthAntigravityProfileID,
+		AntigravitySource:    "browser_oauth",
+		AntigravityProjectID: "project-1",
+	}
+
+	var seenHosts []string
+	transport := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		seenHosts = append(seenHosts, r.URL.Host)
+		if r.URL.Path != "/v1internal:generateContent" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		switch r.URL.Host {
+		case "daily-cloudcode-pa.sandbox.googleapis.com", "daily-cloudcode-pa.googleapis.com":
+			return jsonResponse(http.StatusInternalServerError, `{"error":{"code":500,"message":"Unknown Error.","status":"UNKNOWN"}}`), nil
+		case "cloudcode-pa.googleapis.com":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"response":{"candidates":[{"content":{"parts":[{"text":"AG_HOST_FALLBACK_OK"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":4,"totalTokenCount":7}},"traceId":"trace-host-fallback-1"}`,
+				)),
+			}, nil
+		default:
+			t.Fatalf("unexpected host %s", r.URL.Host)
+		}
+		return nil, nil
+	})
+
+	h := &proxyHandler{
+		cfg:              config{},
+		transport:        transport,
+		refreshTransport: transport,
+		registry:         NewProviderRegistry(codex, claude, gemini),
+	}
+
+	body := []byte(`{"model":"gemini-3.1-pro","messages":[{"role":"user","content":"Reply with exactly AG_HOST_FALLBACK_OK."}]}`)
+	req := httptest.NewRequest(http.MethodPost, "http://pool.local/v1/chat/completions", strings.NewReader(string(body)))
+	shape := buildBufferedRequestShape(req, body, body)
+
+	routePlan, rewrittenBody, err := h.planRoute(AdmissionResult{Kind: AdmissionKindPoolUser, UserID: "u1"}, req, shape, body)
+	if err != nil {
+		t.Fatalf("planRoute: %v", err)
+	}
+
+	resp, _, _, err := h.tryOnce(context.Background(), req, rewrittenBody, routePlan, acc, "req-gemini-host-fallback")
+	if err != nil {
+		t.Fatalf("tryOnce: %v", err)
+	}
+	defer resp.Body.Close()
+
+	wantHosts := []string{
+		"daily-cloudcode-pa.sandbox.googleapis.com",
+		"daily-cloudcode-pa.googleapis.com",
+		"cloudcode-pa.googleapis.com",
+	}
+	if strings.Join(seenHosts, ",") != strings.Join(wantHosts, ",") {
+		t.Fatalf("seenHosts = %v, want %v", seenHosts, wantHosts)
+	}
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	text := string(raw)
+	for _, want := range []string{`"content":"AG_HOST_FALLBACK_OK"`, `"total_tokens":7`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("response missing %q: %s", want, text)
+		}
 	}
 }
 
@@ -470,7 +679,7 @@ func TestFinalizeProxyResponsePinsInitialConversationAndDecaysPenalty(t *testing
 	}
 }
 
-func TestCandidateSupportingPathSkipsGeminiSeatsWithoutAntigravityProjectID(t *testing.T) {
+func TestCandidateSupportingPathAllowsAntigravityFallbackProjectForGeminiSeats(t *testing.T) {
 	unsupported := &Account{
 		ID:       "gemini_seat_manual",
 		Type:     AccountTypeGemini,
@@ -478,10 +687,11 @@ func TestCandidateSupportingPathSkipsGeminiSeatsWithoutAntigravityProjectID(t *t
 		LastUsed: time.Now().UTC(),
 	}
 	supported := &Account{
-		ID:                   "gemini_seat_antigravity",
-		Type:                 AccountTypeGemini,
-		PlanType:             "gemini",
-		AntigravityProjectID: "psyched-sphere-vj8c5",
+		ID:                "gemini_seat_antigravity",
+		Type:              AccountTypeGemini,
+		PlanType:          "gemini",
+		OAuthProfileID:    geminiOAuthAntigravityProfileID,
+		AntigravitySource: "browser_oauth",
 	}
 	pool := newPoolState([]*Account{unsupported, supported}, false)
 	h := &proxyHandler{pool: pool}
@@ -492,12 +702,111 @@ func TestCandidateSupportingPathSkipsGeminiSeatsWithoutAntigravityProjectID(t *t
 		t.Fatalf("baseline candidate = %+v, want unsupported seat first", got)
 	}
 
-	got := h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, path)
+	got, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, path, "")
+	if err != nil {
+		t.Fatalf("candidate supporting path: %v", err)
+	}
 	if got == nil {
 		t.Fatal("expected supporting candidate")
 	}
 	if got.ID != supported.ID {
 		t.Fatalf("candidate = %s, want %s", got.ID, supported.ID)
+	}
+}
+
+func TestCandidateSupportingPathAllowsForcedDebugGeminiSeatForV1Internal(t *testing.T) {
+	blocked := &Account{
+		ID:                           "gemini_seat_blocked",
+		Type:                         AccountTypeGemini,
+		PlanType:                     "gemini",
+		OAuthProfileID:               geminiOAuthAntigravityProfileID,
+		AntigravitySource:            "browser_oauth",
+		AntigravityValidationBlocked: true,
+	}
+	healthy := &Account{
+		ID:                "gemini_seat_healthy",
+		Type:              AccountTypeGemini,
+		PlanType:          "gemini",
+		OAuthProfileID:    geminiOAuthAntigravityProfileID,
+		AntigravitySource: "browser_oauth",
+	}
+	pool := newPoolState([]*Account{healthy, blocked}, false)
+	h := &proxyHandler{pool: pool}
+	provider := &GeminiProvider{}
+
+	got, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, "/v1internal:generateContent", blocked.ID)
+	if err != nil {
+		t.Fatalf("candidate supporting path: %v", err)
+	}
+	if got == nil || got.ID != blocked.ID {
+		t.Fatalf("candidate = %+v, want %s", got, blocked.ID)
+	}
+}
+
+func TestCandidateSupportingPathAllowsForcedDebugGeminiSeatForAllowlistedBlockedV1BetaPath(t *testing.T) {
+	blocked := &Account{
+		ID:                           "gemini_seat_blocked",
+		Type:                         AccountTypeGemini,
+		PlanType:                     "gemini",
+		OAuthProfileID:               geminiOAuthAntigravityProfileID,
+		AntigravitySource:            "browser_oauth",
+		AntigravityValidationBlocked: true,
+		GeminiValidationReasonCode:   "INELIGIBLE_ACCOUNT",
+	}
+	pool := newPoolState([]*Account{blocked}, false)
+	h := &proxyHandler{pool: pool}
+	provider := &GeminiProvider{}
+
+	got, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, "/v1beta/models/gemini-2.5-flash:generateContent", blocked.ID)
+	if err != nil {
+		t.Fatalf("candidate supporting path: %v", err)
+	}
+	if got == nil || got.ID != blocked.ID {
+		t.Fatalf("candidate = %+v, want %s", got, blocked.ID)
+	}
+}
+
+func TestCandidateSupportingPathRejectsForcedDebugGeminiSeatForUnsupportedBlockedV1BetaPath(t *testing.T) {
+	blocked := &Account{
+		ID:                           "gemini_seat_blocked",
+		Type:                         AccountTypeGemini,
+		PlanType:                     "gemini",
+		OAuthProfileID:               geminiOAuthAntigravityProfileID,
+		AntigravitySource:            "browser_oauth",
+		AntigravityValidationBlocked: true,
+		GeminiValidationReasonCode:   "ACCOUNT_NEEDS_WORKSPACE",
+	}
+	pool := newPoolState([]*Account{blocked}, false)
+	h := &proxyHandler{pool: pool}
+	provider := &GeminiProvider{}
+
+	got, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, "/v1beta/models/gemini-2.5-flash:generateContent", blocked.ID)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got != nil {
+		t.Fatalf("candidate = %+v, want nil", got)
+	}
+}
+
+func TestSkipPreemptiveRefreshForAllowlistedValidationBlockedGeminiSeat(t *testing.T) {
+	if !skipPreemptiveRefreshForAccount(&Account{
+		Type:                         AccountTypeGemini,
+		OAuthProfileID:               geminiOAuthAntigravityProfileID,
+		AntigravitySource:            "browser_oauth",
+		AntigravityValidationBlocked: true,
+		GeminiValidationReasonCode:   "UNSUPPORTED_LOCATION",
+	}) {
+		t.Fatal("expected allowlisted validation-blocked Gemini seat to skip preemptive refresh")
+	}
+	if skipPreemptiveRefreshForAccount(&Account{
+		Type:                         AccountTypeGemini,
+		OAuthProfileID:               geminiOAuthAntigravityProfileID,
+		AntigravitySource:            "browser_oauth",
+		AntigravityValidationBlocked: true,
+		GeminiValidationReasonCode:   "ACCOUNT_NEEDS_WORKSPACE",
+	}) {
+		t.Fatal("expected non-allowlisted validation-blocked Gemini seat to keep normal refresh policy")
 	}
 }
 

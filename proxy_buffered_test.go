@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -83,6 +84,372 @@ func waitForBufferedProxySuccessAccountState(t *testing.T, acc *Account, reason 
 	snapshot := snapshotProxyTestAccount(acc)
 	t.Fatalf("expected %s; LastUsed=%v", reason, snapshot.LastUsed)
 	return proxyTestAccountSnapshot{}
+}
+
+func TestProxyBufferedAnthropicMessagesGeminiToolLoopReinjectsThoughtSignature(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+	t.Cleanup(clearGeminiThoughtSignatureCache)
+	clearGeminiThoughtSignatureCache()
+	checkedAt := time.Now().UTC().Add(-5 * time.Minute)
+
+	var upstreamBodies []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer seat-access" {
+			t.Fatalf("authorization=%q", got)
+		}
+		if got := r.URL.Path; got != "/v1internal:streamGenerateContent" {
+			t.Fatalf("unexpected path %q", r.URL.Path)
+		}
+		if got := r.Header.Get("User-Agent"); got != antigravityCodeAssistUA {
+			t.Fatalf("user-agent=%q", got)
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		upstreamBodies = append(upstreamBodies, string(body))
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		switch len(upstreamBodies) {
+		case 1:
+			if !strings.Contains(upstreamBodies[0], `"project":"project-1"`) {
+				t.Fatalf("first upstream body missing project: %s", upstreamBodies[0])
+			}
+			if !strings.Contains(upstreamBodies[0], `"functionDeclarations"`) {
+				t.Fatalf("first upstream body missing tools: %s", upstreamBodies[0])
+			}
+			_, _ = io.WriteString(w,
+				"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"bash\",\"args\":{\"command\":\"pwd\"},\"id\":\"toolu_buffered_1\"},\"thoughtSignature\":\"sig-buffered-1\"}]}}]}}\n\n"+
+					"data: {\"response\":{\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":6}}}\n\n",
+			)
+		case 2:
+			if !strings.Contains(upstreamBodies[1], `"thoughtSignature":"sig-buffered-1"`) {
+				t.Fatalf("second upstream body missing thoughtSignature reinjection: %s", upstreamBodies[1])
+			}
+			if !strings.Contains(upstreamBodies[1], `"result":"/home/lap/projects/codex-pool-orchestrator"`) {
+				t.Fatalf("second upstream body missing tool result: %s", upstreamBodies[1])
+			}
+			_, _ = io.WriteString(w,
+				"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"TOOL_BUFFERED_OK\"}]}}]}}\n\n"+
+					"data: {\"response\":{\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":7,\"candidatesTokenCount\":4}}}\n\n",
+			)
+		default:
+			t.Fatalf("unexpected upstream call #%d", len(upstreamBodies))
+		}
+	}))
+	defer upstream.Close()
+
+	tmp := t.TempDir()
+	accountFile := filepath.Join(tmp, "gemini-buffered.json")
+	if err := os.WriteFile(accountFile, []byte(`{
+		"access_token":"seat-access",
+		"refresh_token":"seat-refresh",
+		"plan_type":"gemini",
+		"auth_mode":"oauth",
+		"oauth_profile_id":"antigravity_public",
+		"operator_source":"antigravity_import",
+		"antigravity_source":"browser_oauth"
+	}`), 0o600); err != nil {
+		t.Fatalf("write gemini account file: %v", err)
+	}
+
+	acc := &Account{
+		ID:                       "gemini-seat-buffered",
+		Type:                     AccountTypeGemini,
+		File:                     accountFile,
+		PlanType:                 "gemini",
+		AuthMode:                 accountAuthModeOAuth,
+		AccessToken:              "seat-access",
+		RefreshToken:             "seat-refresh",
+		OAuthProfileID:           geminiOAuthAntigravityProfileID,
+		OperatorSource:           geminiOperatorSourceAntigravityImport,
+		AntigravitySource:        "browser_oauth",
+		AntigravityProjectID:     "project-1",
+		GeminiProviderCheckedAt:  checkedAt,
+		GeminiProviderTruthReady: true,
+		GeminiProviderTruthState: geminiProviderTruthStateReady,
+		HealthStatus:             "healthy",
+	}
+
+	h := newBufferedCodexProxyHandlerForTest(t, upstream.URL, []*Account{acc})
+	h.cfg.disableRefresh = true
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	firstReqBody := []byte(`{
+		"model":"gemini-3.1-pro-high",
+		"max_tokens":128,
+		"messages":[{"role":"user","content":"Use the bash tool exactly once with command pwd. After the tool result, reply with exactly TOOL_BUFFERED_OK."}],
+		"tools":[{"name":"bash","description":"run bash","input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}]
+	}`)
+	firstReq, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/messages", bytes.NewReader(firstReqBody))
+	if err != nil {
+		t.Fatalf("new first request: %v", err)
+	}
+	firstReq.Header.Set("Authorization", "Bearer "+generateClaudePoolToken(getPoolJWTSecret(), "buffered-gemini-tool-user"))
+	firstReq.Header.Set("Content-Type", "application/json")
+
+	firstResp, err := http.DefaultClient.Do(firstReq)
+	if err != nil {
+		t.Fatalf("first proxy request: %v", err)
+	}
+	defer firstResp.Body.Close()
+	if firstResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(firstResp.Body)
+		t.Fatalf("first status=%d body=%s", firstResp.StatusCode, string(body))
+	}
+
+	var first anthropicMessageResponse
+	if err := json.NewDecoder(firstResp.Body).Decode(&first); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	if first.StopReason != "tool_use" {
+		t.Fatalf("first stop_reason=%q", first.StopReason)
+	}
+	if len(first.Content) != 1 || first.Content[0].Type != "tool_use" {
+		t.Fatalf("first content=%+v", first.Content)
+	}
+
+	assistantContent, err := json.Marshal(first.Content)
+	if err != nil {
+		t.Fatalf("marshal assistant content: %v", err)
+	}
+	secondReqBody := []byte(fmt.Sprintf(`{
+		"model":"gemini-3.1-pro-high",
+		"max_tokens":128,
+		"messages":[
+			{"role":"user","content":"Use the bash tool exactly once with command pwd. After the tool result, reply with exactly TOOL_BUFFERED_OK."},
+			{"role":"assistant","content":%s},
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":%q,"content":"/home/lap/projects/codex-pool-orchestrator"}]}
+		],
+		"tools":[{"name":"bash","description":"run bash","input_schema":{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}}]
+	}`, string(assistantContent), first.Content[0].ID))
+	secondReq, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/messages", bytes.NewReader(secondReqBody))
+	if err != nil {
+		t.Fatalf("new second request: %v", err)
+	}
+	secondReq.Header.Set("Authorization", "Bearer "+generateClaudePoolToken(getPoolJWTSecret(), "buffered-gemini-tool-user"))
+	secondReq.Header.Set("Content-Type", "application/json")
+
+	secondResp, err := http.DefaultClient.Do(secondReq)
+	if err != nil {
+		t.Fatalf("second proxy request: %v", err)
+	}
+	defer secondResp.Body.Close()
+	if secondResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(secondResp.Body)
+		t.Fatalf("second status=%d body=%s", secondResp.StatusCode, string(body))
+	}
+
+	var second anthropicMessageResponse
+	if err := json.NewDecoder(secondResp.Body).Decode(&second); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	if second.StopReason != "end_turn" {
+		t.Fatalf("second stop_reason=%q", second.StopReason)
+	}
+	if len(second.Content) != 1 || second.Content[0].Type != "text" || second.Content[0].Text != "TOOL_BUFFERED_OK" {
+		t.Fatalf("second content=%+v", second.Content)
+	}
+	if len(upstreamBodies) != 2 {
+		t.Fatalf("upstreamBodies=%d", len(upstreamBodies))
+	}
+
+	accState := waitForBufferedProxySuccessAccountState(t, acc, "Gemini seat to record buffered tool-loop usage")
+	if accState.HealthStatus != "healthy" {
+		t.Fatalf("health_status=%q", accState.HealthStatus)
+	}
+}
+
+func TestProxyBufferedAnthropicMessagesGemini429PinnedConversationRetriesNextSeat(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+	checkedAt := time.Now().UTC().Add(-5 * time.Minute)
+
+	callCounts := map[string]int{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		callCounts[auth]++
+
+		if got := r.URL.Path; got != "/v1internal:streamGenerateContent" {
+			t.Fatalf("unexpected path %q", got)
+		}
+		if got := r.Header.Get("User-Agent"); got != antigravityCodeAssistUA {
+			t.Fatalf("user-agent=%q", got)
+		}
+
+		switch auth {
+		case "Bearer seat-one":
+			if callCounts[auth] == 1 {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w,
+					"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"FIRST_OK\"}]}}]}}\n\n"+
+						"data: {\"response\":{\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":3}}}\n\n",
+				)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `[{"error":{"code":429,"message":"quota exhausted","status":"RESOURCE_EXHAUSTED"}}]`)
+		case "Bearer seat-two":
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w,
+				"data: {\"response\":{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"SECOND_OK\"}]}}]}}\n\n"+
+					"data: {\"response\":{\"candidates\":[{\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":6,\"candidatesTokenCount\":4}}}\n\n",
+			)
+		default:
+			t.Fatalf("unexpected auth header %q", auth)
+		}
+	}))
+	defer upstream.Close()
+	originalQuotaBases := append([]string(nil), antigravityGeminiQuotaBaseURLs...)
+	antigravityGeminiQuotaBaseURLs = []string{upstream.URL}
+	t.Cleanup(func() {
+		antigravityGeminiQuotaBaseURLs = originalQuotaBases
+	})
+
+	tmp := t.TempDir()
+	accountOneFile := filepath.Join(tmp, "gemini-seat-one.json")
+	if err := os.WriteFile(accountOneFile, []byte(`{
+		"access_token":"seat-one",
+		"refresh_token":"seat-one-refresh",
+		"plan_type":"gemini",
+		"auth_mode":"oauth",
+		"oauth_profile_id":"antigravity_public",
+		"operator_source":"antigravity_import",
+		"antigravity_source":"browser_oauth"
+	}`), 0o600); err != nil {
+		t.Fatalf("write first gemini account file: %v", err)
+	}
+	accountTwoFile := filepath.Join(tmp, "gemini-seat-two.json")
+	if err := os.WriteFile(accountTwoFile, []byte(`{
+		"access_token":"seat-two",
+		"refresh_token":"seat-two-refresh",
+		"plan_type":"gemini",
+		"auth_mode":"oauth",
+		"oauth_profile_id":"antigravity_public",
+		"operator_source":"antigravity_import",
+		"antigravity_source":"browser_oauth"
+	}`), 0o600); err != nil {
+		t.Fatalf("write second gemini account file: %v", err)
+	}
+
+	seatOne := &Account{
+		ID:                       "gemini-seat-one",
+		Type:                     AccountTypeGemini,
+		File:                     accountOneFile,
+		PlanType:                 "gemini",
+		AuthMode:                 accountAuthModeOAuth,
+		AccessToken:              "seat-one",
+		RefreshToken:             "seat-one-refresh",
+		OAuthProfileID:           geminiOAuthAntigravityProfileID,
+		OperatorSource:           geminiOperatorSourceAntigravityImport,
+		AntigravitySource:        "browser_oauth",
+		AntigravityProjectID:     "project-1",
+		GeminiProviderCheckedAt:  checkedAt,
+		GeminiProviderTruthReady: true,
+		GeminiProviderTruthState: geminiProviderTruthStateReady,
+		HealthStatus:             "healthy",
+	}
+	seatTwo := &Account{
+		ID:                       "gemini-seat-two",
+		Type:                     AccountTypeGemini,
+		File:                     accountTwoFile,
+		PlanType:                 "gemini",
+		AuthMode:                 accountAuthModeOAuth,
+		AccessToken:              "seat-two",
+		RefreshToken:             "seat-two-refresh",
+		OAuthProfileID:           geminiOAuthAntigravityProfileID,
+		OperatorSource:           geminiOperatorSourceAntigravityImport,
+		AntigravitySource:        "browser_oauth",
+		AntigravityProjectID:     "project-2",
+		GeminiProviderCheckedAt:  checkedAt,
+		GeminiProviderTruthReady: true,
+		GeminiProviderTruthState: geminiProviderTruthStateReady,
+		HealthStatus:             "healthy",
+	}
+
+	h := newBufferedCodexProxyHandlerForTest(t, upstream.URL, []*Account{seatOne, seatTwo})
+	h.cfg.disableRefresh = true
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	reqBody := []byte(`{
+		"model":"gemini-3.1-pro-high",
+		"session_id":"conv-gemini-429",
+		"max_tokens":64,
+		"messages":[{"role":"user","content":"Reply with a single marker."}]
+	}`)
+
+	firstReq, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/messages", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("new first request: %v", err)
+	}
+	firstReq.Header.Set("Authorization", "Bearer "+generateClaudePoolToken(getPoolJWTSecret(), "buffered-gemini-429-user"))
+	firstReq.Header.Set("Content-Type", "application/json")
+
+	firstResp, err := http.DefaultClient.Do(firstReq)
+	if err != nil {
+		t.Fatalf("first proxy request: %v", err)
+	}
+	defer firstResp.Body.Close()
+	if firstResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(firstResp.Body)
+		t.Fatalf("first status=%d body=%s", firstResp.StatusCode, string(body))
+	}
+
+	var first anthropicMessageResponse
+	if err := json.NewDecoder(firstResp.Body).Decode(&first); err != nil {
+		t.Fatalf("decode first response: %v", err)
+	}
+	if len(first.Content) != 1 || first.Content[0].Type != "text" || first.Content[0].Text != "FIRST_OK" {
+		t.Fatalf("first content=%+v", first.Content)
+	}
+	if got := h.pool.convPin["conv-gemini-429"]; got != seatOne.ID {
+		t.Fatalf("initial pin=%q want %q", got, seatOne.ID)
+	}
+
+	secondReq, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/messages", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("new second request: %v", err)
+	}
+	secondReq.Header.Set("Authorization", "Bearer "+generateClaudePoolToken(getPoolJWTSecret(), "buffered-gemini-429-user"))
+	secondReq.Header.Set("Content-Type", "application/json")
+
+	secondResp, err := http.DefaultClient.Do(secondReq)
+	if err != nil {
+		t.Fatalf("second proxy request: %v", err)
+	}
+	defer secondResp.Body.Close()
+	if secondResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(secondResp.Body)
+		t.Fatalf("second status=%d body=%s", secondResp.StatusCode, string(body))
+	}
+
+	var second anthropicMessageResponse
+	if err := json.NewDecoder(secondResp.Body).Decode(&second); err != nil {
+		t.Fatalf("decode second response: %v", err)
+	}
+	if len(second.Content) != 1 || second.Content[0].Type != "text" || second.Content[0].Text != "SECOND_OK" {
+		t.Fatalf("second content=%+v", second.Content)
+	}
+
+	seatOneState := snapshotProxyTestAccount(seatOne)
+	if seatOneState.RateLimitUntil.IsZero() {
+		t.Fatal("expected first Gemini seat to enter cooldown after 429")
+	}
+	seatTwoState := waitForBufferedProxySuccessAccountState(t, seatTwo, "second Gemini seat to serve retry after 429")
+	if seatTwoState.HealthStatus != "healthy" {
+		t.Fatalf("seatTwo health_status=%q", seatTwoState.HealthStatus)
+	}
+	if got := h.pool.convPin["conv-gemini-429"]; got != seatTwo.ID {
+		t.Fatalf("final pin=%q want %q", got, seatTwo.ID)
+	}
+	if callCounts["Bearer seat-one"] != 2 {
+		t.Fatalf("seat-one calls=%d", callCounts["Bearer seat-one"])
+	}
+	if callCounts["Bearer seat-two"] != 1 {
+		t.Fatalf("seat-two calls=%d", callCounts["Bearer seat-two"])
+	}
 }
 
 func TestProxyBufferedManagedAPI429RetriesNextSeatAfterQuotaFallback(t *testing.T) {

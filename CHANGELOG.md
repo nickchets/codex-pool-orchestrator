@@ -9,6 +9,26 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.8.0] - 2026-03-27
+
+### Added
+- Browser-first Antigravity Gemini onboarding on `/` and `/status`, including provider-truth persistence for project identity, subscription tier, protected models, typed quota snapshots, and warm-seat state.
+- OpenCode export and guided setup surfaces (`/config/opencode/<token>` and `/setup/opencode/<token>`) plus Anthropic-compatible Gemini adapters for `/v1/messages` and `/v1/chat/completions`.
+- Loopback-only Gemini operator diagnostics and reset tooling: seat smoke, `reset-bundle`, `reset-delete`, and `reset-rollback` with manifest snapshots and rollback artifacts.
+- Provider-scoped request tracing for OAuth exchange, token refresh, health probe, facade routing, and metadata-cache events across Codex, Claude, and Gemini lanes.
+
+### Changed
+- Gemini routing is now sticky-until-pressure and gates on provider truth, warm-seat state, quota pressure, project availability, and observed operational failure before rotating to another seat.
+- `/status`, `/status?format=json`, the landing page, Gemini CLI setup, and OpenCode export now project the same `provider_truth`, `operational_truth`, `routing.state`, `gemini_pool`, `provider_quota_summary`, and compatibility-lane contract.
+- Gemini CLI setup now keeps clients on the pool root URL in external API-key mode, while legacy local/manual Gemini import is retired from the operator surface in favor of browser-first Antigravity auth.
+- Codex route readiness, models-cache fetches, OAuth exchange, API-key probes, and refresh flows now emit trace data and preserve the exact `>= 90%` quota cutoff with sticky seat reuse.
+
+### Fixed
+- Restarted Gemini seats now refresh stale provider truth and empty-quota snapshots more truthfully instead of collapsing eligible seats into stale-routing dead ends.
+- OpenCode exports no longer let blocked `missing_project_id` seats steal `activeIndex`; disabled seats stay visible, but they do not become the active account.
+- Gemini reset rollback now validates operator-managed paths before delete/restore, closing the path-traversal gap in the reset tooling.
+- Restricted Antigravity seats can now be diagnosed and, when appropriate, exercised through the fallback project without flattening provider restrictions into generic operational failure.
+
 ## [0.7.0] - 2026-03-25
 
 ### Added

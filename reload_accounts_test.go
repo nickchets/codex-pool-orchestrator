@@ -117,14 +117,32 @@ func TestReloadAccountsKeepsGeminiPersistedStateWhilePreservingRuntimeUsage(t *t
 	lastHealthyAt := time.Date(2026, 3, 24, 8, 30, 0, 0, time.UTC)
 	rateLimitUntil := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
 	auth := map[string]any{
-		"access_token":      "new-access",
-		"refresh_token":     "new-refresh",
-		"oauth_profile_id":  "gcloud",
-		"rate_limit_until":  rateLimitUntil.Format(time.RFC3339),
-		"health_status":     "rate_limited",
-		"health_error":      "quota",
-		"health_checked_at": healthCheckedAt.Format(time.RFC3339),
-		"last_healthy_at":   lastHealthyAt.Format(time.RFC3339),
+		"access_token":                "new-access",
+		"refresh_token":               "new-refresh",
+		"oauth_profile_id":            "gcloud",
+		"rate_limit_until":            rateLimitUntil.Format(time.RFC3339),
+		"health_status":               "rate_limited",
+		"health_error":                "quota",
+		"health_checked_at":           healthCheckedAt.Format(time.RFC3339),
+		"last_healthy_at":             lastHealthyAt.Format(time.RFC3339),
+		"antigravity_project_id":      "project-1",
+		"gemini_provider_checked_at":  "2026-03-24T10:05:00Z",
+		"gemini_subscription_tier_id": "standard-tier",
+		"gemini_protected_models":     []string{"gemini-3.1-pro-high"},
+		"gemini_quota_updated_at":     "2026-03-24T10:06:00Z",
+		"gemini_quota_models": []map[string]any{{
+			"name":              "gemini-3.1-pro-high",
+			"percentage":        81,
+			"reset_time":        "2026-03-24T16:00:00Z",
+			"thinking_budget":   24576,
+			"max_output_tokens": 65535,
+			"supports_thinking": true,
+			"supports_images":   true,
+			"display_name":      "Gemini 3.1 Pro High",
+		}},
+		"gemini_model_forwarding_rules": map[string]string{
+			"gemini-1.5-pro": "gemini-2.5-pro",
+		},
 	}
 	buf, err := json.MarshalIndent(auth, "", "  ")
 	if err != nil {
@@ -199,6 +217,27 @@ func TestReloadAccountsKeepsGeminiPersistedStateWhilePreservingRuntimeUsage(t *t
 	}
 	if !reloaded.RateLimitUntil.Equal(rateLimitUntil) {
 		t.Fatalf("rate_limit_until=%v", reloaded.RateLimitUntil)
+	}
+	if reloaded.AntigravityProjectID != "project-1" {
+		t.Fatalf("antigravity_project_id=%q", reloaded.AntigravityProjectID)
+	}
+	if reloaded.GeminiProviderTruthState != geminiProviderTruthStateReady {
+		t.Fatalf("provider_truth_state=%q", reloaded.GeminiProviderTruthState)
+	}
+	if !reloaded.GeminiProviderTruthReady {
+		t.Fatal("expected provider truth to stay ready across reload")
+	}
+	if len(reloaded.GeminiProtectedModels) != 1 || reloaded.GeminiProtectedModels[0] != "gemini-3.1-pro-high" {
+		t.Fatalf("gemini_protected_models=%#v", reloaded.GeminiProtectedModels)
+	}
+	if got := reloaded.GeminiQuotaUpdatedAt.UTC().Format(time.RFC3339); got != "2026-03-24T10:06:00Z" {
+		t.Fatalf("gemini_quota_updated_at=%q", got)
+	}
+	if len(reloaded.GeminiQuotaModels) != 1 || reloaded.GeminiQuotaModels[0].Name != "gemini-3.1-pro-high" {
+		t.Fatalf("gemini_quota_models=%#v", reloaded.GeminiQuotaModels)
+	}
+	if got := reloaded.GeminiModelForwardingRules["gemini-1.5-pro"]; got != "gemini-2.5-pro" {
+		t.Fatalf("gemini_model_forwarding_rules=%#v", reloaded.GeminiModelForwardingRules)
 	}
 	if reloaded.Usage.PrimaryUsedPercent != 0.12 || reloaded.Usage.SecondaryUsedPercent != 0.34 {
 		t.Fatalf("usage lost across reload: %+v", reloaded.Usage)
@@ -319,5 +358,68 @@ func TestReloadAccountsKeepsGeminiPersistedProfileAndHealthState(t *testing.T) {
 	}
 	if reloaded.Totals.TotalBillableTokens != 444 || reloaded.Totals.RequestCount != 5 {
 		t.Fatalf("totals lost across reload: %+v", reloaded.Totals)
+	}
+}
+
+func TestReloadAccountsNormalizesAllowlistedGeminiRestrictedHealthStatus(t *testing.T) {
+	tmp := t.TempDir()
+	poolDir := filepath.Join(tmp, "gemini")
+	if err := os.MkdirAll(poolDir, 0o755); err != nil {
+		t.Fatalf("mkdir pool dir: %v", err)
+	}
+
+	authPath := filepath.Join(poolDir, "seat-restricted.json")
+	auth := map[string]any{
+		"access_token":                   "access-token",
+		"refresh_token":                  "refresh-token",
+		"oauth_profile_id":               geminiOAuthAntigravityProfileID,
+		"operator_source":                geminiOperatorSourceAntigravityImport,
+		"antigravity_source":             "browser_oauth",
+		"antigravity_validation_blocked": true,
+		"gemini_validation_reason_code":  "UNSUPPORTED_LOCATION",
+		"gemini_validation_message":      "region blocked",
+		"gemini_provider_checked_at":     "2026-03-27T10:00:00Z",
+		"health_status":                  "validation_blocked",
+		"health_error":                   "managed gemini seat provider truth not ready: validation_blocked: region blocked",
+	}
+	buf, err := json.MarshalIndent(auth, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal auth: %v", err)
+	}
+	if err := os.WriteFile(authPath, buf, 0o600); err != nil {
+		t.Fatalf("write auth: %v", err)
+	}
+
+	handler := &proxyHandler{
+		cfg: config{poolDir: tmp},
+		pool: newPoolState([]*Account{{
+			ID:           "seat-restricted",
+			Type:         AccountTypeGemini,
+			File:         authPath,
+			AccessToken:  "old-access",
+			RefreshToken: "old-refresh",
+		}}, false),
+		registry: &ProviderRegistry{
+			byType: map[AccountType]Provider{
+				AccountTypeGemini: &GeminiProvider{},
+			},
+		},
+	}
+
+	handler.reloadAccounts()
+
+	if handler.pool.count() != 1 {
+		t.Fatalf("reloaded accounts=%d", handler.pool.count())
+	}
+
+	reloaded := handler.pool.allAccounts()[0]
+	if reloaded.GeminiProviderTruthState != geminiProviderTruthStateRestricted {
+		t.Fatalf("provider truth state = %q", reloaded.GeminiProviderTruthState)
+	}
+	if reloaded.HealthStatus != "restricted" {
+		t.Fatalf("health status = %q", reloaded.HealthStatus)
+	}
+	if reloaded.HealthError != "" {
+		t.Fatalf("health error = %q", reloaded.HealthError)
 	}
 }

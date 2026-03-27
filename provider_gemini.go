@@ -28,6 +28,7 @@ const (
 	geminiOAuthAntigravityProfileID  = "antigravity_public"
 	geminiOAuthAntigravityClientID   = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 	geminiOAuthAntigravitySecretVar  = "ANTIGRAVITY_GEMINI_OAUTH_CLIENT_SECRET"
+	antigravityGeminiFallbackProject = "bamboo-precept-lgxtn"
 )
 
 type geminiOAuthClientProfile struct {
@@ -98,17 +99,122 @@ func (p *GeminiProvider) Type() AccountType {
 	return AccountTypeGemini
 }
 
+func isAntigravityGeminiSeat(acc *Account) bool {
+	if acc == nil || acc.Type != AccountTypeGemini {
+		return false
+	}
+	if strings.TrimSpace(acc.AntigravitySource) != "" {
+		return true
+	}
+	if strings.TrimSpace(acc.OAuthProfileID) == geminiOAuthAntigravityProfileID {
+		return true
+	}
+	return storedGeminiOperatorSource(acc.OperatorSource, acc.OAuthProfileID, acc.Type) == geminiOperatorSourceAntigravityImport
+}
+
+func canRouteGeminiValidationBlockedReasonCode(reason string) bool {
+	switch strings.TrimSpace(reason) {
+	case "UNSUPPORTED_LOCATION", "INELIGIBLE_ACCOUNT":
+		return true
+	default:
+		return false
+	}
+}
+
+func isAntigravityGeminiSnapshot(snapshot accountSnapshot) bool {
+	if snapshot.Type != AccountTypeGemini {
+		return false
+	}
+	if strings.TrimSpace(snapshot.OAuthProfileID) == geminiOAuthAntigravityProfileID {
+		return true
+	}
+	return normalizeGeminiOperatorSource(snapshot.OperatorSource, snapshot.OAuthProfileID, snapshot.Type) == geminiOperatorSourceAntigravityImport
+}
+
+func canRouteValidationBlockedAntigravityGemini(acc *Account) bool {
+	if acc == nil || acc.Type != AccountTypeGemini {
+		return false
+	}
+	if !acc.AntigravityValidationBlocked || acc.AntigravityProxyDisabled || acc.AntigravityQuotaForbidden {
+		return false
+	}
+	if !isAntigravityGeminiSeat(acc) {
+		return false
+	}
+	return canRouteGeminiValidationBlockedReasonCode(acc.GeminiValidationReasonCode)
+}
+
+func canRouteValidationBlockedAntigravityGeminiSnapshot(snapshot accountSnapshot) bool {
+	if snapshot.Type != AccountTypeGemini {
+		return false
+	}
+	if !snapshot.AntigravityValidationBlocked || snapshot.AntigravityProxyDisabled || snapshot.AntigravityQuotaForbidden {
+		return false
+	}
+	if !isAntigravityGeminiSnapshot(snapshot) {
+		return false
+	}
+	return canRouteGeminiValidationBlockedReasonCode(snapshot.GeminiValidationReasonCode)
+}
+
+func shouldNormalizeLoadedGeminiHealthStatus(status string) bool {
+	switch strings.TrimSpace(status) {
+	case "", "unknown", "healthy", "restricted", "validation_blocked", "quota_forbidden", "proxy_disabled", "missing_project_id", "project_only_unverified", "auth_only", "imported":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeLoadedGeminiHealthState(acc *Account) {
+	if acc == nil || acc.Type != AccountTypeGemini {
+		return
+	}
+	if acc.Disabled || acc.Dead || !acc.RateLimitUntil.IsZero() {
+		return
+	}
+	if !shouldNormalizeLoadedGeminiHealthStatus(acc.HealthStatus) {
+		return
+	}
+	status, healthErr := successfulGeminiHealthStateLocked(acc)
+	if status == "" {
+		status = firstNonEmpty(strings.TrimSpace(acc.HealthStatus), "unknown")
+	}
+	acc.HealthStatus = status
+	acc.HealthError = healthErr
+}
+
+func effectiveGeminiCodeAssistProjectID(acc *Account) string {
+	if acc == nil || acc.Type != AccountTypeGemini {
+		return ""
+	}
+	if projectID := strings.TrimSpace(acc.AntigravityProjectID); projectID != "" {
+		return projectID
+	}
+	if !isAntigravityGeminiSeat(acc) {
+		return ""
+	}
+	if acc.AntigravityProxyDisabled || acc.AntigravityQuotaForbidden {
+		return ""
+	}
+	if acc.AntigravityValidationBlocked && !canRouteValidationBlockedAntigravityGemini(acc) {
+		return ""
+	}
+	return antigravityGeminiFallbackProject
+}
+
 func (p *GeminiProvider) SupportsAccountPath(path string, acc *Account) bool {
 	if !strings.HasPrefix(path, geminiAPIModelPrefix) {
 		return true
 	}
-	if acc == nil {
-		return false
-	}
-	return strings.TrimSpace(acc.AntigravityProjectID) != ""
+	return effectiveGeminiCodeAssistProjectID(acc) != ""
 }
 
 func (p *GeminiProvider) LoadAccount(name, path string, data []byte) (*Account, error) {
+	var root map[string]any
+	if err := json.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
 	var gj GeminiAuthJSON
 	if err := json.Unmarshal(data, &gj); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
@@ -130,6 +236,10 @@ func (p *GeminiProvider) LoadAccount(name, path string, data []byte) (*Account, 
 	}
 	if operatorSource == "" && strings.TrimSpace(gj.OperatorEmail) != "" {
 		operatorSource = geminiOperatorSourceManagedOAuth
+	}
+	protectedModels := normalizeStringSlice(gj.GeminiProtectedModels)
+	if len(protectedModels) == 0 {
+		protectedModels = normalizeStringSliceFromAny(root["protected_models"])
 	}
 	acc := &Account{
 		OAuthProfileID:               oauthProfileID,
@@ -161,8 +271,35 @@ func (p *GeminiProvider) LoadAccount(name, path string, data []byte) (*Account, 
 		GeminiValidationReasonCode:   strings.TrimSpace(gj.GeminiValidationReasonCode),
 		GeminiValidationMessage:      strings.TrimSpace(gj.GeminiValidationMessage),
 		GeminiValidationURL:          strings.TrimSpace(gj.GeminiValidationURL),
+		GeminiProviderTruthReady:     gj.GeminiProviderTruthReady,
+		GeminiProviderTruthState:     strings.TrimSpace(gj.GeminiProviderTruthState),
+		GeminiProviderTruthReason:    strings.TrimSpace(gj.GeminiProviderTruthReason),
+		GeminiOperationalState:       strings.TrimSpace(gj.GeminiOperationalState),
+		GeminiOperationalReason:      strings.TrimSpace(gj.GeminiOperationalReason),
+		GeminiOperationalSource:      strings.TrimSpace(gj.GeminiOperationalSource),
+		GeminiProtectedModels:        protectedModels,
+		GeminiQuotaModels:            cloneGeminiModelQuotaSnapshots(gj.GeminiQuotaModels),
+		GeminiModelForwardingRules:   cloneStringMap(gj.GeminiModelForwardingRules),
 	}
 	acc.AntigravityQuotaForbidden, acc.AntigravityQuotaForbiddenReason = antigravityQuotaDisposition(acc.AntigravityQuota)
+	if gj.GeminiQuotaUpdatedAt != nil {
+		acc.GeminiQuotaUpdatedAt = gj.GeminiQuotaUpdatedAt.UTC()
+	}
+	if len(acc.GeminiQuotaModels) == 0 || acc.GeminiQuotaUpdatedAt.IsZero() || len(acc.GeminiModelForwardingRules) == 0 {
+		quotaModels, quotaUpdatedAt, modelForwardingRules, subscriptionTier := decodeGeminiQuotaSnapshot(acc.AntigravityQuota)
+		if len(acc.GeminiQuotaModels) == 0 {
+			acc.GeminiQuotaModels = quotaModels
+		}
+		if acc.GeminiQuotaUpdatedAt.IsZero() {
+			acc.GeminiQuotaUpdatedAt = quotaUpdatedAt
+		}
+		if len(acc.GeminiModelForwardingRules) == 0 {
+			acc.GeminiModelForwardingRules = modelForwardingRules
+		}
+		if acc.GeminiSubscriptionTierID == "" && acc.GeminiSubscriptionTierName == "" && subscriptionTier != "" {
+			acc.GeminiSubscriptionTierName = subscriptionTier
+		}
+	}
 	// expiry_date is Unix timestamp in milliseconds
 	if gj.ExpiryDate > 0 {
 		acc.ExpiresAt = time.UnixMilli(gj.ExpiryDate)
@@ -190,8 +327,16 @@ func (p *GeminiProvider) LoadAccount(name, path string, data []byte) (*Account, 
 	if gj.GeminiProviderCheckedAt != nil {
 		acc.GeminiProviderCheckedAt = gj.GeminiProviderCheckedAt.UTC()
 	}
+	if gj.GeminiOperationalCheckedAt != nil {
+		acc.GeminiOperationalCheckedAt = gj.GeminiOperationalCheckedAt.UTC()
+	}
+	if gj.GeminiOperationalLastSuccessAt != nil {
+		acc.GeminiOperationalLastSuccessAt = gj.GeminiOperationalLastSuccessAt.UTC()
+	}
 	acc.HealthStatus = strings.TrimSpace(gj.HealthStatus)
 	acc.HealthError = strings.TrimSpace(gj.HealthError)
+	syncGeminiProviderTruthState(acc)
+	normalizeLoadedGeminiHealthState(acc)
 	return acc, nil
 }
 
@@ -340,6 +485,8 @@ func refreshGeminiTokenWithClient(ctx context.Context, refreshTok string, profil
 }
 
 func (p *GeminiProvider) RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error {
+	trace := requestTraceFromContext(ctx)
+
 	acc.mu.Lock()
 	refreshTok := acc.RefreshToken
 	operatorSource := acc.OperatorSource
@@ -349,7 +496,9 @@ func (p *GeminiProvider) RefreshToken(ctx context.Context, acc *Account, transpo
 	acc.mu.Unlock()
 
 	if refreshTok == "" {
-		return errors.New("no refresh token")
+		err := errors.New("no refresh token")
+		trace.noteTokenRefresh(AccountTypeGemini, acc, "", "fail", 0, err)
+		return err
 	}
 
 	var (
@@ -362,7 +511,9 @@ func (p *GeminiProvider) RefreshToken(ctx context.Context, acc *Account, transpo
 		}
 		lastFallbackable error
 	)
-	for _, profile := range geminiOAuthRefreshProfiles(operatorSource, explicitProfileID, explicitClientID, explicitClientSecret) {
+	profiles := geminiOAuthRefreshProfiles(operatorSource, explicitProfileID, explicitClientID, explicitClientSecret)
+	for idx, profile := range profiles {
+		attemptStartedAt := time.Now()
 		nextPayload, fallbackable, err := refreshGeminiTokenWithClient(ctx, refreshTok, profile, transport)
 		if err == nil {
 			payload = nextPayload
@@ -387,18 +538,32 @@ func (p *GeminiProvider) RefreshToken(ctx context.Context, acc *Account, transpo
 			acc.LastRefresh = time.Now().UTC()
 			setAccountDeadStateLocked(acc, false, acc.LastRefresh)
 			acc.mu.Unlock()
-			return saveAccount(acc)
+			if err := saveAccount(acc); err != nil {
+				trace.noteTokenRefresh(AccountTypeGemini, acc, profile.Label, "persist_fail", time.Since(attemptStartedAt), err)
+				return err
+			}
+			trace.noteTokenRefresh(AccountTypeGemini, acc, profile.Label, "ok", time.Since(attemptStartedAt), nil)
+			return nil
 		}
 		if fallbackable {
+			nextProfile := ""
+			if idx+1 < len(profiles) {
+				nextProfile = profiles[idx+1].Label
+			}
+			trace.noteTokenRefresh(AccountTypeGemini, acc, profile.Label, "fallback", time.Since(attemptStartedAt), err)
+			trace.noteAuthFallback(AccountTypeGemini, acc, profile.Label, true, nextProfile, err)
 			lastFallbackable = err
 			continue
 		}
+		trace.noteTokenRefresh(AccountTypeGemini, acc, profile.Label, "fail", time.Since(attemptStartedAt), err)
 		return err
 	}
 	if lastFallbackable != nil {
 		return lastFallbackable
 	}
-	return geminiOAuthConfigError()
+	err := geminiOAuthConfigError()
+	trace.noteTokenRefresh(AccountTypeGemini, acc, "", "fail", 0, err)
+	return err
 
 }
 
@@ -434,5 +599,5 @@ func (p *GeminiProvider) NormalizePath(path string) string {
 
 func (p *GeminiProvider) DetectsSSE(path string, contentType string) bool {
 	// Gemini streaming uses streamGenerateContent
-	return strings.Contains(path, "stream")
+	return strings.Contains(path, "stream") || strings.Contains(strings.ToLower(contentType), "text/event-stream")
 }

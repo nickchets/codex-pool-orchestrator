@@ -31,13 +31,18 @@ type RequestShape struct {
 }
 
 type RoutePlan struct {
-	Admission    AdmissionResult
-	Shape        RequestShape
-	Provider     Provider
-	TargetBase   *url.URL
-	AccountType  AccountType
-	RequiredPlan string
+	Admission         AdmissionResult
+	Shape             RequestShape
+	Provider          Provider
+	TargetBase        *url.URL
+	UpstreamPath      string
+	AccountType       AccountType
+	RequiredPlan      string
+	ResponseAdapter   string
+	DebugGeminiSeatID string
 }
+
+const debugGeminiSeatHeader = "X-Pool-Debug-Gemini-Seat"
 
 func rejectedAdmission(statusCode int, message string) AdmissionResult {
 	return AdmissionResult{
@@ -73,6 +78,13 @@ func (h *proxyHandler) resolveProxyAdmission(r *http.Request, reqID string) Admi
 func (h *proxyHandler) resolvePoolUserAdmission(secret, authHeader string, r *http.Request, reqID string) (AdmissionResult, bool) {
 	if isClaudePool, uid := isClaudePoolToken(secret, authHeader); isClaudePool {
 		return h.admitPoolUser(uid, reqID, "claude pool user request"), true
+	}
+	if r != nil {
+		if xAPIKey := strings.TrimSpace(r.Header.Get("X-Api-Key")); xAPIKey != "" {
+			if isClaudePool, uid := isClaudePoolToken(secret, "Bearer "+xAPIKey); isClaudePool {
+				return h.admitPoolUser(uid, reqID, "claude x-api-key pool user request"), true
+			}
+		}
 	}
 
 	geminiAPIKey := r.Header.Get("x-goog-api-key")
@@ -156,15 +168,22 @@ func (h *proxyHandler) planRoute(admission AdmissionResult, r *http.Request, sha
 	}
 
 	accountType := provider.Type()
+	upstreamPath := shape.Path
+	responseAdapter := ""
 	rewrittenBody := bodyBytes
 	if shape.RequestedModel != "" {
-		if overrideProvider, overrideBase, overrideBody := h.modelRouteOverride(shape.RequestedModel, bodyBytes); overrideProvider != nil {
-			provider = overrideProvider
-			targetBase = overrideBase
-			accountType = overrideProvider.Type()
-			if overrideBody != nil {
-				rewrittenBody = overrideBody
+		override := h.modelRouteOverride(shape.Path, shape.RequestedModel, bodyBytes)
+		if override.Provider != nil {
+			provider = override.Provider
+			targetBase = override.TargetBase
+			accountType = override.Provider.Type()
+			if override.UpstreamPath != "" {
+				upstreamPath = override.UpstreamPath
 			}
+			if override.RewrittenBody != nil {
+				rewrittenBody = override.RewrittenBody
+			}
+			responseAdapter = override.ResponseAdapter
 		}
 	}
 
@@ -178,7 +197,26 @@ func (h *proxyHandler) planRoute(admission AdmissionResult, r *http.Request, sha
 		Shape:        shape,
 		Provider:     provider,
 		TargetBase:   targetBase,
+		UpstreamPath: upstreamPath,
 		AccountType:  accountType,
 		RequiredPlan: requiredPlan,
+		ResponseAdapter: responseAdapter,
 	}, rewrittenBody, nil
+}
+
+func (h *proxyHandler) resolveDebugGeminiSeatOverride(r *http.Request, accountType AccountType) (string, int, error) {
+	if r == nil {
+		return "", 0, nil
+	}
+	seatID := strings.TrimSpace(r.Header.Get(debugGeminiSeatHeader))
+	if seatID == "" {
+		return "", 0, nil
+	}
+	if accountType != AccountTypeGemini {
+		return "", http.StatusBadRequest, fmt.Errorf("debug Gemini seat override is only supported for Gemini routes")
+	}
+	if h.matchesAdminToken(r) || h.isTrustedLocalOperatorRequest(r) {
+		return seatID, 0, nil
+	}
+	return "", http.StatusForbidden, fmt.Errorf("debug Gemini seat override requires local operator access or admin token")
 }

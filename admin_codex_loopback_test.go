@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -330,7 +331,7 @@ func TestCompleteCodexExchangeReleasesSessionAfterTokenExchangeFailure(t *testin
 
 	h := &proxyHandler{cfg: config{poolDir: t.TempDir()}}
 
-	_, err := h.completeCodexExchange(codexExchangeRequest{
+	_, err := h.completeCodexExchange(context.Background(), codexExchangeRequest{
 		State:       "state-1",
 		CallbackURL: "http://localhost:1455/auth/callback?code=test-code&state=state-1",
 	})
@@ -346,6 +347,67 @@ func TestCompleteCodexExchangeReleasesSessionAfterTokenExchangeFailure(t *testin
 	}
 	if session.InFlight {
 		t.Fatal("expected oauth session to be released after token exchange failure")
+	}
+}
+
+func TestCompleteCodexExchangeLogsTrace(t *testing.T) {
+	previousClient := codexOAuthHTTPClient
+	codexOAuthHTTPClient = &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			return jsonResponse(http.StatusOK, `{
+				"access_token":"access-token",
+				"refresh_token":"refresh-token",
+				"id_token":"`+testCodexIDToken(t, "user-a", "workspace-a", "andy@example.com", "sub-a", time.Now().Add(time.Hour))+`",
+				"token_type":"Bearer",
+				"expires_in":3600,
+				"scope":"openid profile email offline_access"
+			}`), nil
+		}),
+	}
+	t.Cleanup(func() {
+		codexOAuthHTTPClient = previousClient
+	})
+
+	codexOAuthSessions.Lock()
+	codexOAuthSessions.sessions = map[string]*CodexOAuthSession{
+		"verifier-1": {
+			Verifier:  "verifier-1",
+			State:     "state-1",
+			CreatedAt: time.Now(),
+		},
+	}
+	codexOAuthSessions.Unlock()
+	t.Cleanup(func() {
+		codexOAuthSessions.Lock()
+		codexOAuthSessions.sessions = make(map[string]*CodexOAuthSession)
+		codexOAuthSessions.Unlock()
+		stopCodexLoopbackCallbackServersIfIdle()
+	})
+
+	h := &proxyHandler{
+		cfg:  config{poolDir: t.TempDir()},
+		pool: newPoolState(nil, false),
+	}
+
+	logs := captureLogs(t, func() {
+		result, err := h.completeCodexExchange(testTraceContext("req-codex-oauth"), codexExchangeRequest{
+			State:       "state-1",
+			CallbackURL: "http://localhost:1455/auth/callback?code=test-code&state=state-1",
+			Lane:        "admin",
+		})
+		if err != nil {
+			t.Fatalf("completeCodexExchange: %v", err)
+		}
+		if result.AccountID != "andy" {
+			t.Fatalf("AccountID=%q", result.AccountID)
+		}
+	})
+
+	if !strings.Contains(logs, "[req-codex-oauth] trace oauth_exchange") {
+		t.Fatalf("missing oauth_exchange trace log: %s", logs)
+	}
+	if !strings.Contains(logs, `provider=codex`) || !strings.Contains(logs, `result=ok`) || !strings.Contains(logs, `lane="admin"`) {
+		t.Fatalf("unexpected oauth_exchange trace log: %s", logs)
 	}
 }
 

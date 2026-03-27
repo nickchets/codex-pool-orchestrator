@@ -1115,7 +1115,7 @@ brew install claude-code</pre>
                     <div class="surface-header">
                         <div>
                             <h3>Operator Actions</h3>
-                            <p>Antigravity Gemini browser auth and manual imports land in the same Gemini seat pool here.</p>
+                            <p>Antigravity Gemini browser auth lands seats directly in the shared Gemini pool here.</p>
                         </div>
                     </div>
                     <div class="action-stack">
@@ -1126,7 +1126,7 @@ brew install claude-code</pre>
                             </p>
                             <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromWeb()">Start Antigravity Gemini Auth</button>
                             <div id="gemini-oauth-start-status" class="status-line"></div>
-                            <div id="gemini-managed-oauth-note" class="status-line"></div>
+                            <div id="gemini-operator-note" class="status-line"></div>
                             <div id="gemini-oauth-start-result" style="display: none; margin-top: 16px;">
                                 <div class="code-shell">
                                     <button class="copy-btn" onclick="copyToClipboard('gemini-oauth-start-url', this)">Copy</button>
@@ -1135,19 +1135,6 @@ brew install claude-code</pre>
                                 <div id="gemini-oauth-start-outcome" class="status-line"></div>
                                 <a id="gemini-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px; color: var(--accent); font-weight: 700; text-decoration: none;">Open Antigravity Auth Page</a>
                             </div>
-                        </div>
-
-                        <div class="action-card">
-                            <p>Import an existing Gemini <code>oauth_creds.json</code> into the same Gemini seat pool. This is not a separate fallback/API pool.</p>
-                            <form onsubmit="event.preventDefault(); addGeminiSeatFromWeb();">
-                                <div class="input-row">
-                                    <textarea id="gemini-seat-json-input" autocomplete="off" spellcheck="false" placeholder='{"access_token":"...","refresh_token":"...","expiry_date":1774353600000}'></textarea>
-                                </div>
-                                <div class="input-row" style="margin-top: 10px;">
-                                    <button id="gemini-seat-add-btn" class="action-btn" type="submit">Import oauth_creds.json</button>
-                                </div>
-                            </form>
-                            <div id="gemini-seat-add-status" class="status-line"></div>
                         </div>
                     </div>
                 </section>
@@ -1205,7 +1192,7 @@ brew install claude-code</pre>
             </section>
 
             <details class="details-card">
-                <summary>Gemini CLI Setup</summary>
+                <summary>Gemini CLI / OpenCode Setup</summary>
                 <div class="details-body">
                     <div class="details-grid">
                         <div class="detail-block">
@@ -1245,10 +1232,24 @@ brew install gemini-cli</pre>
 python3 -m webbrowser '{{.BaseURL}}/'
 # Or the raw operator dashboard
 python3 -m webbrowser '{{.BaseURL}}/status'
-# Then click: Start Antigravity Gemini Auth
+# Then click: Start Antigravity Gemini Auth</pre>
+                            </div>
+                        </div>
 
-# If you already have a real Gemini oauth_creds.json or Antigravity account JSON:
-# import it into the Gemini manual-import field on / or /status.</pre>
+                        <div class="detail-block">
+                            <h4>OpenCode One-Line Setup</h4>
+                            <p>Downloads the OpenCode config bundle and Antigravity account inventory from the same pool contract.</p>
+                            <div class="code-shell">
+                                <button class="copy-btn" onclick="copyToClipboard('opencode-one-liner', this)">Copy</button>
+                                <pre id="opencode-one-liner"></pre>
+                            </div>
+                        </div>
+
+                        <div class="detail-block">
+                            <h4>OpenCode Manual Config</h4>
+                            <div class="code-shell">
+                                <button class="copy-btn" onclick="copyToClipboard('opencode-config', this)">Copy</button>
+                                <pre id="opencode-config"></pre>
                             </div>
                         </div>
                     </div>
@@ -1295,6 +1296,13 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 return '-';
             }
             return Math.round(num) + '%';
+        }
+
+        function formatHeadroom(value, known) {
+            if (!known) {
+                return 'n/a';
+            }
+            return formatPct(value);
         }
 
         function formatNumber(value) {
@@ -1372,6 +1380,10 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             return root[provider] || {};
         }
 
+        function geminiPoolSummary(data) {
+            return data && data.gemini_pool && typeof data.gemini_pool === 'object' ? data.gemini_pool : {};
+        }
+
         function escapeHTML(value) {
             return String(value == null ? '' : value)
                 .replace(/&/g, '&amp;')
@@ -1391,10 +1403,18 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             if (acc.disabled) {
                 return { label: 'disabled', tone: 'warning', detail: 'Disabled locally.' };
             }
+            const routingState = String(acc.routing && acc.routing.state || '').trim();
+            const degradedReason = String(acc.routing && acc.routing.degraded_reason || '').trim();
             if (acc.routing && acc.routing.eligible) {
-                return { label: 'eligible', tone: 'success', detail: 'Available for fresh routing.' };
+                if (routingState === 'degraded_enabled') {
+                    return { label: 'degraded', tone: 'warning', detail: degradedReason || 'Available for fresh routing, but under provider or operational caveats.' };
+                }
+                return { label: routingState || 'eligible', tone: 'success', detail: 'Available for fresh routing.' };
             }
             const reason = String(acc.routing && acc.routing.block_reason || '').trim();
+            if (routingState) {
+                return { label: routingState.replace(/_/g, ' '), tone: 'warning', detail: degradedReason || reason || routingState };
+            }
             if (reason) {
                 return { label: reason.replace(/_/g, ' '), tone: 'warning', detail: reason };
             }
@@ -1424,7 +1444,92 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             if (acc.gitlab_quota_probe_in) {
                 details.push('probe ' + String(acc.gitlab_quota_probe_in));
             }
+            if (acc.provider_truth && acc.provider_truth.state) {
+                details.push('provider ' + String(acc.provider_truth.state));
+            }
+            if (acc.operational_truth && acc.operational_truth.state) {
+                details.push('operational ' + String(acc.operational_truth.state));
+            }
             return { main: main, detail: details.join(' | ') };
+        }
+
+        function geminiQuotaSummary(acc) {
+            if (!acc || acc.type !== 'gemini') {
+                return '';
+            }
+            const parts = [];
+            if (acc.provider_quota_summary) {
+                parts.push(String(acc.provider_quota_summary));
+            }
+            const quota = acc.provider_truth && acc.provider_truth.quota ? acc.provider_truth.quota : null;
+            if (quota && quota.updated_at) {
+                parts.push('updated ' + formatDateTime(quota.updated_at));
+            }
+            return parts.join(' | ');
+        }
+
+        function geminiCompatibilitySummary(acc) {
+            if (!acc || acc.type !== 'gemini') {
+                return '';
+            }
+            const quota = acc.provider_truth && acc.provider_truth.quota ? acc.provider_truth.quota : null;
+            const models = Array.isArray(quota && quota.models) ? quota.models : [];
+            if (models.length === 0) {
+                return '';
+            }
+            let routable = 0;
+            let seatBlocked = 0;
+            let catalogOnly = 0;
+            let protectedCount = 0;
+            models.forEach((model) => {
+                if (model && model.protected) {
+                    protectedCount += 1;
+                }
+                if (model && model.routable) {
+                    routable += 1;
+                    return;
+                }
+                if (model && model.compatibility_lane === 'anthropic_adapter_required') {
+                    catalogOnly += 1;
+                    return;
+                }
+                seatBlocked += 1;
+            });
+            const parts = [];
+            if (routable > 0) {
+                parts.push(String(routable) + ' routable');
+            }
+            if (seatBlocked > 0) {
+                parts.push(String(seatBlocked) + ' seat-blocked');
+            }
+            if (catalogOnly > 0) {
+                parts.push(String(catalogOnly) + ' catalog-only');
+            }
+            if (protectedCount > 0) {
+                parts.push(String(protectedCount) + ' protected');
+            }
+            return parts.join(' | ');
+        }
+
+        function geminiProjectSummary(acc) {
+            if (!acc || acc.type !== 'gemini') {
+                return '';
+            }
+            const providerTruth = acc.provider_truth || {};
+            const parts = [];
+            if (providerTruth.project_id) {
+                parts.push('project ' + clipMiddle(providerTruth.project_id, 10, 6));
+            }
+            if (providerTruth.state) {
+                parts.push('provider ' + String(providerTruth.state));
+            }
+            if (providerTruth.freshness_state) {
+                parts.push('truth ' + String(providerTruth.freshness_state));
+            }
+            if (acc.routing && acc.routing.block_reason === 'not_warmed') {
+                parts.push('warm proof required');
+            }
+            return parts.join(' | ');
         }
 
         function metricCardHTML(card) {
@@ -1446,8 +1551,9 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                     tone: 'neutral',
                 };
             }
-            const statusTone = String(seat.routing_status || '') === 'eligible' ? 'success' : 'warning';
-            const headroom = formatPct(seat.primary_headroom_pct) + ' 5h | ' + formatPct(seat.secondary_headroom_pct) + ' 7d';
+            const routingStatus = String(seat.routing_status || '').trim();
+            const statusTone = (!routingStatus || routingStatus === 'eligible' || routingStatus === 'enabled') ? 'success' : 'warning';
+            const headroom = formatHeadroom(seat.primary_headroom_pct, seat.primary_headroom_known) + ' 5h | ' + formatHeadroom(seat.secondary_headroom_pct, seat.secondary_headroom_known) + ' 7d';
             const label = String(seat.email || '').trim() || clipOpaque(seat.id);
             const detailParts = [headroom];
             if (seat.local_last_used) {
@@ -1615,32 +1721,48 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             }
 
             const geminiOperator = data && data.gemini_operator ? data.gemini_operator : {};
+            const geminiPool = geminiPoolSummary(data);
+            const legacySeats = Number(geminiOperator.legacy_seat_count || 0) + Number(geminiOperator.managed_seat_count || 0);
             renderMetricCards('gemini-summary-cards', [
                 {
                     label: 'Accounts',
-                    value: formatNumber(accounts.length),
-                    detail: 'Eligible ' + formatNumber(summary.eligible_accounts || 0) + ' Gemini accounts.',
-                    tone: 'neutral',
+                    value: formatNumber(summary.eligible_accounts || 0) + ' / ' + formatNumber(accounts.length),
+                    detail: 'Eligible / total Gemini accounts right now.',
+                    tone: (summary.eligible_accounts || 0) > 0 ? 'success' : 'warning',
+                },
+                {
+                    label: 'Ready / Warm',
+                    value: formatNumber(geminiPool.ready_seats || 0) + ' / ' + formatNumber(geminiPool.warm_seats || 0),
+                    detail: String(geminiPool.note || ('Restricted ' + formatNumber(geminiPool.restricted_seats || 0) + ', warmup-blocked ' + formatNumber(geminiPool.not_warmed_seats || 0) + '.')),
+                    tone: (geminiPool.ready_seats || 0) > 0 ? 'success' : 'warning',
+                },
+                {
+                    label: 'Quota Truth',
+                    value: formatNumber(geminiPool.quota_model_count || 0) + ' models',
+                    detail: 'Tracked on ' + formatNumber(geminiPool.quota_tracked_seats || 0) + ' seat(s); empty snapshots ' + formatNumber(geminiPool.quota_empty_seats || 0) + '.',
+                    tone: (geminiPool.quota_tracked_seats || 0) > 0 ? 'neutral' : 'warning',
+                },
+                {
+                    label: 'Restrictions',
+                    value: formatNumber(geminiPool.validation_flagged_seats || 0) + ' flagged',
+                    detail: 'Restricted ' + formatNumber(geminiPool.restricted_seats || 0) + ', missing project ' + formatNumber(geminiPool.missing_project_seats || 0) + '.',
+                    tone: (geminiPool.validation_flagged_seats || 0) > 0 || (geminiPool.missing_project_seats || 0) > 0 ? 'warning' : 'neutral',
                 },
                 {
                     label: 'Antigravity Seats',
-                    value: formatNumber(geminiOperator.imported_seat_count || 0),
-                    detail: 'Antigravity-backed seats in the shared Gemini pool, including browser auth and manual imports.',
-                    tone: (geminiOperator.imported_seat_count || 0) > 0 ? 'success' : 'neutral',
+                    value: formatNumber(geminiOperator.antigravity_seat_count || 0),
+                    detail: 'Antigravity-backed Gemini seats in the shared pool, added through browser auth.',
+                    tone: (geminiOperator.antigravity_seat_count || 0) > 0 ? 'success' : 'neutral',
                 },
                 {
-                    label: 'Managed Fallback',
-                    value: geminiOperator.managed_oauth_available ? 'configured' : 'off',
-                    detail: geminiOperator.managed_oauth_available
-                        ? ('Hidden service-owned Gemini OAuth fallback via ' + String(geminiOperator.managed_oauth_profile || 'configured') + '.')
-                        : 'Primary browser auth does not depend on service-owned Gemini OAuth credentials.',
-                    tone: geminiOperator.managed_oauth_available ? 'success' : 'neutral',
-                },
-                {
-                    label: 'Managed Seats',
-                    value: formatNumber(geminiOperator.managed_seat_count || 0),
-                    detail: 'Legacy first-party seats created through the hidden managed OAuth fallback lane.',
-                    tone: (geminiOperator.managed_seat_count || 0) > 0 ? 'warning' : 'neutral',
+                    label: 'Legacy / Service OAuth',
+                    value: geminiOperator.managed_oauth_available ? 'legacy-only' : 'unused',
+                    detail: legacySeats > 0
+                        ? ('Legacy seats ' + formatNumber(legacySeats) + '. Internal service-owned Gemini OAuth remains ' + (geminiOperator.managed_oauth_available ? ('enabled via ' + String(geminiOperator.managed_oauth_profile || 'configured') + ' for maintenance only.') : 'unused.'))
+                        : (geminiOperator.managed_oauth_available
+                            ? ('Internal service-owned Gemini OAuth remains enabled via ' + String(geminiOperator.managed_oauth_profile || 'configured') + ' for maintenance only.')
+                            : 'New Gemini seats do not depend on service-owned Gemini OAuth credentials.'),
+                    tone: legacySeats > 0 ? 'warning' : 'neutral',
                 },
             ]);
         }
@@ -1695,7 +1817,7 @@ python3 -m webbrowser '{{.BaseURL}}/status'
         function syncGeminiOperatorActions(data) {
             const operator = data && data.gemini_operator ? data.gemini_operator : {};
             const startButton = document.getElementById('gemini-oauth-start-btn');
-            const note = document.getElementById('gemini-managed-oauth-note');
+            const note = document.getElementById('gemini-operator-note');
             const status = document.getElementById('gemini-oauth-start-status');
             const result = document.getElementById('gemini-oauth-start-result');
             if (!startButton || !note) {
@@ -1703,19 +1825,14 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             }
             startButton.style.display = '';
             startButton.disabled = false;
-            if (operator.managed_oauth_available) {
-                note.textContent = 'Antigravity browser auth is primary here. Managed Gemini OAuth fallback is also configured' + (operator.managed_oauth_profile ? ' via ' + operator.managed_oauth_profile + '.' : '.');
-                note.className = 'status-line success';
-                return;
-            }
             if (status) {
                 status.textContent = '';
             }
             if (result && !geminiOAuthDone) {
                 result.style.display = 'none';
             }
-            note.textContent = 'Antigravity browser auth is primary on this local dashboard. Manual import remains available if you already have oauth_creds.json or Antigravity account JSON.';
-            note.className = 'status-line';
+            note.textContent = String(operator.note || 'Antigravity browser auth is the only supported Gemini seat onboarding flow on this local dashboard.');
+            note.className = (Number(operator.legacy_seat_count || 0) + Number(operator.managed_seat_count || 0)) > 0 ? 'status-line warning' : 'status-line';
         }
 
         function renderWorkspaceTable(provider, data) {
@@ -1805,6 +1922,9 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 const plan = accountPlanLabel(acc);
                 const accountLabel = accountDisplayName(acc);
                 const statusID = provider + '-account-action-status';
+                const geminiProject = geminiProjectSummary(acc);
+                const geminiQuota = geminiQuotaSummary(acc);
+                const geminiCompatibility = geminiCompatibilitySummary(acc);
                 const meta = [];
                 if (acc.id) {
                     meta.push(clipOpaque(acc.id));
@@ -1831,14 +1951,17 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                         <td title="${escapeHTML(routing.detail || '')}">
                             <span class="badge tone-${escapeHTML(routing.tone)}">${escapeHTML(routing.label)}</span>
                             <div class="table-meta">${escapeHTML(routing.detail || '')}</div>
+                            ${geminiProject ? `<div class="table-meta">${escapeHTML(geminiProject)}</div>` : ''}
                         </td>
                         <td>
-                            <div class="table-title mono">${escapeHTML(formatPct(acc.routing && acc.routing.primary_headroom_pct))} | ${escapeHTML(formatPct(acc.routing && acc.routing.secondary_headroom_pct))}</div>
+                            <div class="table-title mono">${escapeHTML(formatHeadroom(acc.routing && acc.routing.primary_headroom_pct, acc.routing && acc.routing.primary_headroom_known))} | ${escapeHTML(formatHeadroom(acc.routing && acc.routing.secondary_headroom_pct, acc.routing && acc.routing.secondary_headroom_known))}</div>
                             <div class="table-meta">5h | 7d</div>
                         </td>
                         <td title="${escapeHTML(health.detail || '')}">
                             <div class="table-title">${escapeHTML(health.main)}</div>
                             <div class="table-meta">${escapeHTML(health.detail || '')}</div>
+                            ${geminiQuota ? `<div class="table-meta">${escapeHTML(geminiQuota)}</div>` : ''}
+                            ${geminiCompatibility ? `<div class="table-meta">${escapeHTML(geminiCompatibility)}</div>` : ''}
                         </td>
                         <td>
                             <div class="table-title">${escapeHTML(String(acc.local_last_used || 'never'))}</div>
@@ -1998,6 +2121,19 @@ echo 'Then click: Start Antigravity Gemini Auth'`;
 `{
   "codeAssistEndpoint": "${BASE_URL}"
 }`;
+
+            document.getElementById('opencode-one-liner').textContent =
+`echo "Create a pool user from the local operator surface or /admin/pool-users first."
+echo "Then run:"
+echo "  curl -fsSL ${BASE_URL}/setup/opencode/<download-token> | bash"`;
+
+            document.getElementById('opencode-config').textContent =
+`# Raw export bundle
+curl -fsS ${BASE_URL}/config/opencode/<download-token> | jq .
+
+# Preferred path: use /setup/opencode/<download-token>
+# It writes ~/.config/opencode/opencode.json and antigravity-accounts.json
+# from the same exported bundle and keeps the /v1 Anthropic-style contract aligned.`;
         }
 
         function codexOAuthSnapshot(accounts) {
@@ -2380,62 +2516,6 @@ echo 'Then click: Start Antigravity Gemini Auth'`;
             } catch (error) {
                 status.style.color = 'var(--danger)';
                 status.textContent = 'Failed to add GitLab token: ' + (error && error.message ? error.message : error);
-            } finally {
-                button.disabled = false;
-            }
-        }
-
-        async function addGeminiSeatFromWeb() {
-            const input = document.getElementById('gemini-seat-json-input');
-            const button = document.getElementById('gemini-seat-add-btn');
-            const status = document.getElementById('gemini-seat-add-status');
-            if (!input || !button || !status) {
-                return;
-            }
-
-            const authJSON = String(input.value || '').trim();
-            if (!authJSON) {
-                status.style.color = 'var(--danger)';
-                status.textContent = 'Paste oauth_creds.json first.';
-                return;
-            }
-
-            button.disabled = true;
-            status.style.color = 'var(--muted)';
-            status.textContent = 'Importing oauth_creds.json and running refresh probe...';
-
-            try {
-                const response = await fetch('/operator/gemini/import-oauth-creds', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ auth_json: authJSON })
-                });
-                const text = await response.text();
-                let data = null;
-                try {
-                    data = text ? JSON.parse(text) : null;
-                } catch (parseError) {
-                    data = null;
-                }
-                if (!response.ok) {
-                    throw new Error((data && data.error) || text || 'Failed to import Gemini oauth_creds.json');
-                }
-
-                input.value = '';
-                const accountID = String((data && data.account_id) || 'gemini_seat');
-                const healthStatus = String((data && data.health_status) || 'unknown');
-                const healthError = String((data && data.health_error) || '').trim();
-                if (data && data.dead) {
-                    status.style.color = 'var(--warning)';
-                    status.textContent = 'Imported ' + accountID + ', but it is currently marked dead' + (healthError ? ': ' + healthError : '.');
-                } else {
-                    status.style.color = 'var(--success)';
-                    status.textContent = 'Imported ' + accountID + '. Health: ' + healthStatus + (healthError ? ' (' + healthError + ')' : '') + '. Reloading status...';
-                }
-                window.setTimeout(() => window.location.reload(), 900);
-            } catch (error) {
-                status.style.color = 'var(--danger)';
-                status.textContent = 'Failed to import Gemini oauth_creds.json: ' + (error && error.message ? error.message : error);
             } finally {
                 button.disabled = false;
             }

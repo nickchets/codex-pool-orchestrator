@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,9 +26,10 @@ type geminiAPIRequestPayload struct {
 }
 
 type geminiCodeAssistFacadeRequest struct {
-	targetBase *url.URL
-	path       string
-	body       []byte
+	targetBase  *url.URL
+	targetBases []*url.URL
+	path        string
+	body        []byte
 }
 
 type geminiCodeAssistRequestPayload struct {
@@ -84,34 +86,54 @@ func rewriteGeminiCodeAssistFacadeModel(model string) string {
 	}
 }
 
-func maybeBuildGeminiCodeAssistFacadeRequest(provider Provider, reqPath string, bodyBytes []byte, acc *Account, reqID string) (*geminiCodeAssistFacadeRequest, error) {
+func shouldUseAntigravityGeminiCodeAssistBaseFallback(model string) bool {
+	return strings.HasPrefix(strings.TrimSpace(model), "gemini-3.1-pro")
+}
+
+func maybeBuildGeminiCodeAssistFacadeRequest(ctx context.Context, provider Provider, reqPath string, bodyBytes []byte, acc *Account, reqID string) (*geminiCodeAssistFacadeRequest, error) {
 	geminiProvider, ok := provider.(*GeminiProvider)
 	if !ok {
 		return nil, nil
 	}
+	trace := requestTraceFromContext(ctx)
 	model, method, ok := parseGeminiAPIPath(reqPath)
 	if !ok {
 		return nil, nil
 	}
 	if acc == nil {
-		return nil, fmt.Errorf("gemini v1beta facade requires an account")
+		err := fmt.Errorf("gemini v1beta facade requires an account")
+		trace.noteFacadeTransform(AccountTypeGemini, nil, reqPath, "", model, "", "", "error", err)
+		return nil, err
 	}
-	projectID := strings.TrimSpace(acc.AntigravityProjectID)
+	projectID := effectiveGeminiCodeAssistProjectID(acc)
 	if projectID == "" {
-		return nil, fmt.Errorf("gemini account %s missing antigravity project id for v1beta facade", acc.ID)
+		err := fmt.Errorf("gemini account %s missing antigravity project id for v1beta facade", acc.ID)
+		trace.noteFacadeTransform(AccountTypeGemini, acc, reqPath, "", model, "", projectID, "error", err)
+		return nil, err
 	}
 	if len(bodyBytes) == 0 {
-		return nil, fmt.Errorf("gemini v1beta facade requires a JSON body")
+		err := fmt.Errorf("gemini v1beta facade requires a JSON body")
+		trace.noteFacadeTransform(AccountTypeGemini, acc, reqPath, "", model, "", projectID, "error", err)
+		return nil, err
 	}
 
 	var in geminiAPIRequestPayload
 	if err := json.Unmarshal(bodyBytes, &in); err != nil {
-		return nil, fmt.Errorf("parse gemini v1beta request: %w", err)
+		wrappedErr := fmt.Errorf("parse gemini v1beta request: %w", err)
+		trace.noteFacadeTransform(AccountTypeGemini, acc, reqPath, "", model, "", projectID, "error", wrappedErr)
+		return nil, wrappedErr
 	}
 
 	upstreamMethod := "/v1internal:" + method
+	rewrittenModel := rewriteGeminiCodeAssistFacadeModel(model)
+	targetBases := []*url.URL{geminiProvider.geminiBase}
+	if shouldUseAntigravityGeminiCodeAssistBaseFallback(rewrittenModel) {
+		if candidates := antigravityGeminiCodeAssistBaseCandidates(geminiProvider.geminiBase); len(candidates) > 0 {
+			targetBases = candidates
+		}
+	}
 	out := geminiCodeAssistRequestPayload{
-		Model:        rewriteGeminiCodeAssistFacadeModel(model),
+		Model:        rewrittenModel,
 		Project:      projectID,
 		UserPromptID: reqID,
 		Request: geminiCodeAssistInnerRequestPayload{
@@ -129,13 +151,37 @@ func maybeBuildGeminiCodeAssistFacadeRequest(provider Provider, reqPath string, 
 
 	outBody, err := json.Marshal(out)
 	if err != nil {
-		return nil, fmt.Errorf("marshal gemini code assist request: %w", err)
+		wrappedErr := fmt.Errorf("marshal gemini code assist request: %w", err)
+		trace.noteFacadeTransform(AccountTypeGemini, acc, reqPath, "", model, out.Model, projectID, "error", wrappedErr)
+		return nil, wrappedErr
 	}
+	trace.noteFacadeTransform(AccountTypeGemini, acc, reqPath, upstreamMethod, model, out.Model, projectID, "ok", nil)
 	return &geminiCodeAssistFacadeRequest{
-		targetBase: geminiProvider.geminiBase,
-		path:       upstreamMethod,
-		body:       outBody,
+		targetBase:  targetBases[0],
+		targetBases: targetBases,
+		path:        upstreamMethod,
+		body:        outBody,
 	}, nil
+}
+
+func (h *proxyHandler) maybePrimeGeminiCodeAssistFacade(ctx context.Context, acc *Account, facadeReq *geminiCodeAssistFacadeRequest) error {
+	if h == nil || acc == nil || facadeReq == nil || !canRouteValidationBlockedAntigravityGemini(acc) {
+		return nil
+	}
+	projectID := effectiveGeminiCodeAssistProjectID(acc)
+	if projectID == "" {
+		return fmt.Errorf("gemini account %s missing antigravity project id for blocked facade preflight", acc.ID)
+	}
+	acc.mu.Lock()
+	accessToken := strings.TrimSpace(acc.AccessToken)
+	acc.mu.Unlock()
+	if accessToken == "" {
+		return fmt.Errorf("account %s has empty access token", acc.ID)
+	}
+	if _, err := h.loadAntigravityGeminiCodeAssist(ctx, accessToken, projectID, ""); err != nil {
+		return fmt.Errorf("prime blocked gemini facade account %s: %w", acc.ID, err)
+	}
+	return nil
 }
 
 func maybeTransformGeminiCodeAssistFacadeResponse(reqPath string, resp *http.Response) error {
@@ -148,7 +194,10 @@ func maybeTransformGeminiCodeAssistFacadeResponse(reqPath string, resp *http.Res
 	}
 	if method == "streamGenerateContent" {
 		pr, pw := io.Pipe()
-		src := resp.Body
+		src, err := decodeMaybeGzipResponseBody(resp)
+		if err != nil {
+			return err
+		}
 		go func() {
 			err := transformGeminiCodeAssistSSE(pw, src)
 			if err != nil {
@@ -163,8 +212,7 @@ func maybeTransformGeminiCodeAssistFacadeResponse(reqPath string, resp *http.Res
 		return nil
 	}
 
-	raw, err := io.ReadAll(resp.Body)
-	_ = resp.Body.Close()
+	raw, err := readMaybeGzipResponseBody(resp)
 	if err != nil {
 		return err
 	}

@@ -25,6 +25,7 @@ type StatusData struct {
 	OpenAIAPIPool        OpenAIAPIPoolStatus           `json:"openai_api_pool"`
 	GitLabClaudePool     GitLabClaudePoolStatus        `json:"gitlab_claude_pool"`
 	GeminiOperator       GeminiOperatorStatus          `json:"gemini_operator"`
+	GeminiPool           *GeminiPoolStatus             `json:"gemini_pool,omitempty"`
 	Quarantine           QuarantineStatus              `json:"quarantine,omitempty"`
 	PoolSummary          PoolDashboardSummary          `json:"pool_summary"`
 	CurrentSeat          *CurrentSeatStatus            `json:"current_seat,omitempty"`
@@ -54,11 +55,13 @@ type PoolDashboardProviderSum struct {
 }
 
 type OpenAIAPIPoolStatus struct {
-	TotalKeys    int    `json:"total_keys"`
-	HealthyKeys  int    `json:"healthy_keys"`
-	EligibleKeys int    `json:"eligible_keys"`
-	DeadKeys     int    `json:"dead_keys"`
-	NextKeyID    string `json:"next_key_id,omitempty"`
+	TotalKeys             int    `json:"total_keys"`
+	HealthyKeys           int    `json:"healthy_keys"`
+	EligibleKeys          int    `json:"eligible_keys"`
+	EligibleUnhealthyKeys int    `json:"eligible_unhealthy_keys,omitempty"`
+	DeadKeys              int    `json:"dead_keys"`
+	NextKeyID             string `json:"next_key_id,omitempty"`
+	StatusNote            string `json:"status_note,omitempty"`
 }
 
 type GitLabClaudePoolStatus struct {
@@ -72,9 +75,85 @@ type GitLabClaudePoolStatus struct {
 type GeminiOperatorStatus struct {
 	ManagedOAuthAvailable bool   `json:"managed_oauth_available"`
 	ManagedOAuthProfile   string `json:"managed_oauth_profile,omitempty"`
-	ManagedOAuthNote      string `json:"managed_oauth_note,omitempty"`
 	ManagedSeatCount      int    `json:"managed_seat_count"`
 	ImportedSeatCount     int    `json:"imported_seat_count"`
+	AntigravitySeatCount  int    `json:"antigravity_seat_count"`
+	LegacySeatCount       int    `json:"legacy_seat_count,omitempty"`
+	Note                  string `json:"note,omitempty"`
+}
+
+type GeminiPoolStatus struct {
+	TotalSeats             int    `json:"total_seats"`
+	EligibleSeats          int    `json:"eligible_seats"`
+	ReadySeats             int    `json:"ready_seats"`
+	WarmSeats              int    `json:"warm_seats"`
+	RestrictedSeats        int    `json:"restricted_seats,omitempty"`
+	ValidationFlaggedSeats int    `json:"validation_flagged_seats,omitempty"`
+	MissingProjectSeats    int    `json:"missing_project_seats,omitempty"`
+	NotWarmedSeats         int    `json:"not_warmed_seats,omitempty"`
+	StaleTruthSeats        int    `json:"stale_truth_seats,omitempty"`
+	QuotaTrackedSeats      int    `json:"quota_tracked_seats,omitempty"`
+	QuotaModelCount        int    `json:"quota_model_count,omitempty"`
+	QuotaEmptySeats        int    `json:"quota_empty_seats,omitempty"`
+	ProtectedModelCount    int    `json:"protected_model_count,omitempty"`
+	Note                   string `json:"note,omitempty"`
+}
+
+type GeminiProviderTruthStatus struct {
+	Ready                bool                       `json:"ready"`
+	State                string                     `json:"state,omitempty"`
+	Reason               string                     `json:"reason,omitempty"`
+	FreshnessState       string                     `json:"freshness_state,omitempty"`
+	Stale                bool                       `json:"stale,omitempty"`
+	StaleReason          string                     `json:"stale_reason,omitempty"`
+	FreshUntil           string                     `json:"fresh_until,omitempty"`
+	ProjectID            string                     `json:"project_id,omitempty"`
+	SubscriptionTierID   string                     `json:"subscription_tier_id,omitempty"`
+	SubscriptionTierName string                     `json:"subscription_tier_name,omitempty"`
+	ValidationReasonCode string                     `json:"validation_reason_code,omitempty"`
+	ValidationMessage    string                     `json:"validation_message,omitempty"`
+	ValidationURL        string                     `json:"validation_url,omitempty"`
+	CheckedAt            string                     `json:"checked_at,omitempty"`
+	ProxyDisabled        bool                       `json:"proxy_disabled,omitempty"`
+	Restricted           bool                       `json:"restricted,omitempty"`
+	ValidationBlocked    bool                       `json:"validation_blocked,omitempty"`
+	QuotaForbidden       bool                       `json:"quota_forbidden,omitempty"`
+	QuotaForbiddenReason string                     `json:"quota_forbidden_reason,omitempty"`
+	ProtectedModels      []string                   `json:"protected_models,omitempty"`
+	Quota                *GeminiProviderQuotaStatus `json:"quota,omitempty"`
+}
+
+type GeminiOperationalTruthStatus struct {
+	State         string `json:"state,omitempty"`
+	Reason        string `json:"reason,omitempty"`
+	Source        string `json:"source,omitempty"`
+	CheckedAt     string `json:"checked_at,omitempty"`
+	LastSuccessAt string `json:"last_success_at,omitempty"`
+}
+
+type GeminiProviderQuotaStatus struct {
+	UpdatedAt            string                   `json:"updated_at,omitempty"`
+	ModelForwardingRules map[string]string        `json:"model_forwarding_rules,omitempty"`
+	Models               []GeminiModelQuotaStatus `json:"models,omitempty"`
+}
+
+type GeminiModelQuotaStatus struct {
+	Name                string          `json:"name"`
+	RouteProvider       string          `json:"route_provider,omitempty"`
+	Routable            bool            `json:"routable"`
+	CompatibilityLane   string          `json:"compatibility_lane,omitempty"`
+	CompatibilityReason string          `json:"compatibility_reason,omitempty"`
+	Percentage          int             `json:"percentage"`
+	ResetTime           string          `json:"reset_time,omitempty"`
+	DisplayName         string          `json:"display_name,omitempty"`
+	SupportsImages      bool            `json:"supports_images,omitempty"`
+	SupportsThinking    bool            `json:"supports_thinking,omitempty"`
+	ThinkingBudget      int             `json:"thinking_budget,omitempty"`
+	Recommended         bool            `json:"recommended,omitempty"`
+	MaxTokens           int             `json:"max_tokens,omitempty"`
+	MaxOutputTokens     int             `json:"max_output_tokens,omitempty"`
+	SupportedMimeTypes  map[string]bool `json:"supported_mime_types,omitempty"`
+	Protected           bool            `json:"protected,omitempty"`
 }
 
 type PoolDashboardWorkspaceGroup struct {
@@ -90,30 +169,124 @@ type PoolDashboardWorkspaceGroup struct {
 }
 
 type CurrentSeatStatus struct {
-	ID                   string  `json:"id"`
-	Email                string  `json:"email,omitempty"`
-	WorkspaceID          string  `json:"workspace_id,omitempty"`
-	SeatKey              string  `json:"seat_key,omitempty"`
-	RoutingStatus        string  `json:"routing_status,omitempty"`
-	PrimaryHeadroomPct   float64 `json:"primary_headroom_pct"`
-	SecondaryHeadroomPct float64 `json:"secondary_headroom_pct"`
-	Inflight             int64   `json:"inflight"`
-	LocalLastUsed        string  `json:"local_last_used,omitempty"`
-	ActiveSeatCount      int     `json:"active_seat_count,omitempty"`
-	Basis                string  `json:"basis"`
+	ID                     string  `json:"id"`
+	Email                  string  `json:"email,omitempty"`
+	WorkspaceID            string  `json:"workspace_id,omitempty"`
+	SeatKey                string  `json:"seat_key,omitempty"`
+	RoutingStatus          string  `json:"routing_status,omitempty"`
+	PrimaryHeadroomPct     float64 `json:"primary_headroom_pct"`
+	SecondaryHeadroomPct   float64 `json:"secondary_headroom_pct"`
+	PrimaryHeadroomKnown   bool    `json:"primary_headroom_known,omitempty"`
+	SecondaryHeadroomKnown bool    `json:"secondary_headroom_known,omitempty"`
+	Inflight               int64   `json:"inflight"`
+	LocalLastUsed          string  `json:"local_last_used,omitempty"`
+	ActiveSeatCount        int     `json:"active_seat_count,omitempty"`
+	Basis                  string  `json:"basis"`
 }
 
 func geminiOperatorSourceLabel(source string) string {
 	switch strings.TrimSpace(source) {
 	case geminiOperatorSourceManagedOAuth:
-		return "managed oauth"
+		return "legacy managed oauth"
 	case geminiOperatorSourceManualImport, geminiOperatorSourceManualImportLegacy:
-		return "manual import"
+		return "legacy local import"
 	case geminiOperatorSourceAntigravityImport:
-		return "antigravity import"
+		return "antigravity browser auth"
 	default:
 		return ""
 	}
+}
+
+func managedOpenAIAPIProbeState(snapshot accountSnapshot, now time.Time) string {
+	healthStatus := strings.TrimSpace(snapshot.HealthStatus)
+	if snapshot.HealthCheckedAt.IsZero() {
+		return "never_probed"
+	}
+	if healthStatus == "healthy" {
+		if now.Sub(snapshot.HealthCheckedAt) >= managedOpenAIAPIProbeFreshness {
+			return "stale"
+		}
+		return "healthy"
+	}
+	return "error"
+}
+
+func managedOpenAIAPIProbeSummary(snapshot accountSnapshot, now time.Time) string {
+	prefix := ""
+	if snapshot.Routing.Eligible {
+		prefix = "selector-eligible; "
+	}
+	switch managedOpenAIAPIProbeState(snapshot, now) {
+	case "never_probed":
+		return prefix + "probe has not run yet"
+	case "healthy":
+		if snapshot.Routing.Eligible {
+			return prefix + "last probe succeeded"
+		}
+		return "last probe succeeded; selector-blocked"
+	case "stale":
+		return prefix + "last healthy probe is stale and will refresh on next use"
+	default:
+		if strings.Contains(strings.ToLower(strings.TrimSpace(snapshot.HealthError)), "deadline exceeded") {
+			return prefix + "last probe timed out"
+		}
+		return prefix + "last probe failed"
+	}
+}
+
+func managedOpenAIAPIPoolStatusNote(pool OpenAIAPIPoolStatus) string {
+	if pool.TotalKeys == 0 {
+		return ""
+	}
+	note := "Healthy counts only keys whose last probe succeeded. Eligible now follows selector routing."
+	if pool.EligibleUnhealthyKeys > 0 {
+		note += " Some eligible keys still do not have a fresh healthy probe."
+	}
+	return note
+}
+
+func geminiOperatorStatusNote(status GeminiOperatorStatus) string {
+	parts := []string{"Antigravity browser auth is the only supported Gemini seat onboarding flow on this local dashboard."}
+	if status.LegacySeatCount > 0 {
+		parts = append(parts, fmt.Sprintf("%d legacy local Gemini seat(s) still remain in the pool.", status.LegacySeatCount))
+	}
+	if status.ManagedSeatCount > 0 {
+		if profile := strings.TrimSpace(status.ManagedOAuthProfile); profile != "" {
+			parts = append(parts, fmt.Sprintf("%d service-owned Gemini OAuth seat(s) still remain for legacy maintenance via %s.", status.ManagedSeatCount, profile))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d service-owned Gemini OAuth seat(s) still remain for legacy maintenance.", status.ManagedSeatCount))
+		}
+	} else if status.ManagedOAuthAvailable {
+		if profile := strings.TrimSpace(status.ManagedOAuthProfile); profile != "" {
+			parts = append(parts, "Service-owned Gemini OAuth stays configured internally via "+profile+" for legacy maintenance only.")
+		} else {
+			parts = append(parts, "Service-owned Gemini OAuth stays configured internally for legacy maintenance only.")
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func geminiPoolStatusNote(status GeminiPoolStatus) string {
+	if status.TotalSeats == 0 {
+		return ""
+	}
+	parts := make([]string, 0, 5)
+	if status.ReadySeats > 0 {
+		parts = append(parts, fmt.Sprintf("%d ready", status.ReadySeats))
+	}
+	if status.WarmSeats > 0 {
+		parts = append(parts, fmt.Sprintf("%d warmed", status.WarmSeats))
+	}
+	if status.NotWarmedSeats > 0 {
+		parts = append(parts, fmt.Sprintf("%d waiting for warm proof", status.NotWarmedSeats))
+	}
+	if status.MissingProjectSeats > 0 {
+		parts = append(parts, fmt.Sprintf("%d missing project", status.MissingProjectSeats))
+	}
+	if status.QuotaEmptySeats > 0 {
+		parts = append(parts, fmt.Sprintf("%d quota snapshots without model rows", status.QuotaEmptySeats))
+	}
+	return strings.Join(parts, " · ")
 }
 
 // TokenAnalytics contains capacity estimation data for the status page.
@@ -142,63 +315,73 @@ type PlanCapacityView struct {
 
 // AccountStatus shows the status of a single account.
 type AccountStatus struct {
-	ID                        string               `json:"id"`
-	Type                      string               `json:"type"`
-	PlanType                  string               `json:"plan_type,omitempty"`
-	AuthMode                  string               `json:"auth_mode,omitempty"`
-	AccountID                 string               `json:"account_id,omitempty"`
-	Email                     string               `json:"email,omitempty"`
-	Subject                   string               `json:"subject,omitempty"`
-	ChatGPTUserID             string               `json:"chatgpt_user_id,omitempty"`
-	WorkspaceID               string               `json:"workspace_id,omitempty"`
-	SeatKey                   string               `json:"seat_key,omitempty"`
-	FallbackOnly              bool                 `json:"fallback_only,omitempty"`
-	OperatorSource            string               `json:"operator_source,omitempty"`
-	Disabled                  bool                 `json:"disabled"`
-	Dead                      bool                 `json:"dead"`
-	PrimaryUsed               float64              `json:"primary_used_pct"`
-	SecondaryUsed             float64              `json:"secondary_used_pct"`
-	EffectivePrimary          float64              `json:"effective_primary_pct"`
-	EffectiveSecondary        float64              `json:"effective_secondary_pct"`
-	Routing                   PoolDashboardRouting `json:"routing"`
-	RecoveryAt                string               `json:"recovery_at,omitempty"`
-	PrimaryResetIn            string               `json:"primary_reset_in,omitempty"`
-	SecondaryResetIn          string               `json:"secondary_reset_in,omitempty"`
-	LastRefreshAt             string               `json:"last_refresh_at,omitempty"`
-	AuthExpiresAt             string               `json:"auth_expires_at,omitempty"`
-	AuthExpiresIn             string               `json:"auth_expires_in,omitempty"`
-	HealthStatus              string               `json:"health_status,omitempty"`
-	HealthError               string               `json:"health_error,omitempty"`
-	HealthCheckedAt           string               `json:"health_checked_at,omitempty"`
-	LastHealthyAt             string               `json:"last_healthy_at,omitempty"`
-	ProviderSubscriptionTier  string               `json:"provider_subscription_tier,omitempty"`
-	ProviderSubscriptionName  string               `json:"provider_subscription_name,omitempty"`
-	ProviderValidationCode    string               `json:"provider_validation_code,omitempty"`
-	ProviderValidationMessage string               `json:"provider_validation_message,omitempty"`
-	ProviderValidationURL     string               `json:"provider_validation_url,omitempty"`
-	ProviderCheckedAt         string               `json:"provider_checked_at,omitempty"`
-	DeadSince                 string               `json:"dead_since,omitempty"`
-	LocalLastUsed             string               `json:"local_last_used,omitempty"`
-	UsageObserved             string               `json:"usage_observed,omitempty"`
-	GitLabRateLimitName       string               `json:"gitlab_rate_limit_name,omitempty"`
-	GitLabRateLimitLimit      int                  `json:"gitlab_rate_limit_limit,omitempty"`
-	GitLabRateLimitRemaining  int                  `json:"gitlab_rate_limit_remaining"`
-	GitLabRateLimitResetAt    string               `json:"gitlab_rate_limit_reset_at,omitempty"`
-	GitLabRateLimitResetIn    string               `json:"gitlab_rate_limit_reset_in,omitempty"`
-	GitLabQuotaExceededCount  int                  `json:"gitlab_quota_exceeded_count,omitempty"`
-	GitLabQuotaProbeIn        string               `json:"gitlab_quota_probe_in,omitempty"`
-	Score                     float64              `json:"score"`
-	Inflight                  int64                `json:"inflight"`
-	LocalTokens               int64                `json:"local_tokens"`
+	ID                        string                        `json:"id"`
+	Type                      string                        `json:"type"`
+	PlanType                  string                        `json:"plan_type,omitempty"`
+	AuthMode                  string                        `json:"auth_mode,omitempty"`
+	AccountID                 string                        `json:"account_id,omitempty"`
+	Email                     string                        `json:"email,omitempty"`
+	Subject                   string                        `json:"subject,omitempty"`
+	ChatGPTUserID             string                        `json:"chatgpt_user_id,omitempty"`
+	WorkspaceID               string                        `json:"workspace_id,omitempty"`
+	SeatKey                   string                        `json:"seat_key,omitempty"`
+	FallbackOnly              bool                          `json:"fallback_only,omitempty"`
+	OperatorSource            string                        `json:"operator_source,omitempty"`
+	Disabled                  bool                          `json:"disabled"`
+	Dead                      bool                          `json:"dead"`
+	PrimaryUsed               float64                       `json:"primary_used_pct"`
+	SecondaryUsed             float64                       `json:"secondary_used_pct"`
+	EffectivePrimary          float64                       `json:"effective_primary_pct"`
+	EffectiveSecondary        float64                       `json:"effective_secondary_pct"`
+	Routing                   PoolDashboardRouting          `json:"routing"`
+	RecoveryAt                string                        `json:"recovery_at,omitempty"`
+	PrimaryResetIn            string                        `json:"primary_reset_in,omitempty"`
+	SecondaryResetIn          string                        `json:"secondary_reset_in,omitempty"`
+	LastRefreshAt             string                        `json:"last_refresh_at,omitempty"`
+	AuthExpiresAt             string                        `json:"auth_expires_at,omitempty"`
+	AuthExpiresIn             string                        `json:"auth_expires_in,omitempty"`
+	HealthStatus              string                        `json:"health_status,omitempty"`
+	HealthError               string                        `json:"health_error,omitempty"`
+	HealthCheckedAt           string                        `json:"health_checked_at,omitempty"`
+	LastHealthyAt             string                        `json:"last_healthy_at,omitempty"`
+	ProbeState                string                        `json:"probe_state,omitempty"`
+	ProbeSummary              string                        `json:"probe_summary,omitempty"`
+	ProviderSubscriptionTier  string                        `json:"provider_subscription_tier,omitempty"`
+	ProviderSubscriptionName  string                        `json:"provider_subscription_name,omitempty"`
+	ProviderValidationCode    string                        `json:"provider_validation_code,omitempty"`
+	ProviderValidationMessage string                        `json:"provider_validation_message,omitempty"`
+	ProviderValidationURL     string                        `json:"provider_validation_url,omitempty"`
+	ProviderCheckedAt         string                        `json:"provider_checked_at,omitempty"`
+	ProviderTruth             *GeminiProviderTruthStatus    `json:"provider_truth,omitempty"`
+	OperationalTruth          *GeminiOperationalTruthStatus `json:"operational_truth,omitempty"`
+	ProviderQuotaSummary      string                        `json:"provider_quota_summary,omitempty"`
+	DeadSince                 string                        `json:"dead_since,omitempty"`
+	LocalLastUsed             string                        `json:"local_last_used,omitempty"`
+	UsageObserved             string                        `json:"usage_observed,omitempty"`
+	GitLabRateLimitName       string                        `json:"gitlab_rate_limit_name,omitempty"`
+	GitLabRateLimitLimit      int                           `json:"gitlab_rate_limit_limit,omitempty"`
+	GitLabRateLimitRemaining  int                           `json:"gitlab_rate_limit_remaining"`
+	GitLabRateLimitResetAt    string                        `json:"gitlab_rate_limit_reset_at,omitempty"`
+	GitLabRateLimitResetIn    string                        `json:"gitlab_rate_limit_reset_in,omitempty"`
+	GitLabQuotaExceededCount  int                           `json:"gitlab_quota_exceeded_count,omitempty"`
+	GitLabQuotaProbeIn        string                        `json:"gitlab_quota_probe_in,omitempty"`
+	Penalty                   float64                       `json:"penalty,omitempty"`
+	Score                     float64                       `json:"score"`
+	Inflight                  int64                         `json:"inflight"`
+	LocalTokens               int64                         `json:"local_tokens"`
 }
 
 type PoolDashboardRouting struct {
+	State                  string  `json:"state,omitempty"`
 	Eligible               bool    `json:"eligible"`
 	BlockReason            string  `json:"block_reason,omitempty"`
+	DegradedReason         string  `json:"degraded_reason,omitempty"`
 	PrimaryUsedPct         float64 `json:"primary_used_pct"`
 	SecondaryUsedPct       float64 `json:"secondary_used_pct"`
 	PrimaryHeadroomPct     float64 `json:"primary_headroom_pct"`
 	SecondaryHeadroomPct   float64 `json:"secondary_headroom_pct"`
+	PrimaryHeadroomKnown   bool    `json:"primary_headroom_known,omitempty"`
+	SecondaryHeadroomKnown bool    `json:"secondary_headroom_known,omitempty"`
 	RecoveryAt             string  `json:"recovery_at,omitempty"`
 	CodexRateLimitBypass   bool    `json:"codex_rate_limit_bypass,omitempty"`
 	PreemptiveThresholdPct float64 `json:"preemptive_threshold_pct,omitempty"`
@@ -214,6 +397,110 @@ type poolWorkspaceAccumulator struct {
 	EligibleCount  int
 	BlockedCount   int
 	NextRecoveryAt time.Time
+}
+
+const (
+	geminiQuotaCompatibilityLaneGeminiFacade             = "gemini_facade"
+	geminiQuotaCompatibilityLaneAnthropicAdapterRequired = "anthropic_adapter_required"
+)
+
+type geminiQuotaModelRuntimeSupport struct {
+	Routable            bool
+	CompatibilityLane   string
+	CompatibilityReason string
+}
+
+func geminiQuotaModelRuntimeSupportForSnapshot(snapshot accountSnapshot, routeProvider string) geminiQuotaModelRuntimeSupport {
+	routeProvider = strings.TrimSpace(routeProvider)
+	switch routeProvider {
+	case "gemini":
+		if (!snapshot.AntigravityProxyDisabled && !snapshot.AntigravityQuotaForbidden && snapshot.GeminiProviderTruthReady && !snapshot.AntigravityValidationBlocked) ||
+			canRouteValidationBlockedAntigravityGeminiSnapshot(snapshot) {
+			return geminiQuotaModelRuntimeSupport{
+				Routable:          true,
+				CompatibilityLane: geminiQuotaCompatibilityLaneGeminiFacade,
+			}
+		}
+		reason := sanitizeStatusMessage(firstNonEmpty(
+			strings.TrimSpace(snapshot.GeminiProviderTruthReason),
+			strings.TrimSpace(snapshot.GeminiProviderTruthState),
+			"seat not ready",
+		))
+		if reason != "" && !strings.HasPrefix(strings.ToLower(reason), "seat not ready") {
+			reason = "seat not ready: " + reason
+		}
+		return geminiQuotaModelRuntimeSupport{
+			Routable:            false,
+			CompatibilityLane:   geminiQuotaCompatibilityLaneGeminiFacade,
+			CompatibilityReason: reason,
+		}
+	case "claude":
+		return geminiQuotaModelRuntimeSupport{
+			Routable:            false,
+			CompatibilityLane:   geminiQuotaCompatibilityLaneAnthropicAdapterRequired,
+			CompatibilityReason: "quota catalog only; Anthropic-compatible adapter is not implemented",
+		}
+	default:
+		return geminiQuotaModelRuntimeSupport{
+			Routable:            false,
+			CompatibilityReason: "unsupported route provider",
+		}
+	}
+}
+
+func summarizeGeminiQuotaModels(models []GeminiModelQuotaStatus) string {
+	if len(models) == 0 {
+		return ""
+	}
+
+	total := len(models)
+	geminiTotal := 0
+	geminiRoutable := 0
+	claudeTotal := 0
+	otherTotal := 0
+
+	for _, model := range models {
+		switch strings.TrimSpace(model.RouteProvider) {
+		case "gemini":
+			geminiTotal++
+			if model.Routable {
+				geminiRoutable++
+			}
+		case "claude":
+			claudeTotal++
+		default:
+			otherTotal++
+		}
+	}
+
+	parts := []string{fmt.Sprintf("%d models", total)}
+	if geminiTotal > 0 {
+		switch {
+		case geminiRoutable == geminiTotal:
+			parts = append(parts, fmt.Sprintf("gemini %d routable", geminiTotal))
+		case geminiRoutable == 0:
+			parts = append(parts, fmt.Sprintf("gemini %d seat-blocked", geminiTotal))
+		default:
+			parts = append(parts, fmt.Sprintf("gemini %d (%d routable)", geminiTotal, geminiRoutable))
+		}
+	}
+	if claudeTotal > 0 {
+		parts = append(parts, fmt.Sprintf("claude %d catalog-only", claudeTotal))
+	}
+	if otherTotal > 0 {
+		parts = append(parts, fmt.Sprintf("other %d", otherTotal))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func summarizeGeminiQuotaStatus(updatedAt time.Time, models []GeminiModelQuotaStatus) string {
+	if len(models) > 0 {
+		return summarizeGeminiQuotaModels(models)
+	}
+	if !updatedAt.IsZero() {
+		return "0 models captured"
+	}
+	return ""
 }
 
 type currentSeatCandidate struct {
@@ -295,21 +582,118 @@ func currentSeatStatusFromCandidate(candidate *currentSeatCandidate, basis strin
 		return nil
 	}
 	routingStatus := "eligible"
-	if strings.TrimSpace(candidate.status.Routing.BlockReason) != "" {
+	if !candidate.status.Routing.Eligible && strings.TrimSpace(candidate.status.Routing.BlockReason) != "" {
+		routingStatus = strings.TrimSpace(candidate.status.Routing.BlockReason)
+	} else if strings.TrimSpace(candidate.status.Routing.State) != "" {
+		routingStatus = strings.TrimSpace(candidate.status.Routing.State)
+	} else if strings.TrimSpace(candidate.status.Routing.BlockReason) != "" {
 		routingStatus = strings.TrimSpace(candidate.status.Routing.BlockReason)
 	}
 	return &CurrentSeatStatus{
-		ID:                   candidate.status.ID,
-		Email:                candidate.status.Email,
-		WorkspaceID:          candidate.status.WorkspaceID,
-		SeatKey:              candidate.status.SeatKey,
-		RoutingStatus:        routingStatus,
-		PrimaryHeadroomPct:   candidate.status.Routing.PrimaryHeadroomPct,
-		SecondaryHeadroomPct: candidate.status.Routing.SecondaryHeadroomPct,
-		Inflight:             candidate.status.Inflight,
-		LocalLastUsed:        candidate.status.LocalLastUsed,
-		ActiveSeatCount:      activeSeatCount,
-		Basis:                basis,
+		ID:                     candidate.status.ID,
+		Email:                  candidate.status.Email,
+		WorkspaceID:            candidate.status.WorkspaceID,
+		SeatKey:                candidate.status.SeatKey,
+		RoutingStatus:          routingStatus,
+		PrimaryHeadroomPct:     candidate.status.Routing.PrimaryHeadroomPct,
+		SecondaryHeadroomPct:   candidate.status.Routing.SecondaryHeadroomPct,
+		PrimaryHeadroomKnown:   candidate.status.Routing.PrimaryHeadroomKnown,
+		SecondaryHeadroomKnown: candidate.status.Routing.SecondaryHeadroomKnown,
+		Inflight:               candidate.status.Inflight,
+		LocalLastUsed:          candidate.status.LocalLastUsed,
+		ActiveSeatCount:        activeSeatCount,
+		Basis:                  basis,
+	}
+}
+
+func geminiOperationalTruthStatus(snapshot accountSnapshot) *GeminiOperationalTruthStatus {
+	if snapshot.Type != AccountTypeGemini {
+		return nil
+	}
+	state := strings.TrimSpace(snapshot.GeminiOperationalState)
+	reason := sanitizeStatusMessage(snapshot.GeminiOperationalReason)
+	source := strings.TrimSpace(snapshot.GeminiOperationalSource)
+	if state == "" && reason == "" && source == "" && snapshot.GeminiOperationalCheckedAt.IsZero() && snapshot.GeminiOperationalLastSuccessAt.IsZero() {
+		return nil
+	}
+	status := &GeminiOperationalTruthStatus{
+		State:  state,
+		Reason: reason,
+		Source: source,
+	}
+	if !snapshot.GeminiOperationalCheckedAt.IsZero() {
+		status.CheckedAt = snapshot.GeminiOperationalCheckedAt.UTC().Format(time.RFC3339)
+	}
+	if !snapshot.GeminiOperationalLastSuccessAt.IsZero() {
+		status.LastSuccessAt = snapshot.GeminiOperationalLastSuccessAt.UTC().Format(time.RFC3339)
+	}
+	return status
+}
+
+func geminiRoutingDisplay(snapshot accountSnapshot, routing routingState, now time.Time) (string, string) {
+	if snapshot.Type != AccountTypeGemini {
+		if routing.Eligible {
+			return routingDisplayStateEnabled, ""
+		}
+		if routing.BlockReason == "rate_limited" {
+			return routingDisplayStateCooldown, ""
+		}
+		return routingDisplayStateBlocked, ""
+	}
+
+	if routing.Eligible {
+		switch strings.TrimSpace(snapshot.GeminiOperationalState) {
+		case geminiOperationalTruthStateHardFail:
+			return routingDisplayStateDegradedEnabled, sanitizeStatusMessage(firstNonEmpty(snapshot.GeminiOperationalReason, "last Gemini smoke failed"))
+		case geminiOperationalTruthStateDegradedOK:
+			return routingDisplayStateDegradedEnabled, sanitizeStatusMessage(snapshot.GeminiOperationalReason)
+		}
+		switch strings.TrimSpace(snapshot.GeminiProviderTruthState) {
+		case "", geminiProviderTruthStateReady:
+			return routingDisplayStateEnabled, ""
+		default:
+			return routingDisplayStateDegradedEnabled, sanitizeStatusMessage(firstNonEmpty(
+				snapshot.GeminiOperationalReason,
+				snapshot.GeminiProviderTruthReason,
+				geminiValidationReasonSummary(snapshot.GeminiValidationReasonCode, snapshot.GeminiValidationMessage, snapshot.GeminiValidationURL, snapshot.GeminiProviderTruthState),
+			))
+		}
+	}
+
+	switch strings.TrimSpace(routing.BlockReason) {
+	case "rate_limited":
+		return routingDisplayStateCooldown, ""
+	case "validation_blocked":
+		return routingDisplayStateQuarantined, sanitizeStatusMessage(firstNonEmpty(
+			snapshot.GeminiProviderTruthReason,
+			geminiValidationReasonSummary(snapshot.GeminiValidationReasonCode, snapshot.GeminiValidationMessage, snapshot.GeminiValidationURL, routing.BlockReason),
+		))
+	case "missing_project_id":
+		return routingDisplayStateBlocked, sanitizeStatusMessage(firstNonEmpty(
+			snapshot.GeminiProviderTruthReason,
+			"provider truth missing project_id",
+		))
+	case "not_warmed":
+		return routingDisplayStateBlocked, sanitizeStatusMessage(firstNonEmpty(
+			snapshot.GeminiOperationalReason,
+			snapshot.GeminiProviderTruthReason,
+			"seat not warmed by successful Gemini proof",
+		))
+	case "stale_provider_truth":
+		freshness := geminiProviderTruthFreshnessStatus(snapshot.GeminiProviderTruthState, snapshot.GeminiProviderCheckedAt, snapshot.GeminiQuotaUpdatedAt, now)
+		return routingDisplayStateBlocked, sanitizeStatusMessage(firstNonEmpty(
+			freshness.Reason,
+			"provider truth is stale and must refresh before routing",
+		))
+	case "quota_pressured":
+		return routingDisplayStateBlocked, "Gemini quota headroom is below the routing threshold"
+	case "operational_hard_fail":
+		return routingDisplayStateBlocked, sanitizeStatusMessage(firstNonEmpty(
+			snapshot.GeminiOperationalReason,
+			"last Gemini proof failed",
+		))
+	default:
+		return routingDisplayStateBlocked, ""
 	}
 }
 
@@ -329,14 +713,19 @@ func firstSeatStatus(values ...*CurrentSeatStatus) *CurrentSeatStatus {
 	return nil
 }
 
-func buildPoolDashboardRouting(routing routingState, now time.Time) PoolDashboardRouting {
+func buildPoolDashboardRouting(snapshot accountSnapshot, routing routingState, now time.Time) PoolDashboardRouting {
+	state, degradedReason := geminiRoutingDisplay(snapshot, routing, now)
 	row := PoolDashboardRouting{
+		State:                  state,
 		Eligible:               routing.Eligible,
 		BlockReason:            routing.BlockReason,
+		DegradedReason:         degradedReason,
 		PrimaryUsedPct:         routing.PrimaryUsed * 100,
 		SecondaryUsedPct:       routing.SecondaryUsed * 100,
 		PrimaryHeadroomPct:     routing.PrimaryHeadroom * 100,
 		SecondaryHeadroomPct:   routing.SecondaryHeadroom * 100,
+		PrimaryHeadroomKnown:   routing.PrimaryHeadroomKnown,
+		SecondaryHeadroomKnown: routing.SecondaryHeadroomKnown,
 		CodexRateLimitBypass:   routing.CodexRateLimitBypass,
 		PreemptiveThresholdPct: codexPreemptiveUsedThreshold * 100,
 	}
@@ -402,14 +791,13 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 	if profile := geminiOAuthDefaultProfile(); strings.TrimSpace(profile.ID) != "" && strings.TrimSpace(profile.Secret) != "" {
 		data.GeminiOperator.ManagedOAuthAvailable = true
 		data.GeminiOperator.ManagedOAuthProfile = firstNonEmpty(geminiOAuthProfileIDForLabel(profile.Label), strings.TrimSpace(profile.Label))
-	} else {
-		data.GeminiOperator.ManagedOAuthNote = geminiOAuthConfigError().Error()
 	}
 
 	providerSummary := make(map[string]PoolDashboardProviderSum)
 	workspaceGroups := make(map[string]*poolWorkspaceAccumulator)
 	candidateByID := make(map[string]currentSeatCandidate)
 	earliestRecovery := time.Time{}
+	geminiPool := GeminiPoolStatus{}
 	var activeSeat *currentSeatCandidate
 	var lastUsedSeat *currentSeatCandidate
 	var nextOpenAIAPIKey *currentSeatCandidate
@@ -443,7 +831,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		}
 
 		routing := snapshot.Routing
-		routingRow := buildPoolDashboardRouting(routing, now)
+		routingRow := buildPoolDashboardRouting(snapshot, routing, now)
 		primaryUsed := routing.PrimaryUsed
 		secondaryUsed := routing.SecondaryUsed
 		effectivePrimary := primaryUsed
@@ -498,6 +886,31 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 			status.LastHealthyAt = snapshot.LastHealthyAt.UTC().Format(time.RFC3339)
 		}
 		if snapshot.Type == AccountTypeGemini {
+			geminiPool.TotalSeats++
+			if routing.Eligible {
+				geminiPool.EligibleSeats++
+			}
+			if snapshot.GeminiProviderTruthReady {
+				geminiPool.ReadySeats++
+			}
+			if geminiHasOperationalProof(snapshot.GeminiOperationalState) {
+				geminiPool.WarmSeats++
+			}
+			if snapshot.AntigravityValidationBlocked {
+				geminiPool.ValidationFlaggedSeats++
+			}
+			switch strings.TrimSpace(snapshot.GeminiProviderTruthState) {
+			case geminiProviderTruthStateRestricted:
+				geminiPool.RestrictedSeats++
+			case geminiProviderTruthStateMissingProjectID:
+				geminiPool.MissingProjectSeats++
+			}
+			switch strings.TrimSpace(routing.BlockReason) {
+			case "not_warmed":
+				geminiPool.NotWarmedSeats++
+			case "stale_provider_truth":
+				geminiPool.StaleTruthSeats++
+			}
 			status.ProviderSubscriptionTier = strings.TrimSpace(snapshot.GeminiSubscriptionTierID)
 			status.ProviderSubscriptionName = strings.TrimSpace(snapshot.GeminiSubscriptionTierName)
 			status.ProviderValidationCode = strings.TrimSpace(snapshot.GeminiValidationReasonCode)
@@ -506,12 +919,102 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 			if !snapshot.GeminiProviderCheckedAt.IsZero() {
 				status.ProviderCheckedAt = snapshot.GeminiProviderCheckedAt.UTC().Format(time.RFC3339)
 			}
+			protectedModels := normalizeStringSlice(snapshot.GeminiProtectedModels)
+			protectedSet := make(map[string]struct{}, len(protectedModels))
+			for _, modelID := range protectedModels {
+				protectedSet[modelID] = struct{}{}
+			}
+			geminiPool.ProtectedModelCount += len(protectedModels)
+			quotaModels := make([]GeminiModelQuotaStatus, 0, len(snapshot.GeminiQuotaModels))
+			for _, model := range snapshot.GeminiQuotaModels {
+				routeProvider := firstNonEmpty(strings.TrimSpace(model.RouteProvider), geminiQuotaModelRouteProvider(model.Name))
+				runtimeSupport := geminiQuotaModelRuntimeSupportForSnapshot(snapshot, routeProvider)
+				quotaModel := GeminiModelQuotaStatus{
+					Name:                strings.TrimSpace(model.Name),
+					RouteProvider:       routeProvider,
+					Routable:            runtimeSupport.Routable,
+					CompatibilityLane:   runtimeSupport.CompatibilityLane,
+					CompatibilityReason: runtimeSupport.CompatibilityReason,
+					Percentage:          model.Percentage,
+					ResetTime:           strings.TrimSpace(model.ResetTime),
+					DisplayName:         strings.TrimSpace(model.DisplayName),
+					SupportsImages:      model.SupportsImages,
+					SupportsThinking:    model.SupportsThinking,
+					ThinkingBudget:      model.ThinkingBudget,
+					Recommended:         model.Recommended,
+					MaxTokens:           model.MaxTokens,
+					MaxOutputTokens:     model.MaxOutputTokens,
+					SupportedMimeTypes:  cloneSupportedMimeTypes(model.SupportedMimeTypes),
+				}
+				_, quotaModel.Protected = protectedSet[quotaModel.Name]
+				quotaModels = append(quotaModels, quotaModel)
+			}
+			var quotaStatus *GeminiProviderQuotaStatus
+			if !snapshot.GeminiQuotaUpdatedAt.IsZero() || len(snapshot.GeminiModelForwardingRules) > 0 || len(quotaModels) > 0 {
+				quotaStatus = &GeminiProviderQuotaStatus{
+					ModelForwardingRules: cloneStringMap(snapshot.GeminiModelForwardingRules),
+					Models:               quotaModels,
+				}
+				if !snapshot.GeminiQuotaUpdatedAt.IsZero() {
+					quotaStatus.UpdatedAt = snapshot.GeminiQuotaUpdatedAt.UTC().Format(time.RFC3339)
+				}
+			}
+			if quotaStatus != nil {
+				geminiPool.QuotaTrackedSeats++
+				geminiPool.QuotaModelCount += len(quotaModels)
+				if len(quotaModels) == 0 {
+					geminiPool.QuotaEmptySeats++
+				}
+			}
+			providerTruth := &GeminiProviderTruthStatus{
+				Ready:                snapshot.GeminiProviderTruthReady,
+				State:                strings.TrimSpace(snapshot.GeminiProviderTruthState),
+				Reason:               sanitizeStatusMessage(snapshot.GeminiProviderTruthReason),
+				ProjectID:            strings.TrimSpace(snapshot.AntigravityProjectID),
+				SubscriptionTierID:   strings.TrimSpace(snapshot.GeminiSubscriptionTierID),
+				SubscriptionTierName: strings.TrimSpace(snapshot.GeminiSubscriptionTierName),
+				ValidationReasonCode: strings.TrimSpace(snapshot.GeminiValidationReasonCode),
+				ValidationMessage:    sanitizeStatusMessage(snapshot.GeminiValidationMessage),
+				ValidationURL:        strings.TrimSpace(snapshot.GeminiValidationURL),
+				ProxyDisabled:        snapshot.AntigravityProxyDisabled,
+				Restricted:           strings.TrimSpace(snapshot.GeminiProviderTruthState) == geminiProviderTruthStateRestricted,
+				ValidationBlocked:    snapshot.AntigravityValidationBlocked,
+				QuotaForbidden:       snapshot.AntigravityQuotaForbidden,
+				QuotaForbiddenReason: sanitizeStatusMessage(snapshot.AntigravityQuotaForbiddenReason),
+				ProtectedModels:      protectedModels,
+				Quota:                quotaStatus,
+			}
+			if !snapshot.GeminiProviderCheckedAt.IsZero() {
+				providerTruth.CheckedAt = snapshot.GeminiProviderCheckedAt.UTC().Format(time.RFC3339)
+			}
+			freshness := geminiProviderTruthFreshnessStatus(
+				snapshot.GeminiProviderTruthState,
+				snapshot.GeminiProviderCheckedAt,
+				snapshot.GeminiQuotaUpdatedAt,
+				now,
+			)
+			if freshness.State != "" {
+				providerTruth.FreshnessState = freshness.State
+				providerTruth.Stale = freshness.Stale
+				providerTruth.StaleReason = sanitizeStatusMessage(freshness.Reason)
+				if !freshness.FreshUntil.IsZero() {
+					providerTruth.FreshUntil = freshness.FreshUntil.UTC().Format(time.RFC3339)
+				}
+			}
+			status.ProviderTruth = providerTruth
+			status.OperationalTruth = geminiOperationalTruthStatus(snapshot)
+			status.ProviderQuotaSummary = summarizeGeminiQuotaStatus(snapshot.GeminiQuotaUpdatedAt, quotaModels)
 		}
 		if !snapshot.DeadSince.IsZero() {
 			status.DeadSince = snapshot.DeadSince.UTC().Format(time.RFC3339)
 		}
 		status.HealthStatus = strings.TrimSpace(snapshot.HealthStatus)
 		status.HealthError = sanitizeStatusMessage(snapshot.HealthError)
+		status.Penalty = snapshot.Penalty
+		if snapshot.FallbackOnly {
+			status.ProbeState = managedOpenAIAPIProbeState(snapshot, now)
+			status.ProbeSummary = managedOpenAIAPIProbeSummary(snapshot, now)
+		}
 		authExpiresAt := snapshot.ExpiresAt
 		if authExpiresAt.IsZero() && !claims.ExpiresAt.IsZero() {
 			authExpiresAt = claims.ExpiresAt
@@ -556,8 +1059,12 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 			switch operatorSource {
 			case geminiOperatorSourceManagedOAuth:
 				data.GeminiOperator.ManagedSeatCount++
-			case geminiOperatorSourceManualImport, geminiOperatorSourceAntigravityImport, geminiOperatorSourceManualImportLegacy:
+			case geminiOperatorSourceAntigravityImport:
 				data.GeminiOperator.ImportedSeatCount++
+				data.GeminiOperator.AntigravitySeatCount++
+			case geminiOperatorSourceManualImport, geminiOperatorSourceManualImportLegacy:
+				data.GeminiOperator.ImportedSeatCount++
+				data.GeminiOperator.LegacySeatCount++
 			}
 		}
 
@@ -624,6 +1131,9 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 			}
 			if routing.Eligible {
 				data.OpenAIAPIPool.EligibleKeys++
+				if status.ProbeState != "healthy" {
+					data.OpenAIAPIPool.EligibleUnhealthyKeys++
+				}
 				if nextOpenAIAPIKey == nil || prefersBestEligibleSeat(candidate, nextOpenAIAPIKey) {
 					candidateCopy := candidate
 					nextOpenAIAPIKey = &candidateCopy
@@ -692,8 +1202,14 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 	if nextOpenAIAPIKey != nil {
 		data.OpenAIAPIPool.NextKeyID = nextOpenAIAPIKey.status.ID
 	}
+	data.OpenAIAPIPool.StatusNote = managedOpenAIAPIPoolStatusNote(data.OpenAIAPIPool)
 	if nextGitLabClaudeToken != nil {
 		data.GitLabClaudePool.NextTokenID = nextGitLabClaudeToken.status.ID
+	}
+	data.GeminiOperator.Note = geminiOperatorStatusNote(data.GeminiOperator)
+	if geminiPool.TotalSeats > 0 {
+		geminiPool.Note = geminiPoolStatusNote(geminiPool)
+		data.GeminiPool = &geminiPool
 	}
 
 	for _, account := range data.Accounts {
@@ -795,6 +1311,12 @@ func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
 		"pct": func(v float64) string {
 			return fmt.Sprintf("%.0f%%", v)
 		},
+		"headroomPct": func(v float64, known bool) string {
+			if !known {
+				return "n/a"
+			}
+			return fmt.Sprintf("%.0f%%", v)
+		},
 		"clip": func(v string, max int) string {
 			return clipMiddle(v, max)
 		},
@@ -826,7 +1348,10 @@ func (h *proxyHandler) serveStatusPage(w http.ResponseWriter, r *http.Request) {
 				width, color,
 			))
 		},
-		"remainingBar": func(v float64) template.HTML {
+		"remainingBarKnown": func(v float64, known bool) template.HTML {
+			if !known {
+				return template.HTML(`<div class="bar"><div class="fill" style="width:100%;background:#30363d"></div></div>`)
+			}
 			width := v
 			if width > 100 {
 				width = 100
@@ -1149,10 +1674,12 @@ const statusHTML = `<!DOCTYPE html>
             </div>
             <div class="result-block">
                 <div><strong>Keys:</strong> {{.OpenAIAPIPool.TotalKeys}}</div>
-                <div><strong>Healthy:</strong> {{.OpenAIAPIPool.HealthyKeys}}</div>
+                <div><strong>Last probe healthy:</strong> {{.OpenAIAPIPool.HealthyKeys}}</div>
                 <div><strong>Eligible now:</strong> {{.OpenAIAPIPool.EligibleKeys}}</div>
+                {{if .OpenAIAPIPool.EligibleUnhealthyKeys}}<div><strong>Eligible without fresh healthy probe:</strong> {{.OpenAIAPIPool.EligibleUnhealthyKeys}}</div>{{end}}
                 {{if .OpenAIAPIPool.NextKeyID}}<div><strong>Next fallback key:</strong> <span class="mono" title="{{.OpenAIAPIPool.NextKeyID}}">{{clip .OpenAIAPIPool.NextKeyID 24}}</span></div>{{end}}
             </div>
+            {{if .OpenAIAPIPool.StatusNote}}<div class="muted" style="margin-top: 10px;">{{.OpenAIAPIPool.StatusNote}}</div>{{end}}
             <div class="action-row">
                 <input id="openai-api-key-input" class="action-input mono" type="password" autocomplete="off" spellcheck="false" placeholder="sk-proj-..." />
                 <button id="openai-api-key-add-btn" class="action-btn" onclick="addOpenAIApiKeyFromStatus()">Add API Key</button>
@@ -1182,12 +1709,15 @@ const statusHTML = `<!DOCTYPE html>
         <div class="operator-card">
             <div class="operator-title">Antigravity Gemini Auth</div>
             <div class="muted">
-                This lane mirrors the original Antigravity browser sign-in flow, resolves the Code Assist project automatically, and stores the result as an Antigravity-backed Gemini seat in this pool. Manual <code>oauth_creds.json</code> import remains available as a low-level fallback.
+                This lane mirrors the original Antigravity browser sign-in flow, resolves the Code Assist project automatically, and stores the result as an Antigravity-backed Gemini seat in this pool. Browser auth is the only supported Gemini seat onboarding flow on this local dashboard.
             </div>
             <div class="result-block">
-                <div><strong>Imported seats:</strong> {{.GeminiOperator.ImportedSeatCount}}</div>
+                <div><strong>Antigravity seats:</strong> {{.GeminiOperator.AntigravitySeatCount}}</div>
+                {{if .GeminiOperator.LegacySeatCount}}<div><strong>Legacy local seats:</strong> {{.GeminiOperator.LegacySeatCount}}</div>{{end}}
+                {{if .GeminiOperator.ManagedSeatCount}}<div><strong>Legacy managed seats:</strong> {{.GeminiOperator.ManagedSeatCount}}</div>{{end}}
                 <div><strong>Total Gemini seats:</strong> {{.GeminiCount}}</div>
             </div>
+            {{if .GeminiOperator.Note}}<div class="muted" style="margin-top: 10px;">{{.GeminiOperator.Note}}</div>{{end}}
             <div class="action-row">
                 <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromStatus()">Start Antigravity Gemini Auth</button>
             </div>
@@ -1198,23 +1728,6 @@ const statusHTML = `<!DOCTYPE html>
                 <div id="gemini-oauth-start-outcome" class="muted" style="margin-top: 10px;"></div>
                 <a id="gemini-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px;">Open Antigravity Auth Page</a>
             </div>
-        </div>
-        <div class="operator-card">
-            <div class="operator-title">Manual Gemini Import</div>
-            <div class="muted">
-                Import an existing Gemini <code>oauth_creds.json</code> or Antigravity account JSON into the same Gemini seat pool. This is not a separate fallback/API pool; imported credentials become normal Gemini seats and are probed or primed immediately after save.
-            </div>
-            <div class="result-block">
-                <div><strong>Imported seats:</strong> {{.GeminiOperator.ImportedSeatCount}}</div>
-                <div><strong>Total Gemini seats:</strong> {{.GeminiCount}}</div>
-            </div>
-            <div class="action-row">
-                <textarea id="gemini-seat-json-input" class="action-input action-textarea mono" autocomplete="off" spellcheck="false" placeholder='{"access_token":"...","refresh_token":"...","expiry_date":1774353600000}'></textarea>
-            </div>
-            <div class="action-row">
-                <button id="gemini-seat-add-btn" class="action-btn" onclick="addGeminiSeatFromStatus()">Import oauth_creds.json</button>
-            </div>
-            <div id="gemini-seat-add-status" class="muted" style="margin-top: 10px;"></div>
         </div>
         {{if gt .Quarantine.Total 0}}
         <div class="operator-card">
@@ -1237,7 +1750,7 @@ const statusHTML = `<!DOCTYPE html>
             <div class="muted" style="margin-top: 8px;">{{.Basis}}</div>
             <div class="result-block">
                 <div><strong>Routing:</strong> {{.RoutingStatus}}</div>
-                <div><strong>Headroom:</strong> {{printf "%.0f%%" .PrimaryHeadroomPct}} / {{printf "%.0f%%" .SecondaryHeadroomPct}}</div>
+	                <div><strong>Headroom:</strong> {{headroomPct .PrimaryHeadroomPct .PrimaryHeadroomKnown}} / {{headroomPct .SecondaryHeadroomPct .SecondaryHeadroomKnown}}</div>
                 {{if .WorkspaceID}}<div><strong>Workspace:</strong> <span class="mono" title="{{.WorkspaceID}}">{{clipOpaque .WorkspaceID}}</span></div>{{end}}
                 {{if .SeatKey}}<div><strong>Seat:</strong> <span class="mono" title="{{.SeatKey}}">{{clipOpaque .SeatKey}}</span></div>{{end}}
                 {{if gt .Inflight 0}}<div><strong>Inflight:</strong> {{.Inflight}}</div>{{end}}
@@ -1257,7 +1770,7 @@ const statusHTML = `<!DOCTYPE html>
             <div class="muted" style="margin-top: 8px;">{{.Basis}}</div>
             <div class="result-block">
                 <div><strong>Routing:</strong> {{.RoutingStatus}}</div>
-                <div><strong>Headroom:</strong> {{printf "%.0f%%" .PrimaryHeadroomPct}} / {{printf "%.0f%%" .SecondaryHeadroomPct}}</div>
+	                <div><strong>Headroom:</strong> {{headroomPct .PrimaryHeadroomPct .PrimaryHeadroomKnown}} / {{headroomPct .SecondaryHeadroomPct .SecondaryHeadroomKnown}}</div>
                 {{if .WorkspaceID}}<div><strong>Workspace:</strong> <span class="mono" title="{{.WorkspaceID}}">{{clipOpaque .WorkspaceID}}</span></div>{{end}}
                 {{if .SeatKey}}<div><strong>Seat:</strong> <span class="mono" title="{{.SeatKey}}">{{clipOpaque .SeatKey}}</span></div>{{end}}
                 <div><strong>Last used:</strong> {{.LocalLastUsed}}</div>
@@ -1272,7 +1785,7 @@ const statusHTML = `<!DOCTYPE html>
             <div class="muted" style="margin-top: 8px;">{{.Basis}}</div>
             <div class="result-block">
                 <div><strong>Routing:</strong> {{.RoutingStatus}}</div>
-                <div><strong>Headroom:</strong> {{printf "%.0f%%" .PrimaryHeadroomPct}} / {{printf "%.0f%%" .SecondaryHeadroomPct}}</div>
+	                <div><strong>Headroom:</strong> {{headroomPct .PrimaryHeadroomPct .PrimaryHeadroomKnown}} / {{headroomPct .SecondaryHeadroomPct .SecondaryHeadroomKnown}}</div>
                 {{if .WorkspaceID}}<div><strong>Workspace:</strong> <span class="mono" title="{{.WorkspaceID}}">{{clipOpaque .WorkspaceID}}</span></div>{{end}}
                 {{if .SeatKey}}<div><strong>Seat:</strong> <span class="mono" title="{{.SeatKey}}">{{clipOpaque .SeatKey}}</span></div>{{end}}
                 <div><strong>Last used:</strong> {{.LocalLastUsed}}</div>
@@ -1448,24 +1961,30 @@ const statusHTML = `<!DOCTYPE html>
             <td class="mono" title="{{if .WorkspaceID}}{{.WorkspaceID}}{{else}}unknown{{end}}">{{if .WorkspaceID}}{{clipOpaque .WorkspaceID}}{{else}}unknown{{end}}</td>
             <td class="mono" title="{{if .SeatKey}}{{.SeatKey}}{{else}}{{.ID}}{{end}}">{{if .SeatKey}}{{clipOpaque .SeatKey}}{{else}}{{clip .ID 24}}{{end}}</td>
             <td>
-                {{if .Routing.Eligible}}<span class="status-ok">eligible</span>{{else}}<span class="status-warn">{{.Routing.BlockReason}}</span>{{end}}
+                {{if .Routing.Eligible}}<span class="status-ok">{{if .Routing.State}}{{.Routing.State}}{{else}}eligible{{end}}</span>{{else}}<span class="status-warn">{{if .Routing.State}}{{.Routing.State}}{{else}}{{.Routing.BlockReason}}{{end}}</span>{{end}}
                 {{if .FallbackOnly}}<br><small><span class="tag tag-api">fallback</span></small>{{end}}
                 {{if .OperatorSource}}<br><small><span class="tag tag-gemini">{{.OperatorSource}}</span></small>{{end}}
-                <br><small class="detail-line">headroom {{printf "%.0f%%" .Routing.PrimaryHeadroomPct}} / {{printf "%.0f%%" .Routing.SecondaryHeadroomPct}}</small>
+	                <br><small class="detail-line">headroom {{headroomPct .Routing.PrimaryHeadroomPct .Routing.PrimaryHeadroomKnown}} / {{headroomPct .Routing.SecondaryHeadroomPct .Routing.SecondaryHeadroomKnown}}</small>
+                {{if .Routing.DegradedReason}}<br><small class="detail-line">routing detail {{clip .Routing.DegradedReason 88}}</small>{{end}}
                 {{if .UsageObserved}}<br><small class="detail-line">usage {{.UsageObserved}}</small>{{end}}
                 {{if .GitLabRateLimitName}}<br><small class="detail-line" title="{{.GitLabRateLimitName}}{{if .GitLabRateLimitResetAt}} · reset {{.GitLabRateLimitResetAt}}{{end}}">gitlab api {{.GitLabRateLimitRemaining}}/{{.GitLabRateLimitLimit}}{{if .GitLabRateLimitResetIn}} · resets in {{.GitLabRateLimitResetIn}}{{end}}</small>{{end}}
                 {{if .GitLabQuotaExceededCount}}<br><small class="detail-line">quota backoff ×{{.GitLabQuotaExceededCount}}{{if .GitLabQuotaProbeIn}} · next probe {{.GitLabQuotaProbeIn}}{{end}}</small>{{end}}
                 {{if or .FallbackOnly (eq .PlanType "gitlab_duo") (eq .Type "gemini")}}<br><small class="detail-line" title="{{sanitize .HealthError}}">health {{if .HealthStatus}}{{.HealthStatus}}{{else}}unknown{{end}}{{if .HealthError}} · {{clip (sanitize .HealthError) 88}}{{end}}</small>{{end}}
+                {{if and (eq .Type "gemini") .ProviderTruth}}<br><small class="detail-line">provider {{if .ProviderTruth.State}}{{.ProviderTruth.State}}{{else if .ProviderTruth.Ready}}ready{{else}}unknown{{end}}{{if .ProviderTruth.Stale}} · stale{{end}}{{if .ProviderTruth.ProjectID}} · project <span class="mono" title="{{.ProviderTruth.ProjectID}}">{{clipOpaque .ProviderTruth.ProjectID}}</span>{{end}}</small>{{end}}
+                {{if and (eq .Type "gemini") .OperationalTruth}}<br><small class="detail-line">operational {{if .OperationalTruth.State}}{{.OperationalTruth.State}}{{else}}unknown{{end}}{{if .OperationalTruth.Reason}} · {{clip .OperationalTruth.Reason 88}}{{end}}{{if .OperationalTruth.CheckedAt}} · checked {{.OperationalTruth.CheckedAt}}{{end}}</small>{{end}}
+                {{if and (eq .Type "gemini") .ProviderQuotaSummary}}<br><small class="detail-line">quota {{.ProviderQuotaSummary}}</small>{{end}}
+                {{if .ProbeSummary}}<br><small class="detail-line">{{.ProbeSummary}}</small>{{end}}
+                {{if and .FallbackOnly (gt .Penalty 0)}}<br><small class="detail-line">penalty {{printf "%.2f" .Penalty}}</small>{{end}}
                 {{if .DeadSince}}<br><small class="detail-line">dead since {{.DeadSince}}</small>{{end}}
             </td>
             <td class="usage-cell">
-                {{remainingBar .Routing.PrimaryHeadroomPct}}<small>remaining {{pct .Routing.PrimaryHeadroomPct}}</small>
-                <br><small>used {{pct .PrimaryUsed}}</small>
+	                {{remainingBarKnown .Routing.PrimaryHeadroomPct .Routing.PrimaryHeadroomKnown}}<small>remaining {{headroomPct .Routing.PrimaryHeadroomPct .Routing.PrimaryHeadroomKnown}}</small>
+	                <br><small>used {{if .Routing.PrimaryHeadroomKnown}}{{pct .PrimaryUsed}}{{else}}n/a{{end}}</small>
                 {{if .PrimaryResetIn}}<br><small>resets in {{.PrimaryResetIn}}</small>{{end}}
             </td>
             <td class="usage-cell">
-                {{remainingBar .Routing.SecondaryHeadroomPct}}<small>remaining {{pct .Routing.SecondaryHeadroomPct}}</small>
-                <br><small>used {{pct .SecondaryUsed}}</small>
+	                {{remainingBarKnown .Routing.SecondaryHeadroomPct .Routing.SecondaryHeadroomKnown}}<small>remaining {{headroomPct .Routing.SecondaryHeadroomPct .Routing.SecondaryHeadroomKnown}}</small>
+	                <br><small>used {{if .Routing.SecondaryHeadroomKnown}}{{pct .SecondaryUsed}}{{else}}n/a{{end}}</small>
                 {{if .SecondaryResetIn}}<br><small>resets in {{.SecondaryResetIn}}</small>{{end}}
             </td>
             <td>{{if .RecoveryAt}}{{.RecoveryAt}}{{else}}—{{end}}</td>
@@ -1545,10 +2064,12 @@ const statusHTML = `<!DOCTYPE html>
     {{end}}
 
     <p style="margin-top: 20px; color: #8b949e; font-size: 12px;">
-        <strong>Note:</strong> Remaining columns show remaining headroom, not used quota.
-        Primary/Secondary usage and recovery come from the latest observed quota snapshot.
-        Codex seats leave rotation once headroom reaches 10% remaining and stay out until the observed reset restores headroom.
-        <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">Auth TTL</code>,
+	        <strong>Note:</strong> Remaining columns show remaining headroom, not used quota.
+	        Primary/Secondary usage and recovery come from the latest observed quota snapshot.
+	        Codex seats leave rotation once headroom reaches 10% remaining and stay out until the observed reset restores headroom.
+	        Gemini seats can show <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">n/a</code> until the local proxy has an actual headroom observation.
+	        Gemini <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">provider</code>, <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">operational</code>, and <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">routing</code> lines are additive on purpose: a seat may be degraded-enabled even when provider truth is restricted.
+	        <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">Auth TTL</code>,
         <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">Local Last Used</code>, and
         <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">Local Tokens</code>
         are local proxy/runtime fields, not external quota consumption.
@@ -1952,62 +2473,6 @@ const statusHTML = `<!DOCTYPE html>
             } catch (error) {
                 status.style.color = '#f85149';
                 status.textContent = 'Failed to add GitLab token: ' + (error && error.message ? error.message : error);
-            } finally {
-                button.disabled = false;
-            }
-        }
-
-        async function addGeminiSeatFromStatus() {
-            const input = document.getElementById('gemini-seat-json-input');
-            const button = document.getElementById('gemini-seat-add-btn');
-            const status = document.getElementById('gemini-seat-add-status');
-            if (!input || !button || !status) {
-                return;
-            }
-
-            const authJSON = String(input.value || '').trim();
-            if (!authJSON) {
-                status.style.color = '#f85149';
-                status.textContent = 'Paste oauth_creds.json first.';
-                return;
-            }
-
-            button.disabled = true;
-            status.style.color = '#8b949e';
-            status.textContent = 'Importing oauth_creds.json and running refresh probe...';
-
-            try {
-                const response = await fetch('/operator/gemini/import-oauth-creds', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ auth_json: authJSON })
-                });
-                const text = await response.text();
-                let data = null;
-                try {
-                    data = text ? JSON.parse(text) : null;
-                } catch (parseError) {
-                    data = null;
-                }
-                if (!response.ok) {
-                    throw new Error((data && data.error) || text || 'Failed to import Gemini oauth_creds.json');
-                }
-
-                input.value = '';
-                const accountID = String((data && data.account_id) || 'gemini_seat');
-                const healthStatus = String((data && data.health_status) || 'unknown');
-                const healthError = String((data && data.health_error) || '').trim();
-                if (data && data.dead) {
-                    status.style.color = '#d29922';
-                    status.textContent = 'Imported ' + accountID + ', but it is currently marked dead' + (healthError ? ': ' + healthError : '.');
-                } else {
-                    status.style.color = '#3fb950';
-                    status.textContent = 'Imported ' + accountID + '. Health: ' + healthStatus + (healthError ? ' (' + healthError + ')' : '') + '. Reloading status...';
-                }
-                window.setTimeout(() => window.location.reload(), 900);
-            } catch (error) {
-                status.style.color = '#f85149';
-                status.textContent = 'Failed to import Gemini oauth_creds.json: ' + (error && error.message ? error.message : error);
             } finally {
                 button.disabled = false;
             }

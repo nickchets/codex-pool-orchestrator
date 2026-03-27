@@ -18,9 +18,12 @@ func (h *proxyHandler) checkAdminAuth(w http.ResponseWriter, r *http.Request) bo
 	}
 
 	// Check header first, then query param
-	token := r.Header.Get("X-Admin-Token")
-	if token == "" {
-		token = r.URL.Query().Get("admin_token")
+	token := ""
+	if r != nil {
+		token = r.Header.Get("X-Admin-Token")
+		if token == "" {
+			token = r.URL.Query().Get("admin_token")
+		}
 	}
 
 	if h.cfg.debug {
@@ -34,6 +37,15 @@ func (h *proxyHandler) checkAdminAuth(w http.ResponseWriter, r *http.Request) bo
 	return true
 }
 
+func (h *proxyHandler) matchesAdminToken(r *http.Request) bool {
+	if h == nil || h.cfg.adminToken == "" || r == nil {
+		return false
+	}
+	headerToken := r.Header.Get("X-Admin-Token")
+	queryToken := r.URL.Query().Get("admin_token")
+	return headerToken == h.cfg.adminToken || queryToken == h.cfg.adminToken
+}
+
 // checkAdminOrFriendAuth verifies either the admin token or the friend code.
 // This is used for "pool stats" endpoints that are intended to be accessible in friend mode
 // (with the friend code) while still allowing admin access when configured.
@@ -44,12 +56,8 @@ func (h *proxyHandler) checkAdminOrFriendAuth(w http.ResponseWriter, r *http.Req
 	}
 
 	// Admin token (header first, then query param)
-	if h.cfg.adminToken != "" {
-		headerToken := r.Header.Get("X-Admin-Token")
-		queryToken := r.URL.Query().Get("admin_token")
-		if headerToken == h.cfg.adminToken || queryToken == h.cfg.adminToken {
-			return true
-		}
+	if h.matchesAdminToken(r) {
+		return true
 	}
 
 	// Friend code (query param or header)
@@ -63,6 +71,13 @@ func (h *proxyHandler) checkAdminOrFriendAuth(w http.ResponseWriter, r *http.Req
 
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 	return false
+}
+
+func (h *proxyHandler) isTrustedLocalOperatorRequest(r *http.Request) bool {
+	if h == nil || r == nil || h.cfg.friendCode != "" {
+		return false
+	}
+	return !hasForwardingHeaders(r) && isLoopbackHost(r.Host) && isLoopbackRemoteAddr(r.RemoteAddr)
 }
 
 func isLoopbackRemoteAddr(remoteAddr string) bool {
@@ -114,7 +129,7 @@ func (h *proxyHandler) checkLocalOperatorAuth(w http.ResponseWriter, r *http.Req
 		http.Error(w, "local operator flow disabled", http.StatusForbidden)
 		return false
 	}
-	if hasForwardingHeaders(r) || !isLoopbackHost(r.Host) || !isLoopbackRemoteAddr(r.RemoteAddr) {
+	if !h.isTrustedLocalOperatorRequest(r) {
 		http.Error(w, "loopback access required", http.StatusForbidden)
 		return false
 	}
@@ -201,14 +216,8 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleOperatorClaudeGitLabTokenAdd(w, r)
 		return
 	case "/operator/gemini/account-add", "/operator/gemini/import-oauth-creds":
-		if !h.checkLocalOperatorAuth(w, r) {
-			return
-		}
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		h.handleOperatorGeminiSeatAdd(w, r)
+		// Legacy local/manual Gemini import routes are intentionally retired.
+		http.NotFound(w, r)
 		return
 	case "/operator/gemini/oauth-start":
 		if !h.checkLocalOperatorAuth(w, r) {
@@ -249,6 +258,46 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.handleOperatorGeminiAntigravityOAuthCallback(w, r)
+		return
+	case "/operator/gemini/seat-smoke":
+		if !h.checkLocalOperatorAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleOperatorGeminiSeatSmoke(w, r)
+		return
+	case "/operator/gemini/reset-bundle":
+		if !h.checkLocalOperatorAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleOperatorGeminiResetBundle(w, r)
+		return
+	case "/operator/gemini/reset-delete":
+		if !h.checkLocalOperatorAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleOperatorGeminiResetDelete(w, r)
+		return
+	case "/operator/gemini/reset-rollback":
+		if !h.checkLocalOperatorAuth(w, r) {
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		h.handleOperatorGeminiResetRollback(w, r)
 		return
 	case "/operator/account-delete":
 		if !h.checkLocalOperatorAuth(w, r) {
@@ -390,6 +439,10 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveCodexSetupScript(w, r)
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/setup/opencode/") {
+		h.serveOpenCodeSetupScript(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/setup/gemini/") {
 		h.serveGeminiSetupScript(w, r)
 		return
@@ -430,7 +483,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Config download routes (no auth - token is the auth)
-	if strings.HasPrefix(r.URL.Path, "/config/codex/") || strings.HasPrefix(r.URL.Path, "/config/gemini/") || strings.HasPrefix(r.URL.Path, "/config/claude/") {
+	if strings.HasPrefix(r.URL.Path, "/config/codex/") || strings.HasPrefix(r.URL.Path, "/config/opencode/") || strings.HasPrefix(r.URL.Path, "/config/gemini/") || strings.HasPrefix(r.URL.Path, "/config/claude/") {
 		h.serveConfigDownload(w, r)
 		return
 	}

@@ -123,6 +123,105 @@ func TestServeGeminiSetupScript_PowerShell(t *testing.T) {
 	}
 }
 
+func TestServeOpenCodeSetupScript_PowerShell(t *testing.T) {
+	secret := "test-secret-key-12345678901234567890"
+	t.Setenv("POOL_JWT_SECRET", secret)
+
+	tmpDir := t.TempDir()
+	usersPath := filepath.Join(tmpDir, "pool_users.json")
+	store, err := newPoolUserStore(usersPath)
+	if err != nil {
+		t.Fatalf("newPoolUserStore: %v", err)
+	}
+
+	user := &PoolUser{
+		ID:        "user789",
+		Token:     "tok789",
+		Email:     "opencode@example.com",
+		PlanType:  "pro",
+		CreatedAt: time.Now(),
+	}
+	if err := store.Create(user); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	h := &proxyHandler{poolUsers: store}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/setup/opencode/tok789?shell=powershell", nil)
+	rr := httptest.NewRecorder()
+	h.serveOpenCodeSetupScript(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("Content-Type = %q, want text/plain*", ct)
+	}
+	body := rr.Body.String()
+	for _, fragment := range []string{
+		"Invoke-RestMethod -Uri $ConfigUrl -Method Get",
+		"opencode.json",
+		"antigravity-accounts.json",
+		".codex-pool.bak",
+		"Antigravity pool line via /v1",
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("expected %q in PowerShell body, got:\n%s", fragment, body)
+		}
+	}
+	if strings.Contains(body, "`") {
+		t.Fatalf("PowerShell script should not contain backticks (Go raw string safety), got:\n%s", body)
+	}
+}
+
+func TestServeOpenCodeSetupScript_Bash(t *testing.T) {
+	secret := "test-secret-key-12345678901234567890"
+	t.Setenv("POOL_JWT_SECRET", secret)
+
+	tmpDir := t.TempDir()
+	usersPath := filepath.Join(tmpDir, "pool_users.json")
+	store, err := newPoolUserStore(usersPath)
+	if err != nil {
+		t.Fatalf("newPoolUserStore: %v", err)
+	}
+
+	user := &PoolUser{
+		ID:        "user789",
+		Token:     "tok789",
+		Email:     "opencode@example.com",
+		PlanType:  "pro",
+		CreatedAt: time.Now(),
+	}
+	if err := store.Create(user); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	h := &proxyHandler{poolUsers: store}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/setup/opencode/tok789", nil)
+	rr := httptest.NewRecorder()
+	h.serveOpenCodeSetupScript(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/x-shellscript") {
+		t.Fatalf("Content-Type = %q, want text/x-shellscript*", ct)
+	}
+	body := rr.Body.String()
+	for _, fragment := range []string{
+		"curl -fsSL \"$CONFIG_URL\" -o \"$TMP_JSON\"",
+		"opencode.json",
+		"antigravity-accounts.json",
+		".codex-pool.bak",
+		"OpenCode will use the Antigravity pool line via /v1.",
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("expected %q in bash body, got:\n%s", fragment, body)
+		}
+	}
+}
+
 func TestServeGeminiSetupScript_Bash(t *testing.T) {
 	secret := "test-secret-key-12345678901234567890"
 	t.Setenv("POOL_JWT_SECRET", secret)
@@ -243,17 +342,18 @@ func TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction(t *testing.T) 
 		"overview-quarantine-detail",
 		"Long-dead seats moved out of active rotation",
 		"dead since",
-		"Antigravity Gemini browser auth and manual imports land in the same Gemini seat pool here",
+		"Antigravity Gemini browser auth lands seats directly in the shared Gemini pool here",
+		"Gemini CLI / OpenCode Setup",
 		"Configures the Gemini CLI endpoint and points you to the same local dashboard/operator flow used for seat onboarding",
+		"OpenCode One-Line Setup",
+		"OpenCode Manual Config",
+		"/setup/opencode/<download-token>",
+		"/config/opencode/<download-token>",
 		"Start Antigravity Gemini Auth",
-		"Import oauth_creds.json",
-		"gemini-seat-json-input",
 		"/operator/gemini/antigravity/oauth-start",
-		"/operator/gemini/import-oauth-creds",
 		"gemini_oauth_result",
 		"python3 -m webbrowser",
-		"If you already have a real Gemini oauth_creds.json or Antigravity account JSON",
-		"import it into the Gemini manual-import field on / or /status",
+		"Antigravity browser auth is the only supported Gemini seat onboarding flow on this local dashboard.",
 		"Fallback API Pool",
 		"GitLab Claude Pool",
 		"Start Codex OAuth",
@@ -271,6 +371,10 @@ func TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction(t *testing.T) 
 		"Waiting for pool seat state to change...",
 		"Waiting for pool seat state to change.",
 		"codex-oauth-result",
+		"acc.provider_quota_summary",
+		"providerTruth.project_id",
+		"compatibility_lane",
+		"gemini_pool",
 		"auth_expires_at",
 		"last_refresh_at",
 	} {
@@ -287,6 +391,11 @@ func TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction(t *testing.T) 
 		"Downloads credentials and configures Gemini CLI endpoint",
 		"open http://127.0.0.1:8989/status",
 		"cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json",
+		"Import oauth_creds.json",
+		"gemini-seat-json-input",
+		"/operator/gemini/import-oauth-creds",
+		"If you already have a real Gemini oauth_creds.json or Antigravity account JSON",
+		"import it into the Gemini manual-import field on / or /status",
 		"noopener noreferrer",
 		"auth_expires_in || ''",
 		"local_last_used || ''",

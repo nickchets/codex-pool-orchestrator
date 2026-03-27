@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -15,6 +16,7 @@ const (
 	codexModelsFreshTTL     = time.Hour
 	codexModelsMaxStaleTTL  = 24 * time.Hour
 	codexModelsFetchTimeout = 10 * time.Second
+	codexClientVersion      = "0.106.0"
 )
 
 type codexModelsCacheEntry struct {
@@ -101,7 +103,7 @@ func (h *proxyHandler) codexWarmState(now time.Time) (bool, int, int) {
 	return false, total - warmed, total
 }
 
-func (h *proxyHandler) ensureCodexRouteReady(w http.ResponseWriter, reqID string, routePlan RoutePlan) bool {
+func (h *proxyHandler) ensureCodexRouteReady(w http.ResponseWriter, reqID string, routePlan RoutePlan, trace *requestTrace) bool {
 	if h == nil || routePlan.AccountType != AccountTypeCodex {
 		return true
 	}
@@ -112,6 +114,7 @@ func (h *proxyHandler) ensureCodexRouteReady(w http.ResponseWriter, reqID string
 	if h.cfg.debug {
 		log.Printf("[%s] blocking codex request during warm-up: missing_usage=%d/%d", reqID, missing, total)
 	}
+	trace.noteEvent("route_gate", "provider=%s result=blocked reason=warmup missing_usage=%d total=%d", AccountTypeCodex, missing, total)
 	w.Header().Set("Retry-After", "5")
 	http.Error(w, fmt.Sprintf("codex pool warming up (%d/%d seats still missing usage state); retry shortly", missing, total), http.StatusServiceUnavailable)
 	return false
@@ -121,10 +124,12 @@ func (h *proxyHandler) maybeServeCachedCodexModels(w http.ResponseWriter, r *htt
 	if !isCodexModelsRequest(r) || admission.Kind != AdmissionKindPoolUser {
 		return false
 	}
+	trace := requestTraceFromContext(r.Context())
 
 	shape := RequestShape{Path: r.URL.Path}
 	routePlan, _, err := h.planRoute(admission, r, shape, nil)
 	if err != nil {
+		trace.noteCacheDecision(AccountTypeCodex, nil, "plan_error", 0, 0, err)
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return true
 	}
@@ -133,6 +138,7 @@ func (h *proxyHandler) maybeServeCachedCodexModels(w http.ResponseWriter, r *htt
 	if cached, ok := h.codexModels.load(); ok {
 		age := now.Sub(cached.FetchedAt)
 		if age < codexModelsFreshTTL {
+			trace.noteCacheDecision(AccountTypeCodex, nil, "hit", age, 0, nil)
 			writeCodexModelsCacheResponse(w, cached, "hit")
 			return true
 		}
@@ -146,6 +152,7 @@ func (h *proxyHandler) maybeServeCachedCodexModels(w http.ResponseWriter, r *htt
 	}
 
 	if cached, ok := h.codexModels.load(); ok && now.Sub(cached.FetchedAt) < codexModelsMaxStaleTTL {
+		trace.noteCacheDecision(AccountTypeCodex, nil, "stale", now.Sub(cached.FetchedAt), 0, refreshErr)
 		if h.cfg.debug {
 			log.Printf("[%s] serving stale codex models cache after refresh error: %v", reqID, refreshErr)
 		}
@@ -170,17 +177,37 @@ func writeCodexModelsCacheResponse(w http.ResponseWriter, entry codexModelsCache
 	_, _ = w.Write(entry.Body)
 }
 
+func ensureCodexModelsQueryDefaults(u *url.URL) {
+	if u == nil {
+		return
+	}
+	q := u.Query()
+	if q.Get("client_version") != "" {
+		return
+	}
+	q.Set("client_version", codexClientVersion)
+	u.RawQuery = q.Encode()
+}
+
 func (h *proxyHandler) fetchCodexModels(r *http.Request, reqID string, routePlan RoutePlan) (codexModelsCacheEntry, error) {
+	trace := requestTraceFromContext(r.Context())
+	startedAt := time.Now()
 	if h == nil || h.pool == nil || routePlan.Provider == nil {
-		return codexModelsCacheEntry{}, fmt.Errorf("codex models fetch unavailable")
+		err := fmt.Errorf("codex models fetch unavailable")
+		trace.noteCacheDecision(AccountTypeCodex, nil, "refresh_error", 0, time.Since(startedAt), err)
+		return codexModelsCacheEntry{}, err
 	}
 
 	acc := h.pool.peekCandidate(AccountTypeCodex, routePlan.RequiredPlan)
 	if acc == nil || isManagedCodexAPIKeyAccount(acc) {
-		return codexModelsCacheEntry{}, fmt.Errorf("no live local codex accounts for models metadata")
+		err := fmt.Errorf("no live local codex accounts for models metadata")
+		trace.noteCacheDecision(AccountTypeCodex, acc, "refresh_error", 0, time.Since(startedAt), err)
+		return codexModelsCacheEntry{}, err
 	}
 	if !providerSupportsPathForAccount(routePlan.Provider, r.URL.Path, acc) {
-		return codexModelsCacheEntry{}, fmt.Errorf("account %s does not support models metadata path", acc.ID)
+		err := fmt.Errorf("account %s does not support models metadata path", acc.ID)
+		trace.noteCacheDecision(AccountTypeCodex, acc, "refresh_error", 0, time.Since(startedAt), err)
+		return codexModelsCacheEntry{}, err
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), codexModelsFetchTimeout)
@@ -191,9 +218,11 @@ func (h *proxyHandler) fetchCodexModels(r *http.Request, reqID string, routePlan
 	outURL.Scheme = targetBase.Scheme
 	outURL.Host = targetBase.Host
 	outURL.Path = singleJoin(targetBase.Path, providerNormalizePathForAccount(routePlan.Provider, r.URL.Path, acc))
+	ensureCodexModelsQueryDefaults(&outURL)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, outURL.String(), nil)
 	if err != nil {
+		trace.noteCacheDecision(AccountTypeCodex, acc, "refresh_error", 0, time.Since(startedAt), err)
 		return codexModelsCacheEntry{}, err
 	}
 	req.Header = cloneHeader(r.Header)
@@ -206,6 +235,7 @@ func (h *proxyHandler) fetchCodexModels(r *http.Request, reqID string, routePlan
 
 	resp, err := h.transport.RoundTrip(req)
 	if err != nil {
+		trace.noteCacheDecision(AccountTypeCodex, acc, "refresh_error", 0, time.Since(startedAt), err)
 		return codexModelsCacheEntry{}, err
 	}
 	defer resp.Body.Close()
@@ -215,12 +245,16 @@ func (h *proxyHandler) fetchCodexModels(r *http.Request, reqID string, routePlan
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		trace.noteCacheDecision(AccountTypeCodex, acc, "refresh_error", 0, time.Since(startedAt), err)
 		return codexModelsCacheEntry{}, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return codexModelsCacheEntry{}, fmt.Errorf("codex models upstream %s: %s", resp.Status, string(body))
+		err := fmt.Errorf("codex models upstream %s: %s", resp.Status, string(body))
+		trace.noteCacheDecision(AccountTypeCodex, acc, "refresh_error", 0, time.Since(startedAt), err)
+		return codexModelsCacheEntry{}, err
 	}
 
+	trace.noteCacheDecision(AccountTypeCodex, acc, "refresh", 0, time.Since(startedAt), nil)
 	return codexModelsCacheEntry{
 		Body:        body,
 		ContentType: resp.Header.Get("Content-Type"),

@@ -15,11 +15,12 @@ import (
 )
 
 const (
-	managedOpenAIAPISubdir         = "openai_api"
-	managedOpenAIAPIProbeFreshness = 10 * time.Minute
-	managedOpenAIAPIProbeTimeout   = 5 * time.Second
-	managedOpenAIAPIRateLimitWait  = 45 * time.Second
-	managedOpenAIAPIProbeModel     = "gpt-5.4"
+	managedOpenAIAPISubdir              = "openai_api"
+	managedOpenAIAPIProbeFreshness      = 10 * time.Minute
+	managedOpenAIAPIProbeTimeout        = 10 * time.Second
+	managedOpenAIAPIRateLimitWait       = 45 * time.Second
+	managedOpenAIAPIProbeModel          = "gpt-5.4"
+	managedOpenAIAPITransientPenaltyCap = 1.5
 )
 
 type managedOpenAIAPIErrorDisposition struct {
@@ -27,6 +28,30 @@ type managedOpenAIAPIErrorDisposition struct {
 	MarkDead  bool
 	RateLimit bool
 	Reason    string
+}
+
+func bumpManagedOpenAIAPIPenaltyLocked(acc *Account, delta, cap float64, now time.Time) {
+	if acc == nil || delta <= 0 {
+		return
+	}
+	acc.Penalty += delta
+	if cap > 0 && acc.Penalty > cap {
+		acc.Penalty = cap
+	}
+	acc.LastPenalty = now
+}
+
+func applyManagedOpenAIAPIProbeTransportError(acc *Account, err error, now time.Time) {
+	if acc == nil {
+		return
+	}
+
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
+	acc.HealthStatus = "error"
+	acc.HealthError = sanitizeStatusMessage(err.Error())
+	acc.HealthCheckedAt = now
+	bumpManagedOpenAIAPIPenaltyLocked(acc, 0.3, managedOpenAIAPITransientPenaltyCap, now)
 }
 
 func managedOpenAIAPIAccountID(apiKey string) string {
@@ -146,10 +171,14 @@ func (h *proxyHandler) probeManagedCodexAPIKey(ctx context.Context, acc *Account
 	if h == nil || acc == nil || !isManagedCodexAPIKeyAccount(acc) {
 		return nil
 	}
+	trace := requestTraceFromContext(ctx)
+	startedAt := time.Now()
 
 	provider := h.registry.ForType(AccountTypeCodex)
 	if provider == nil {
-		return fmt.Errorf("missing codex provider")
+		err := fmt.Errorf("missing codex provider")
+		trace.noteProbe(AccountTypeCodex, acc, "error", time.Since(startedAt), err)
+		return err
 	}
 
 	probeCtx := ctx
@@ -195,15 +224,11 @@ func (h *proxyHandler) probeManagedCodexAPIKey(ctx context.Context, acc *Account
 	resp, err := h.transport.RoundTrip(req)
 	now := time.Now()
 	if err != nil {
-		acc.mu.Lock()
-		acc.HealthStatus = "error"
-		acc.HealthError = sanitizeStatusMessage(err.Error())
-		acc.HealthCheckedAt = now
-		acc.Penalty += 0.3
-		acc.mu.Unlock()
+		applyManagedOpenAIAPIProbeTransportError(acc, err, now)
 		if saveErr := saveAccount(acc); saveErr != nil {
 			log.Printf("warning: failed to persist managed api key %s probe error: %v", acc.ID, saveErr)
 		}
+		trace.noteProbe(AccountTypeCodex, acc, "error", time.Since(startedAt), err)
 		return err
 	}
 	defer resp.Body.Close()
@@ -222,6 +247,7 @@ func (h *proxyHandler) probeManagedCodexAPIKey(ctx context.Context, acc *Account
 		if saveErr := saveAccount(acc); saveErr != nil {
 			log.Printf("warning: failed to persist managed api key %s probe success: %v", acc.ID, saveErr)
 		}
+		trace.noteProbe(AccountTypeCodex, acc, "healthy", time.Since(startedAt), nil)
 		return nil
 	}
 
@@ -234,7 +260,16 @@ func (h *proxyHandler) probeManagedCodexAPIKey(ctx context.Context, acc *Account
 	if disposition.Reason == "" {
 		disposition.Reason = resp.Status
 	}
-	return fmt.Errorf("managed api key probe failed: %s", disposition.Reason)
+	err = fmt.Errorf("managed api key probe failed: %s", disposition.Reason)
+	result := "error"
+	switch {
+	case disposition.RateLimit:
+		result = "rate_limited"
+	case disposition.MarkDead:
+		result = "dead"
+	}
+	trace.noteProbe(AccountTypeCodex, acc, result, time.Since(startedAt), err)
+	return err
 }
 
 func classifyManagedOpenAIAPIError(statusCode int, headers http.Header, body []byte) managedOpenAIAPIErrorDisposition {
@@ -313,15 +348,15 @@ func applyManagedOpenAIAPIDisposition(acc *Account, disposition managedOpenAIAPI
 	case disposition.MarkDead:
 		setAccountDeadStateLocked(acc, true, now)
 		acc.HealthStatus = "dead"
-		acc.Penalty += 100.0
+		bumpManagedOpenAIAPIPenaltyLocked(acc, 100.0, 0, now)
 	case disposition.RateLimit:
 		setAccountDeadStateLocked(acc, false, now)
 		acc.HealthStatus = "rate_limited"
-		acc.Penalty += 1.0
+		bumpManagedOpenAIAPIPenaltyLocked(acc, 1.0, 0, now)
 	default:
 		setAccountDeadStateLocked(acc, false, now)
 		acc.HealthStatus = "error"
-		acc.Penalty += 0.5
+		bumpManagedOpenAIAPIPenaltyLocked(acc, 0.5, managedOpenAIAPITransientPenaltyCap, now)
 	}
 	acc.mu.Unlock()
 

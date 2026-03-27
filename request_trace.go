@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -13,10 +14,14 @@ import (
 )
 
 const (
-	localTraceHeaderID           = "X-Claude-Pool-Trace-Id"
-	localTraceHeaderMode         = "X-Claude-Wrapper-Mode"
-	localTraceHeaderStartedAt    = "X-Claude-Wrapper-Started-At"
-	localTraceHeaderOutputFormat = "X-Claude-Wrapper-Output-Format"
+	localTraceHeaderID                 = "X-Pool-Trace-Id"
+	localTraceHeaderMode               = "X-Pool-Wrapper-Mode"
+	localTraceHeaderStartedAt          = "X-Pool-Wrapper-Started-At"
+	localTraceHeaderOutputFormat       = "X-Pool-Wrapper-Output-Format"
+	legacyLocalTraceHeaderID           = "X-Claude-Pool-Trace-Id"
+	legacyLocalTraceHeaderMode         = "X-Claude-Wrapper-Mode"
+	legacyLocalTraceHeaderStartedAt    = "X-Claude-Wrapper-Started-At"
+	legacyLocalTraceHeaderOutputFormat = "X-Claude-Wrapper-Output-Format"
 )
 
 type requestTraceContextKey struct{}
@@ -103,10 +108,10 @@ func newRequestTrace(cfg config, reqID string, r *http.Request) *requestTrace {
 		path:                r.URL.Path,
 		contentLength:       r.ContentLength,
 		accept:              strings.TrimSpace(r.Header.Get("Accept")),
-		wrapperTraceID:      strings.TrimSpace(r.Header.Get(localTraceHeaderID)),
-		wrapperMode:         strings.TrimSpace(r.Header.Get(localTraceHeaderMode)),
-		wrapperStartedAt:    strings.TrimSpace(r.Header.Get(localTraceHeaderStartedAt)),
-		wrapperOutputFormat: strings.TrimSpace(r.Header.Get(localTraceHeaderOutputFormat)),
+		wrapperTraceID:      readLocalTraceHeader(r.Header, localTraceHeaderID, legacyLocalTraceHeaderID),
+		wrapperMode:         readLocalTraceHeader(r.Header, localTraceHeaderMode, legacyLocalTraceHeaderMode),
+		wrapperStartedAt:    readLocalTraceHeader(r.Header, localTraceHeaderStartedAt, legacyLocalTraceHeaderStartedAt),
+		wrapperOutputFormat: readLocalTraceHeader(r.Header, localTraceHeaderOutputFormat, legacyLocalTraceHeaderOutputFormat),
 	}
 }
 
@@ -133,6 +138,10 @@ func stripLocalTraceHeaders(h http.Header) {
 	h.Del(localTraceHeaderMode)
 	h.Del(localTraceHeaderStartedAt)
 	h.Del(localTraceHeaderOutputFormat)
+	h.Del(legacyLocalTraceHeaderID)
+	h.Del(legacyLocalTraceHeaderMode)
+	h.Del(legacyLocalTraceHeaderStartedAt)
+	h.Del(legacyLocalTraceHeaderOutputFormat)
 }
 
 func newTraceWriter(w io.Writer, trace *requestTrace) io.Writer {
@@ -350,11 +359,11 @@ func (t *requestTrace) noteSSEEvent(data []byte, isUsage bool) {
 		time.Since(t.startedAt).Milliseconds(),
 	)
 	if t.cfg.payloads && len(data) > 0 {
-		limit := t.cfg.payloadLimit
-		if limit <= 0 || limit > len(data) {
-			limit = len(data)
+		sample := "[redacted non-usage event]"
+		if isUsage {
+			sample = tracePayloadSample(data, t.cfg.payloadLimit)
 		}
-		log.Printf("[%s] trace sse_payload type=%q sample=%s", t.reqID, eventType, safeText(data[:limit]))
+		log.Printf("[%s] trace sse_payload type=%q sample=%s", t.reqID, eventType, sample)
 	}
 }
 
@@ -378,6 +387,9 @@ func (t *requestTrace) noteSSEUsageEvent(data []byte) {
 		usageCount,
 		time.Since(t.startedAt).Milliseconds(),
 	)
+	if t.cfg.payloads && len(data) > 0 {
+		log.Printf("[%s] trace sse_usage_payload type=%q sample=%s", t.reqID, eventType, tracePayloadSample(data, t.cfg.payloadLimit))
+	}
 }
 
 func (t *requestTrace) noteFinish(statusCode int, isSSE bool, managedStreamFailed bool, copyErr error) {
@@ -440,6 +452,140 @@ func (t *requestTrace) noteFinish(statusCode int, isSSE bool, managedStreamFaile
 	)
 }
 
+func (t *requestTrace) noteTokenRefresh(provider AccountType, acc *Account, profile, result string, latency time.Duration, err error) {
+	accountID, authMode := traceAccountMeta(acc)
+	t.noteEvent(
+		"token_refresh",
+		"provider=%s account=%s auth_mode=%q profile=%q result=%s latency_ms=%d error=%q",
+		provider,
+		accountID,
+		authMode,
+		strings.TrimSpace(profile),
+		strings.TrimSpace(result),
+		latency.Milliseconds(),
+		traceErrString(err),
+	)
+}
+
+func (t *requestTrace) noteAuthFallback(provider AccountType, acc *Account, attemptedProfile string, fallbackable bool, nextProfile string, err error) {
+	accountID, _ := traceAccountMeta(acc)
+	t.noteEvent(
+		"auth_fallback",
+		"provider=%s account=%s attempted_profile=%q fallbackable=%v next_profile=%q error=%q",
+		provider,
+		accountID,
+		strings.TrimSpace(attemptedProfile),
+		fallbackable,
+		strings.TrimSpace(nextProfile),
+		traceErrString(err),
+	)
+}
+
+func (t *requestTrace) noteProbe(provider AccountType, acc *Account, result string, latency time.Duration, err error) {
+	accountID, authMode := traceAccountMeta(acc)
+	t.noteEvent(
+		"probe",
+		"provider=%s account=%s auth_mode=%q result=%s latency_ms=%d error=%q",
+		provider,
+		accountID,
+		authMode,
+		strings.TrimSpace(result),
+		latency.Milliseconds(),
+		traceErrString(err),
+	)
+}
+
+func (t *requestTrace) noteFacadeTransform(provider AccountType, acc *Account, originalPath, targetPath, requestedModel, rewrittenModel, projectID, result string, err error) {
+	accountID, authMode := traceAccountMeta(acc)
+	t.noteEvent(
+		"facade_transform",
+		"provider=%s account=%s auth_mode=%q result=%s original_path=%q target_path=%q requested_model=%q rewritten_model=%q project_id=%q error=%q",
+		provider,
+		accountID,
+		authMode,
+		strings.TrimSpace(result),
+		strings.TrimSpace(originalPath),
+		strings.TrimSpace(targetPath),
+		strings.TrimSpace(requestedModel),
+		strings.TrimSpace(rewrittenModel),
+		strings.TrimSpace(projectID),
+		traceErrString(err),
+	)
+}
+
+func (t *requestTrace) noteRetryDisposition(provider AccountType, acc *Account, attempt, attempts, statusCode int, retryable bool, reason string, refreshFailed bool) {
+	accountID, authMode := traceAccountMeta(acc)
+	t.noteEvent(
+		"retry_disposition",
+		"provider=%s account=%s auth_mode=%q attempt=%d attempt_count=%d status=%d retryable=%v reason=%q refresh_failed=%v",
+		provider,
+		accountID,
+		authMode,
+		attempt,
+		attempts,
+		statusCode,
+		retryable,
+		strings.TrimSpace(reason),
+		refreshFailed,
+	)
+}
+
+func (t *requestTrace) noteCacheDecision(provider AccountType, acc *Account, state string, age, latency time.Duration, err error) {
+	accountID, authMode := traceAccountMeta(acc)
+	t.noteEvent(
+		"models_cache",
+		"provider=%s account=%s auth_mode=%q state=%s age_ms=%d latency_ms=%d error=%q",
+		provider,
+		accountID,
+		authMode,
+		strings.TrimSpace(state),
+		age.Milliseconds(),
+		latency.Milliseconds(),
+		traceErrString(err),
+	)
+}
+
+func (t *requestTrace) noteOAuthExchange(provider AccountType, lane, result, accountID string, refreshedExisting bool, latency time.Duration, err error) {
+	t.noteEvent(
+		"oauth_exchange",
+		"provider=%s lane=%q result=%s account=%q refreshed_existing=%v latency_ms=%d error=%q",
+		provider,
+		strings.TrimSpace(lane),
+		strings.TrimSpace(result),
+		strings.TrimSpace(accountID),
+		refreshedExisting,
+		latency.Milliseconds(),
+		traceErrString(err),
+	)
+}
+
+func (t *requestTrace) noteProviderTruth(provider AccountType, stage, result, projectID, tierID, validationReason string, latency time.Duration, err error) {
+	t.noteEvent(
+		"provider_truth",
+		"provider=%s stage=%q result=%s project_id=%q tier_id=%q validation_reason=%q latency_ms=%d error=%q",
+		provider,
+		strings.TrimSpace(stage),
+		strings.TrimSpace(result),
+		strings.TrimSpace(projectID),
+		strings.TrimSpace(tierID),
+		strings.TrimSpace(validationReason),
+		latency.Milliseconds(),
+		traceErrString(err),
+	)
+}
+
+func (t *requestTrace) noteEvent(event, format string, args ...any) {
+	if t == nil || !t.cfg.requests {
+		return
+	}
+	if strings.TrimSpace(format) == "" {
+		log.Printf("[%s] trace %s", t.reqID, event)
+		return
+	}
+	prefix := fmt.Sprintf("[%s] trace %s ", t.reqID, event)
+	log.Printf(prefix+format, args...)
+}
+
 func traceEventType(data []byte) string {
 	if len(data) == 0 {
 		return ""
@@ -462,4 +608,35 @@ func traceErrString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+func tracePayloadSample(data []byte, limit int) string {
+	if len(data) == 0 {
+		return ""
+	}
+	if limit <= 0 || limit > len(data) {
+		limit = len(data)
+	}
+	return safeText(data[:limit])
+}
+
+func readLocalTraceHeader(h http.Header, names ...string) string {
+	if h == nil {
+		return ""
+	}
+	for _, name := range names {
+		if value := strings.TrimSpace(h.Get(name)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func traceAccountMeta(acc *Account) (string, string) {
+	if acc == nil {
+		return "", ""
+	}
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
+	return acc.ID, acc.AuthMode
 }

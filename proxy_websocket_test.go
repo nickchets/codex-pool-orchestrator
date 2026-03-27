@@ -253,6 +253,89 @@ func TestProxyWebSocketPoolAcceptsAuthFromSubprotocol(t *testing.T) {
 	}
 }
 
+func TestProxyWebSocketLogsTraceLifecycle(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	user := &PoolUser{
+		ID:       "0bed5e30f3489bee45d17a781156cb96",
+		Email:    "pool@example.com",
+		PlanType: "pro",
+	}
+	auth, err := generateCodexAuth(getPoolJWTSecret(), user)
+	if err != nil {
+		t.Fatalf("generate auth: %v", err)
+	}
+
+	upstreamReqCh := make(chan struct{}, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamReqCh <- struct{}{}
+		writeWebSocketSwitchingProtocolsResponse(w, r)
+	}))
+	defer upstream.Close()
+
+	baseURL, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	codex := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	claude := NewClaudeProvider(baseURL)
+	gemini := NewGeminiProvider(baseURL, baseURL)
+	registry := NewProviderRegistry(codex, claude, gemini)
+
+	acc := &Account{
+		Type:        AccountTypeCodex,
+		ID:          "codex_pool_trace",
+		AccessToken: "pool-access-token",
+		AccountID:   "acct_pool_trace",
+		PlanType:    "pro",
+	}
+	pool := newPoolState([]*Account{acc}, false)
+
+	h := &proxyHandler{
+		cfg: config{
+			requestTimeout:       5 * time.Second,
+			maxInMemoryBodyBytes: 1024,
+			traceRequests:        true,
+		},
+		transport: http.DefaultTransport,
+		pool:      pool,
+		registry:  registry,
+		metrics:   newMetrics(),
+		recent:    newRecentErrors(5),
+	}
+
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	logs := captureLogs(t, func() {
+		statusLine := performRawWebSocketHandshake(t, proxy.URL, "/responses", map[string]string{
+			"Authorization": "Bearer " + auth.Tokens.AccessToken,
+			"session_id":    "thread-ws-trace-1",
+		})
+		if !strings.Contains(statusLine, "101") {
+			t.Fatalf("expected 101 response, got %q", statusLine)
+		}
+
+		select {
+		case <-upstreamReqCh:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for upstream websocket request")
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	})
+
+	if !strings.Contains(logs, "trace route mode=websocket") {
+		t.Fatalf("missing websocket route trace log: %s", logs)
+	}
+	if !strings.Contains(logs, "trace response status=101") {
+		t.Fatalf("missing websocket response trace log: %s", logs)
+	}
+	if !strings.Contains(logs, "trace finish mode=websocket") {
+		t.Fatalf("missing websocket finish trace log: %s", logs)
+	}
+}
+
 func TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
 

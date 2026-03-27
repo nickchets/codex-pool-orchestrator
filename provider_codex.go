@@ -121,12 +121,17 @@ func (p *CodexProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 }
 
 func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error {
+	trace := requestTraceFromContext(ctx)
+	startedAt := time.Now()
+
 	acc.mu.Lock()
 	refreshTok := acc.RefreshToken
 	acc.mu.Unlock()
 
 	if refreshTok == "" {
-		return errors.New("no refresh token")
+		err := errors.New("no refresh token")
+		trace.noteTokenRefresh(AccountTypeCodex, acc, "", "fail", time.Since(startedAt), err)
+		return err
 	}
 
 	// Match Codex behavior: JSON body, Content-Type: application/json
@@ -151,6 +156,7 @@ func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transpor
 
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
+		trace.noteTokenRefresh(AccountTypeCodex, acc, "", "fail", time.Since(startedAt), err)
 		return err
 	}
 	defer resp.Body.Close()
@@ -158,16 +164,24 @@ func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transpor
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
 		if len(bytes.TrimSpace(msg)) > 0 {
-			return fmt.Errorf("refresh unauthorized: %s: %s", resp.Status, safeText(msg))
+			err = fmt.Errorf("refresh unauthorized: %s: %s", resp.Status, safeText(msg))
+			trace.noteTokenRefresh(AccountTypeCodex, acc, "", "fail", time.Since(startedAt), err)
+			return err
 		}
-		return fmt.Errorf("refresh unauthorized: %s", resp.Status)
+		err = fmt.Errorf("refresh unauthorized: %s", resp.Status)
+		trace.noteTokenRefresh(AccountTypeCodex, acc, "", "fail", time.Since(startedAt), err)
+		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
 		if len(bytes.TrimSpace(msg)) > 0 {
-			return fmt.Errorf("refresh failed: %s: %s", resp.Status, safeText(msg))
+			err = fmt.Errorf("refresh failed: %s: %s", resp.Status, safeText(msg))
+			trace.noteTokenRefresh(AccountTypeCodex, acc, "", "fail", time.Since(startedAt), err)
+			return err
 		}
-		return fmt.Errorf("refresh failed: %s", resp.Status)
+		err = fmt.Errorf("refresh failed: %s", resp.Status)
+		trace.noteTokenRefresh(AccountTypeCodex, acc, "", "fail", time.Since(startedAt), err)
+		return err
 	}
 
 	var payload struct {
@@ -176,10 +190,13 @@ func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transpor
 		RefreshToken string `json:"refresh_token"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		trace.noteTokenRefresh(AccountTypeCodex, acc, "", "fail", time.Since(startedAt), err)
 		return err
 	}
 	if payload.AccessToken == "" {
-		return errors.New("empty access token after refresh")
+		err := errors.New("empty access token after refresh")
+		trace.noteTokenRefresh(AccountTypeCodex, acc, "", "fail", time.Since(startedAt), err)
+		return err
 	}
 
 	acc.mu.Lock()
@@ -207,7 +224,13 @@ func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transpor
 	setAccountDeadStateLocked(acc, false, acc.LastRefresh)
 	acc.mu.Unlock()
 
-	return saveAccount(acc)
+	if err := saveAccount(acc); err != nil {
+		trace.noteTokenRefresh(AccountTypeCodex, acc, "", "persist_fail", time.Since(startedAt), err)
+		return err
+	}
+
+	trace.noteTokenRefresh(AccountTypeCodex, acc, "", "ok", time.Since(startedAt), nil)
+	return nil
 }
 
 func (p *CodexProvider) ParseUsage(obj map[string]any) *RequestUsage {

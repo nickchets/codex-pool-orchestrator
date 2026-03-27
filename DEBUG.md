@@ -13,7 +13,8 @@
 - User service restart: `systemctl --user restart codex-pool.service`
 - Local status page: `curl -fsS http://127.0.0.1:8989/status`
 - Local health probe: `curl -fsS http://127.0.0.1:8989/healthz`
-- Antigravity Gemini OAuth import: `payload=$(jq -Rs '{auth_json: .}' /home/lap/.antigravity_tools/accounts/<account>.json) && curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/import-oauth-creds -H 'Content-Type: application/json' --data "$payload"`
+- Antigravity Gemini OAuth start (low-level truth check): `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/antigravity/oauth-start -H 'Content-Type: application/json' --data '{}'`
+- Restricted Gemini seat smoke with persisted `operational_truth`: `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data '{"account_id":"gemini_seat_1d2425df7919","model":"gemini-2.5-flash","prompt":"Reply with exactly GEMINI_SMOKE_OK:gemini_seat_1d2425df7919."}'`
 - Direct pooled Gemini v1beta probe: `curl -fsS -X POST http://127.0.0.1:8989/v1beta/models/gemini-2.5-flash:generateContent -H "x-goog-api-key: $POOL_KEY" -H 'Content-Type: application/json' --data @/tmp/cpo_pool_v1beta_probe_body.json`
 - Gemini CLI live smoke through pool: `GEMINI_API_KEY="$POOL_KEY" GOOGLE_GEMINI_BASE_URL='http://127.0.0.1:8989' GOOGLE_API_KEY='' GOOGLE_GENAI_USE_GCA='' GOOGLE_CLOUD_ACCESS_TOKEN='' CODE_ASSIST_ENDPOINT='' gemini -m gemini-2.5-flash -p 'Reply with exactly AG_POOL_OK.' --output-format text`
 - Live proxy smoke: `AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && curl -sS -N http://127.0.0.1:8989/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}'`
@@ -27,3 +28,5 @@
 - The current user service reads `/home/lap/.root_layer/codex_pool/codex-pool.env`; do not assume the runtime env lives under `%h/.local/share/codex-pool/runtime/` during local operator checks.
 - For pooled Gemini API-key mode, `POOL_KEY` means the synthetic Gemini pool API key (`AIzaSy-pool-...`), not the raw pool-user download token used by `/config/gemini/<token>`.
 - Pooled Gemini `/v1beta/models/*:generateContent` for imported Antigravity OAuth seats currently succeeds through the internal Code Assist facade path and requires `antigravity_project_id`; seats without `token.project_id` are not usable for this live-smoke lane.
+- For restricted Antigravity seats, `/operator/gemini/seat-smoke` is the canonical live proof: it can succeed through the fallback project even when `provider_truth.state=restricted` or `provider_truth.state=missing_project_id`, and it persists `gemini_operational_state=degraded_ok` separately from provider truth.
+- Ready Antigravity Gemini seats now auto-refresh stale provider truth on startup and on the 10-minute stale poller; after a restart, give the local service a few seconds before treating `stale_provider_truth` as final runtime truth.

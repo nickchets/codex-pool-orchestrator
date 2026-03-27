@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"testing"
+	"time"
 )
 
 func TestClassifyManagedOpenAIAPISSEErrorMarksQuotaExhaustedKeyDead(t *testing.T) {
@@ -76,5 +78,51 @@ func TestSSEInterceptWriterEventCallbackReceivesNonUsageEvents(t *testing.T) {
 	}
 	if !bytes.Contains(usageEvents[0], []byte(`"usage"`)) {
 		t.Fatalf("expected usage callback payload, got %s", string(usageEvents[0]))
+	}
+}
+
+func TestApplyManagedOpenAIAPIProbeTransportErrorCapsPenalty(t *testing.T) {
+	now := time.Date(2026, 3, 25, 15, 0, 0, 0, time.UTC)
+	acc := &Account{Penalty: 1.4}
+
+	applyManagedOpenAIAPIProbeTransportError(acc, context.DeadlineExceeded, now)
+
+	if acc.HealthStatus != "error" {
+		t.Fatalf("health_status=%q", acc.HealthStatus)
+	}
+	if acc.HealthError != "context deadline exceeded" {
+		t.Fatalf("health_error=%q", acc.HealthError)
+	}
+	if !acc.HealthCheckedAt.Equal(now) {
+		t.Fatalf("health_checked_at=%v", acc.HealthCheckedAt)
+	}
+	if acc.Penalty != managedOpenAIAPITransientPenaltyCap {
+		t.Fatalf("penalty=%v", acc.Penalty)
+	}
+	if !acc.LastPenalty.Equal(now) {
+		t.Fatalf("last_penalty=%v", acc.LastPenalty)
+	}
+}
+
+func TestApplyManagedOpenAIAPIDispositionCapsGenericPenalty(t *testing.T) {
+	now := time.Date(2026, 3, 25, 15, 5, 0, 0, time.UTC)
+	acc := &Account{Penalty: 1.4}
+
+	applyManagedOpenAIAPIDisposition(acc, managedOpenAIAPIErrorDisposition{Reason: "upstream unavailable"}, nil, now)
+
+	if acc.HealthStatus != "error" {
+		t.Fatalf("health_status=%q", acc.HealthStatus)
+	}
+	if acc.HealthError != "upstream unavailable" {
+		t.Fatalf("health_error=%q", acc.HealthError)
+	}
+	if !acc.HealthCheckedAt.Equal(now) {
+		t.Fatalf("health_checked_at=%v", acc.HealthCheckedAt)
+	}
+	if acc.Penalty != managedOpenAIAPITransientPenaltyCap {
+		t.Fatalf("penalty=%v", acc.Penalty)
+	}
+	if !acc.LastPenalty.Equal(now) {
+		t.Fatalf("last_penalty=%v", acc.LastPenalty)
 	}
 }

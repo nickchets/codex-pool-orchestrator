@@ -103,6 +103,9 @@ func normalizeAntigravityGeminiAccount(root map[string]any) (map[string]any, err
 	if len(account.Quota) > 0 {
 		out["antigravity_quota"] = account.Quota
 	}
+	if protectedModels := normalizeStringSliceFromAny(root["protected_models"]); len(protectedModels) > 0 {
+		out["gemini_protected_models"] = protectedModels
+	}
 	if source, _ := root["antigravity_source"].(string); strings.TrimSpace(source) != "" {
 		out["antigravity_source"] = strings.TrimSpace(source)
 	}

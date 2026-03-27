@@ -7,48 +7,67 @@ import (
 )
 
 type accountSnapshot struct {
-	ID                         string
-	Type                       AccountType
-	PlanType                   string
-	AuthMode                   string
-	OAuthProfileID             string
-	OperatorSource             string
-	OperatorEmail              string
-	AccountID                  string
-	IDToken                    string
-	IDTokenChatGPTAccountID    string
-	Disabled                   bool
-	Dead                       bool
-	Inflight                   int64
-	ExpiresAt                  time.Time
-	LastRefresh                time.Time
-	Penalty                    float64
-	Score                      float64
-	Routing                    routingState
-	Usage                      UsageSnapshot
-	Totals                     AccountUsage
-	LastUsed                   time.Time
-	RateLimitUntil             time.Time
-	DeadSince                  time.Time
-	HealthStatus               string
-	HealthError                string
-	HealthCheckedAt            time.Time
-	LastHealthyAt              time.Time
-	AntigravityEmail           string
-	GeminiSubscriptionTierID   string
-	GeminiSubscriptionTierName string
-	GeminiValidationReasonCode string
-	GeminiValidationMessage    string
-	GeminiValidationURL        string
-	GeminiProviderCheckedAt    time.Time
-	GitLabRateLimitName        string
-	GitLabRateLimitLimit       int
-	GitLabRateLimitRemaining   int
-	GitLabRateLimitResetAt     time.Time
-	GitLabQuotaExceededCount   int
-	GitLabLastQuotaExceededAt  time.Time
-	FallbackOnly               bool
-	GitLabClaude               bool
+	ID                              string
+	Type                            AccountType
+	PlanType                        string
+	AuthMode                        string
+	RefreshToken                    string
+	OAuthProfileID                  string
+	OperatorSource                  string
+	OperatorEmail                   string
+	AccountID                       string
+	IDToken                         string
+	IDTokenChatGPTAccountID         string
+	Disabled                        bool
+	Dead                            bool
+	Inflight                        int64
+	ExpiresAt                       time.Time
+	LastRefresh                     time.Time
+	Penalty                         float64
+	Score                           float64
+	Routing                         routingState
+	Usage                           UsageSnapshot
+	Totals                          AccountUsage
+	LastUsed                        time.Time
+	RateLimitUntil                  time.Time
+	DeadSince                       time.Time
+	HealthStatus                    string
+	HealthError                     string
+	HealthCheckedAt                 time.Time
+	LastHealthyAt                   time.Time
+	AntigravityEmail                string
+	AntigravityProjectID            string
+	AntigravityCurrent              bool
+	AntigravityProxyDisabled        bool
+	AntigravityValidationBlocked    bool
+	AntigravityQuotaForbidden       bool
+	AntigravityQuotaForbiddenReason string
+	GeminiSubscriptionTierID        string
+	GeminiSubscriptionTierName      string
+	GeminiValidationReasonCode      string
+	GeminiValidationMessage         string
+	GeminiValidationURL             string
+	GeminiProviderCheckedAt         time.Time
+	GeminiProviderTruthReady        bool
+	GeminiProviderTruthState        string
+	GeminiProviderTruthReason       string
+	GeminiOperationalState          string
+	GeminiOperationalReason         string
+	GeminiOperationalSource         string
+	GeminiOperationalCheckedAt      time.Time
+	GeminiOperationalLastSuccessAt  time.Time
+	GeminiProtectedModels           []string
+	GeminiQuotaModels               []GeminiModelQuotaSnapshot
+	GeminiQuotaUpdatedAt            time.Time
+	GeminiModelForwardingRules      map[string]string
+	GitLabRateLimitName             string
+	GitLabRateLimitLimit            int
+	GitLabRateLimitRemaining        int
+	GitLabRateLimitResetAt          time.Time
+	GitLabQuotaExceededCount        int
+	GitLabLastQuotaExceededAt       time.Time
+	FallbackOnly                    bool
+	GitLabClaude                    bool
 }
 
 func snapshotAccountState(a *Account, now time.Time, accountType AccountType, requiredPlan string) accountSnapshot {
@@ -60,51 +79,71 @@ func snapshotAccountState(a *Account, now time.Time, accountType AccountType, re
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	syncGeminiProviderTruthStateLocked(a)
 
 	authMode := accountAuthMode(a)
 	return accountSnapshot{
-		ID:                         a.ID,
-		Type:                       a.Type,
-		PlanType:                   a.PlanType,
-		AuthMode:                   authMode,
-		OAuthProfileID:             a.OAuthProfileID,
-		OperatorSource:             normalizeGeminiOperatorSource(a.OperatorSource, a.OAuthProfileID, a.Type),
-		OperatorEmail:              a.OperatorEmail,
-		AccountID:                  a.AccountID,
-		IDToken:                    a.IDToken,
-		IDTokenChatGPTAccountID:    a.IDTokenChatGPTAccountID,
-		Disabled:                   a.Disabled,
-		Dead:                       a.Dead,
-		Inflight:                   inflight,
-		ExpiresAt:                  a.ExpiresAt,
-		LastRefresh:                a.LastRefresh,
-		Penalty:                    a.Penalty,
-		Score:                      scoreAccountLocked(a, now),
-		Routing:                    routingStateLocked(a, now, accountType, requiredPlan),
-		Usage:                      a.Usage,
-		Totals:                     a.Totals,
-		LastUsed:                   a.LastUsed,
-		RateLimitUntil:             a.RateLimitUntil,
-		DeadSince:                  a.DeadSince,
-		HealthStatus:               a.HealthStatus,
-		HealthError:                a.HealthError,
-		HealthCheckedAt:            a.HealthCheckedAt,
-		LastHealthyAt:              a.LastHealthyAt,
-		AntigravityEmail:           a.AntigravityEmail,
-		GeminiSubscriptionTierID:   a.GeminiSubscriptionTierID,
-		GeminiSubscriptionTierName: a.GeminiSubscriptionTierName,
-		GeminiValidationReasonCode: a.GeminiValidationReasonCode,
-		GeminiValidationMessage:    a.GeminiValidationMessage,
-		GeminiValidationURL:        a.GeminiValidationURL,
-		GeminiProviderCheckedAt:    a.GeminiProviderCheckedAt,
-		GitLabRateLimitName:        a.GitLabRateLimitName,
-		GitLabRateLimitLimit:       a.GitLabRateLimitLimit,
-		GitLabRateLimitRemaining:   a.GitLabRateLimitRemaining,
-		GitLabRateLimitResetAt:     a.GitLabRateLimitResetAt,
-		GitLabQuotaExceededCount:   a.GitLabQuotaExceededCount,
-		GitLabLastQuotaExceededAt:  a.GitLabLastQuotaExceededAt,
-		FallbackOnly:               a.Type == AccountTypeCodex && authMode == accountAuthModeAPIKey,
-		GitLabClaude:               a.Type == AccountTypeClaude && authMode == accountAuthModeGitLab,
+		ID:                              a.ID,
+		Type:                            a.Type,
+		PlanType:                        a.PlanType,
+		AuthMode:                        authMode,
+		RefreshToken:                    a.RefreshToken,
+		OAuthProfileID:                  a.OAuthProfileID,
+		OperatorSource:                  normalizeGeminiOperatorSource(a.OperatorSource, a.OAuthProfileID, a.Type),
+		OperatorEmail:                   a.OperatorEmail,
+		AccountID:                       a.AccountID,
+		IDToken:                         a.IDToken,
+		IDTokenChatGPTAccountID:         a.IDTokenChatGPTAccountID,
+		Disabled:                        a.Disabled,
+		Dead:                            a.Dead,
+		Inflight:                        inflight,
+		ExpiresAt:                       a.ExpiresAt,
+		LastRefresh:                     a.LastRefresh,
+		Penalty:                         a.Penalty,
+		Score:                           scoreAccountLocked(a, now),
+		Routing:                         routingStateLocked(a, now, accountType, requiredPlan),
+		Usage:                           a.Usage,
+		Totals:                          a.Totals,
+		LastUsed:                        a.LastUsed,
+		RateLimitUntil:                  a.RateLimitUntil,
+		DeadSince:                       a.DeadSince,
+		HealthStatus:                    a.HealthStatus,
+		HealthError:                     a.HealthError,
+		HealthCheckedAt:                 a.HealthCheckedAt,
+		LastHealthyAt:                   a.LastHealthyAt,
+		AntigravityEmail:                a.AntigravityEmail,
+		AntigravityProjectID:            a.AntigravityProjectID,
+		AntigravityCurrent:              a.AntigravityCurrent,
+		AntigravityProxyDisabled:        a.AntigravityProxyDisabled,
+		AntigravityValidationBlocked:    a.AntigravityValidationBlocked,
+		AntigravityQuotaForbidden:       a.AntigravityQuotaForbidden,
+		AntigravityQuotaForbiddenReason: a.AntigravityQuotaForbiddenReason,
+		GeminiSubscriptionTierID:        a.GeminiSubscriptionTierID,
+		GeminiSubscriptionTierName:      a.GeminiSubscriptionTierName,
+		GeminiValidationReasonCode:      a.GeminiValidationReasonCode,
+		GeminiValidationMessage:         a.GeminiValidationMessage,
+		GeminiValidationURL:             a.GeminiValidationURL,
+		GeminiProviderCheckedAt:         a.GeminiProviderCheckedAt,
+		GeminiProviderTruthReady:        a.GeminiProviderTruthReady,
+		GeminiProviderTruthState:        a.GeminiProviderTruthState,
+		GeminiProviderTruthReason:       a.GeminiProviderTruthReason,
+		GeminiOperationalState:          a.GeminiOperationalState,
+		GeminiOperationalReason:         a.GeminiOperationalReason,
+		GeminiOperationalSource:         a.GeminiOperationalSource,
+		GeminiOperationalCheckedAt:      a.GeminiOperationalCheckedAt,
+		GeminiOperationalLastSuccessAt:  a.GeminiOperationalLastSuccessAt,
+		GeminiProtectedModels:           normalizeStringSlice(a.GeminiProtectedModels),
+		GeminiQuotaModels:               cloneGeminiModelQuotaSnapshots(a.GeminiQuotaModels),
+		GeminiQuotaUpdatedAt:            a.GeminiQuotaUpdatedAt,
+		GeminiModelForwardingRules:      cloneStringMap(a.GeminiModelForwardingRules),
+		GitLabRateLimitName:             a.GitLabRateLimitName,
+		GitLabRateLimitLimit:            a.GitLabRateLimitLimit,
+		GitLabRateLimitRemaining:        a.GitLabRateLimitRemaining,
+		GitLabRateLimitResetAt:          a.GitLabRateLimitResetAt,
+		GitLabQuotaExceededCount:        a.GitLabQuotaExceededCount,
+		GitLabLastQuotaExceededAt:       a.GitLabLastQuotaExceededAt,
+		FallbackOnly:                    a.Type == AccountTypeCodex && authMode == accountAuthModeAPIKey,
+		GitLabClaude:                    a.Type == AccountTypeClaude && authMode == accountAuthModeGitLab,
 	}
 }
 

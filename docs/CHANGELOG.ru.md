@@ -8,6 +8,26 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.8.0] - 2026-03-27
+
+### Добавлено
+- Browser-first Antigravity Gemini onboarding на `/` и `/status` с сохранением provider-truth для project identity, subscription tier, protected models, typed quota snapshots и warm-seat state.
+- OpenCode export и guided setup surfaces (`/config/opencode/<token>` и `/setup/opencode/<token>`) плюс Anthropic-compatible Gemini adapters для `/v1/messages` и `/v1/chat/completions`.
+- Loopback-only Gemini operator diagnostics и reset tooling: seat smoke, `reset-bundle`, `reset-delete`, `reset-rollback` с manifest snapshots и rollback artifacts.
+- Provider-scoped request tracing для OAuth exchange, token refresh, health probe, facade routing и metadata-cache событий across Codex, Claude и Gemini lanes.
+
+### Изменено
+- Gemini routing теперь работает в sticky-until-pressure режиме и перед ротацией проверяет provider truth, warm-seat state, quota pressure, project availability и observed operational failure.
+- `/status`, `/status?format=json`, landing, Gemini CLI setup и OpenCode export теперь проецируют один и тот же контракт: `provider_truth`, `operational_truth`, `routing.state`, `gemini_pool`, `provider_quota_summary` и compatibility lane.
+- Setup для Gemini CLI теперь удерживает клиентов на pool root URL в external API-key mode, а legacy local/manual Gemini import убран с operator surface в пользу browser-first Antigravity auth.
+- Codex route readiness, models-cache fetches, OAuth exchange, API-key probes и refresh flows теперь публикуют trace data и сохраняют точный cutoff `>= 90%` вместе со sticky reuse seat'а.
+
+### Исправлено
+- Gemini seat'ы после рестарта теперь честнее обновляют stale provider truth и empty-quota snapshots вместо того, чтобы ронять eligible seats в stale-routing dead end.
+- OpenCode export больше не позволяет blocked `missing_project_id` seat'у захватывать `activeIndex`; disabled seat остаётся видимым, но не становится активным аккаунтом.
+- Gemini reset rollback теперь валидирует только operator-managed paths перед delete/restore, закрывая path-traversal gap в reset tooling.
+- Restricted Antigravity seat'ы теперь можно диагностировать и, когда это допустимо, прогонять через fallback project без схлопывания provider restrictions в generic operational failure.
+
 ## [0.7.0] - 2026-03-25
 
 ### Добавлено
