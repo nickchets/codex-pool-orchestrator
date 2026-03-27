@@ -49,7 +49,9 @@ type operatorGeminiSeatSmokeResponse struct {
 	ProviderTruthState    string                                `json:"provider_truth_state,omitempty"`
 	OperationalTruth      *GeminiOperationalTruthStatus         `json:"operational_truth,omitempty"`
 	RoutingState          string                                `json:"routing_state,omitempty"`
+	RoutingBlockReason    string                                `json:"routing_block_reason,omitempty"`
 	RoutingDegradedReason string                                `json:"routing_degraded_reason,omitempty"`
+	RoutingRecoveryAt     string                                `json:"routing_recovery_at,omitempty"`
 	ValidationReasonCode  string                                `json:"validation_reason_code,omitempty"`
 	RefreshForced         bool                                  `json:"refresh_forced,omitempty"`
 	RefreshApplied        bool                                  `json:"refresh_applied,omitempty"`
@@ -76,7 +78,7 @@ func operatorGeminiSeatSmokeDefaultModel(raw string) string {
 	if model := strings.TrimSpace(raw); model != "" {
 		return model
 	}
-	return "gemini-2.5-flash"
+	return "gemini-3.1-pro"
 }
 
 func operatorGeminiSeatSmokeDefaultPrompt(raw, accountID string) string {
@@ -118,6 +120,35 @@ func geminiSmokeHTTPStatus(err error) int {
 	return 0
 }
 
+func (h *proxyHandler) doOperatorGeminiSeatSmokeGenerate(ctx context.Context, accessToken, model, projectID, reqID, prompt string, out any) error {
+	rewrittenModel := rewriteGeminiCodeAssistFacadeModel(model)
+	payload := geminiCodeAssistRequestPayload{
+		Model:        rewrittenModel,
+		Project:      projectID,
+		UserPromptID: reqID,
+		Request: geminiCodeAssistInnerRequestPayload{
+			Contents:  json.RawMessage(fmt.Sprintf(`[{"role":"user","parts":[{"text":%q}]}]`, prompt)),
+			SessionID: reqID,
+		},
+	}
+
+	if shouldUseAntigravityGeminiCodeAssistBaseFallback(rewrittenModel) {
+		var lastErr error
+		for _, base := range antigravityGeminiCodeAssistBaseCandidates(h.geminiCodeAssistBaseURL()) {
+			err := h.doGeminiCodeAssistJSONWithBase(ctx, base, http.MethodPost, "/v1internal:generateContent", accessToken, payload, out)
+			if err == nil {
+				return nil
+			}
+			lastErr = err
+		}
+		if lastErr != nil {
+			return lastErr
+		}
+	}
+
+	return h.doGeminiCodeAssistJSON(ctx, http.MethodPost, "/v1internal:generateContent", accessToken, payload, out)
+}
+
 func (h *proxyHandler) populateOperatorGeminiSeatSmokeState(result *operatorGeminiSeatSmokeResponse, accountID string, now time.Time) {
 	if h == nil || result == nil {
 		return
@@ -132,7 +163,9 @@ func (h *proxyHandler) populateOperatorGeminiSeatSmokeState(result *operatorGemi
 	result.OperationalTruth = geminiOperationalTruthStatus(snapshot)
 	routing := buildPoolDashboardRouting(snapshot, snapshot.Routing, now)
 	result.RoutingState = strings.TrimSpace(routing.State)
+	result.RoutingBlockReason = strings.TrimSpace(routing.BlockReason)
 	result.RoutingDegradedReason = strings.TrimSpace(routing.DegradedReason)
+	result.RoutingRecoveryAt = strings.TrimSpace(routing.RecoveryAt)
 }
 
 func (h *proxyHandler) handleOperatorGeminiSeatSmoke(w http.ResponseWriter, r *http.Request) {
@@ -252,18 +285,8 @@ func (h *proxyHandler) handleOperatorGeminiSeatSmoke(w http.ResponseWriter, r *h
 	}
 
 	reqID := "operator-gemini-smoke-" + randomID()
-	payload := geminiCodeAssistRequestPayload{
-		Model:        model,
-		Project:      result.ProjectID,
-		UserPromptID: reqID,
-		Request: geminiCodeAssistInnerRequestPayload{
-			Contents:  json.RawMessage(fmt.Sprintf(`[{"role":"user","parts":[{"text":%q}]}]`, prompt)),
-			SessionID: reqID,
-		},
-	}
-
 	var rawEnvelope json.RawMessage
-	if err := h.doGeminiCodeAssistJSON(ctx, http.MethodPost, "/v1internal:generateContent", accessToken, payload, &rawEnvelope); err != nil {
+	if err := h.doOperatorGeminiSeatSmokeGenerate(ctx, accessToken, model, result.ProjectID, reqID, prompt, &rawEnvelope); err != nil {
 		acc.mu.Lock()
 		noteGeminiOperationalFailureLocked(acc, time.Now().UTC(), "operator_smoke", err)
 		acc.mu.Unlock()
