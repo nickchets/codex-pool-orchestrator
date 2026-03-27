@@ -85,13 +85,17 @@ type GeminiOperatorStatus struct {
 type GeminiPoolStatus struct {
 	TotalSeats             int    `json:"total_seats"`
 	EligibleSeats          int    `json:"eligible_seats"`
+	CleanEligibleSeats     int    `json:"clean_eligible_seats,omitempty"`
+	DegradedEligibleSeats  int    `json:"degraded_eligible_seats,omitempty"`
 	ReadySeats             int    `json:"ready_seats"`
 	WarmSeats              int    `json:"warm_seats"`
+	CooldownSeats          int    `json:"cooldown_seats,omitempty"`
 	RestrictedSeats        int    `json:"restricted_seats,omitempty"`
 	ValidationFlaggedSeats int    `json:"validation_flagged_seats,omitempty"`
 	MissingProjectSeats    int    `json:"missing_project_seats,omitempty"`
 	NotWarmedSeats         int    `json:"not_warmed_seats,omitempty"`
 	StaleTruthSeats        int    `json:"stale_truth_seats,omitempty"`
+	StaleQuotaSeats        int    `json:"stale_quota_seats,omitempty"`
 	QuotaTrackedSeats      int    `json:"quota_tracked_seats,omitempty"`
 	QuotaModelCount        int    `json:"quota_model_count,omitempty"`
 	QuotaEmptySeats        int    `json:"quota_empty_seats,omitempty"`
@@ -246,7 +250,7 @@ func managedOpenAIAPIPoolStatusNote(pool OpenAIAPIPoolStatus) string {
 }
 
 func geminiOperatorStatusNote(status GeminiOperatorStatus) string {
-	parts := []string{"Antigravity browser auth is the only supported Gemini seat onboarding flow on this local dashboard."}
+	parts := []string{"Antigravity browser auth is the only supported Gemini seat onboarding flow for this pool."}
 	if status.LegacySeatCount > 0 {
 		parts = append(parts, fmt.Sprintf("%d legacy local Gemini seat(s) still remain in the pool.", status.LegacySeatCount))
 	}
@@ -270,15 +274,37 @@ func geminiPoolStatusNote(status GeminiPoolStatus) string {
 	if status.TotalSeats == 0 {
 		return ""
 	}
-	parts := make([]string, 0, 5)
+	parts := make([]string, 0, 6)
+	if status.EligibleSeats > 0 {
+		switch {
+		case status.CleanEligibleSeats > 0 && status.DegradedEligibleSeats > 0:
+			parts = append(parts, fmt.Sprintf("%d eligible (%d clean · %d degraded)", status.EligibleSeats, status.CleanEligibleSeats, status.DegradedEligibleSeats))
+		case status.CleanEligibleSeats > 0:
+			parts = append(parts, fmt.Sprintf("%d eligible (%d clean)", status.EligibleSeats, status.CleanEligibleSeats))
+		case status.DegradedEligibleSeats > 0:
+			parts = append(parts, fmt.Sprintf("%d eligible (%d degraded)", status.EligibleSeats, status.DegradedEligibleSeats))
+		default:
+			parts = append(parts, fmt.Sprintf("%d eligible", status.EligibleSeats))
+		}
+	}
 	if status.ReadySeats > 0 {
 		parts = append(parts, fmt.Sprintf("%d ready", status.ReadySeats))
 	}
 	if status.WarmSeats > 0 {
 		parts = append(parts, fmt.Sprintf("%d warmed", status.WarmSeats))
 	}
+	if status.CooldownSeats > 0 {
+		parts = append(parts, fmt.Sprintf("%d cooling down", status.CooldownSeats))
+	}
 	if status.NotWarmedSeats > 0 {
 		parts = append(parts, fmt.Sprintf("%d waiting for warm proof", status.NotWarmedSeats))
+	}
+	staleProviderSeats := status.StaleTruthSeats - status.StaleQuotaSeats
+	if staleProviderSeats > 0 {
+		parts = append(parts, fmt.Sprintf("%d stale provider truth", staleProviderSeats))
+	}
+	if status.StaleQuotaSeats > 0 {
+		parts = append(parts, fmt.Sprintf("%d stale quota snapshot", status.StaleQuotaSeats))
 	}
 	if status.MissingProjectSeats > 0 {
 		parts = append(parts, fmt.Sprintf("%d missing project", status.MissingProjectSeats))
@@ -645,6 +671,8 @@ func geminiRoutingDisplay(snapshot accountSnapshot, routing routingState, now ti
 		switch strings.TrimSpace(snapshot.GeminiOperationalState) {
 		case geminiOperationalTruthStateHardFail:
 			return routingDisplayStateDegradedEnabled, sanitizeStatusMessage(firstNonEmpty(snapshot.GeminiOperationalReason, "last Gemini smoke failed"))
+		case geminiOperationalTruthStateCooldown:
+			return routingDisplayStateDegradedEnabled, sanitizeStatusMessage(firstNonEmpty(snapshot.GeminiOperationalReason, "last Gemini proof is still cooling down"))
 		case geminiOperationalTruthStateDegradedOK:
 			return routingDisplayStateDegradedEnabled, sanitizeStatusMessage(snapshot.GeminiOperationalReason)
 		}
@@ -662,7 +690,11 @@ func geminiRoutingDisplay(snapshot accountSnapshot, routing routingState, now ti
 
 	switch strings.TrimSpace(routing.BlockReason) {
 	case "rate_limited":
-		return routingDisplayStateCooldown, ""
+		detail := sanitizeStatusMessage(firstNonEmpty(
+			snapshot.GeminiOperationalReason,
+			"Gemini seat is cooling down after a recent rate limit",
+		))
+		return routingDisplayStateCooldown, detail
 	case "validation_blocked":
 		return routingDisplayStateQuarantined, sanitizeStatusMessage(firstNonEmpty(
 			snapshot.GeminiProviderTruthReason,
@@ -684,6 +716,12 @@ func geminiRoutingDisplay(snapshot accountSnapshot, routing routingState, now ti
 		return routingDisplayStateBlocked, sanitizeStatusMessage(firstNonEmpty(
 			freshness.Reason,
 			"provider truth is stale and must refresh before routing",
+		))
+	case "stale_quota_snapshot":
+		freshness := geminiProviderTruthFreshnessStatus(snapshot.GeminiProviderTruthState, snapshot.GeminiProviderCheckedAt, snapshot.GeminiQuotaUpdatedAt, now)
+		return routingDisplayStateBlocked, sanitizeStatusMessage(firstNonEmpty(
+			freshness.Reason,
+			"quota snapshot is stale and must refresh before routing",
 		))
 	case "quota_pressured":
 		return routingDisplayStateBlocked, "Gemini quota headroom is below the routing threshold"
@@ -889,12 +927,23 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 			geminiPool.TotalSeats++
 			if routing.Eligible {
 				geminiPool.EligibleSeats++
+				if status.Routing.State == routingDisplayStateDegradedEnabled {
+					geminiPool.DegradedEligibleSeats++
+				} else {
+					geminiPool.CleanEligibleSeats++
+				}
 			}
 			if snapshot.GeminiProviderTruthReady {
 				geminiPool.ReadySeats++
 			}
-			if geminiHasOperationalProof(snapshot.GeminiOperationalState) {
+			operationalState := strings.TrimSpace(snapshot.GeminiOperationalState)
+			if geminiHasOperationalProof(operationalState) {
 				geminiPool.WarmSeats++
+			}
+			cooldownCounted := false
+			if operationalState == geminiOperationalTruthStateCooldown {
+				geminiPool.CooldownSeats++
+				cooldownCounted = true
 			}
 			if snapshot.AntigravityValidationBlocked {
 				geminiPool.ValidationFlaggedSeats++
@@ -906,10 +955,17 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 				geminiPool.MissingProjectSeats++
 			}
 			switch strings.TrimSpace(routing.BlockReason) {
+			case "rate_limited":
+				if !cooldownCounted {
+					geminiPool.CooldownSeats++
+				}
 			case "not_warmed":
 				geminiPool.NotWarmedSeats++
 			case "stale_provider_truth":
 				geminiPool.StaleTruthSeats++
+			case "stale_quota_snapshot":
+				geminiPool.StaleTruthSeats++
+				geminiPool.StaleQuotaSeats++
 			}
 			status.ProviderSubscriptionTier = strings.TrimSpace(snapshot.GeminiSubscriptionTierID)
 			status.ProviderSubscriptionName = strings.TrimSpace(snapshot.GeminiSubscriptionTierName)
@@ -1656,7 +1712,7 @@ const statusHTML = `<!DOCTYPE html>
         <div class="operator-card">
             <div class="operator-title">Operator Action</div>
             <div class="muted">
-                Starts the same flow as <code>python3 /home/lap/tools/codex_pool_manager.py codex-oauth-start</code>, keeps the popup opener attached, and refreshes this page automatically when pool seat state changes.
+                Starts the same browser-based OAuth flow exposed by <code>POST /operator/codex/oauth-start</code>, keeps the popup opener attached, and refreshes this page automatically when pool seat state changes.
             </div>
             <button id="codex-oauth-start-btn" class="action-btn" onclick="startCodexOAuthFromStatus()">Start Codex OAuth</button>
             <div id="codex-oauth-start-status" class="muted" style="margin-top: 10px;"></div>
@@ -1709,7 +1765,7 @@ const statusHTML = `<!DOCTYPE html>
         <div class="operator-card">
             <div class="operator-title">Antigravity Gemini Auth</div>
             <div class="muted">
-                This lane mirrors the original Antigravity browser sign-in flow, resolves the Code Assist project automatically, and stores the result as an Antigravity-backed Gemini seat in this pool. Browser auth is the only supported Gemini seat onboarding flow on this local dashboard.
+                This lane mirrors the original Antigravity browser sign-in flow, resolves the Code Assist project automatically, and stores the result as an Antigravity-backed Gemini seat in this pool. Browser auth is the only supported Gemini seat onboarding flow for this pool.
             </div>
             <div class="result-block">
                 <div><strong>Antigravity seats:</strong> {{.GeminiOperator.AntigravitySeatCount}}</div>

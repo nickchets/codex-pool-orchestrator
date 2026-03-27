@@ -58,6 +58,7 @@ const (
 const (
 	geminiOperationalTruthStateCleanOK    = "clean_ok"
 	geminiOperationalTruthStateDegradedOK = "degraded_ok"
+	geminiOperationalTruthStateCooldown   = "cooldown"
 	geminiOperationalTruthStateHardFail   = "hard_fail"
 )
 
@@ -86,10 +87,12 @@ type routingState struct {
 }
 
 type geminiProviderTruthFreshness struct {
-	State      string
-	Stale      bool
-	Reason     string
-	FreshUntil time.Time
+	State         string
+	Stale         bool
+	Reason        string
+	FreshUntil    time.Time
+	ProviderStale bool
+	QuotaStale    bool
 }
 
 func usagePercentOrLegacy(percentValue, rawValue float64) float64 {
@@ -236,6 +239,9 @@ func routingStateLocked(a *Account, now time.Time, accountType AccountType, requ
 		if freshness.Stale {
 			state.Eligible = false
 			state.BlockReason = "stale_provider_truth"
+			if freshness.QuotaStale && !freshness.ProviderStale {
+				state.BlockReason = "stale_quota_snapshot"
+			}
 			if !freshness.FreshUntil.IsZero() {
 				state.RecoveryAt = freshness.FreshUntil
 			}
@@ -717,7 +723,7 @@ func geminiValidationReasonSummary(reasonCode, message, url, fallback string) st
 
 func geminiHasOperationalProof(state string) bool {
 	switch strings.TrimSpace(state) {
-	case geminiOperationalTruthStateCleanOK, geminiOperationalTruthStateDegradedOK:
+	case geminiOperationalTruthStateCleanOK, geminiOperationalTruthStateDegradedOK, geminiOperationalTruthStateCooldown:
 		return true
 	default:
 		return false
@@ -744,6 +750,7 @@ func noteGeminiOperationalSuccessLocked(acc *Account, now time.Time, source stri
 		return
 	}
 	state, reason := successfulGeminiOperationalStateLocked(acc)
+	acc.RateLimitUntil = time.Time{}
 	acc.GeminiOperationalState = state
 	acc.GeminiOperationalReason = strings.TrimSpace(reason)
 	acc.GeminiOperationalSource = strings.TrimSpace(source)
@@ -753,6 +760,27 @@ func noteGeminiOperationalSuccessLocked(acc *Account, now time.Time, source stri
 
 func noteGeminiOperationalFailureLocked(acc *Account, now time.Time, source string, err error) {
 	if acc == nil || acc.Type != AccountTypeGemini || err == nil {
+		return
+	}
+	if until, reason, precise, ok := geminiCodeAssistCooldownInfo(err, now); ok {
+		acc.GeminiOperationalState = geminiOperationalTruthStateCooldown
+		acc.GeminiOperationalReason = sanitizeStatusMessage(firstNonEmpty(reason, err.Error()))
+		acc.GeminiOperationalSource = strings.TrimSpace(source)
+		acc.GeminiOperationalCheckedAt = now.UTC()
+		if precise || acc.RateLimitUntil.Before(until) {
+			acc.RateLimitUntil = until.UTC()
+		}
+		return
+	}
+	if isRateLimitError(err) {
+		until := now.Add(managedGeminiRateLimitWait)
+		acc.GeminiOperationalState = geminiOperationalTruthStateCooldown
+		acc.GeminiOperationalReason = sanitizeStatusMessage(err.Error())
+		acc.GeminiOperationalSource = strings.TrimSpace(source)
+		acc.GeminiOperationalCheckedAt = now.UTC()
+		if acc.RateLimitUntil.Before(until) {
+			acc.RateLimitUntil = until.UTC()
+		}
 		return
 	}
 	acc.GeminiOperationalState = geminiOperationalTruthStateHardFail
@@ -783,6 +811,8 @@ func geminiProviderTruthFreshnessStatus(providerTruthState string, providerCheck
 	}
 
 	freshness.FreshUntil = freshUntil.UTC()
+	freshness.ProviderStale = providerStale
+	freshness.QuotaStale = quotaStale
 	if providerStale || quotaStale {
 		freshness.State = geminiProviderTruthFreshnessStateStale
 		freshness.Stale = true

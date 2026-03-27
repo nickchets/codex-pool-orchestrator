@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -759,6 +760,31 @@ func TestRoutingStateBlocksStaleProviderTruthGeminiSeat(t *testing.T) {
 	}
 }
 
+func TestRoutingStateBlocksStaleQuotaSnapshotGeminiSeat(t *testing.T) {
+	now := time.Now()
+	seat := &Account{
+		ID:                      "gemini-seat",
+		Type:                    AccountTypeGemini,
+		AntigravityProjectID:    "project-1",
+		GeminiProviderCheckedAt: now.Add(-5 * time.Minute),
+		GeminiQuotaUpdatedAt:    now.Add(-45 * time.Minute),
+	}
+
+	seat.mu.Lock()
+	routing := routingStateLocked(seat, now, AccountTypeGemini, "")
+	seat.mu.Unlock()
+
+	if routing.Eligible {
+		t.Fatalf("expected stale-quota Gemini seat to be blocked")
+	}
+	if routing.BlockReason != "stale_quota_snapshot" {
+		t.Fatalf("block_reason=%q", routing.BlockReason)
+	}
+	if routing.RecoveryAt.IsZero() {
+		t.Fatal("expected stale quota snapshot to publish a recovery_at hint")
+	}
+}
+
 func TestRoutingStateBlocksQuotaPressuredGeminiSeat(t *testing.T) {
 	now := time.Now()
 	seat := &Account{
@@ -785,6 +811,78 @@ func TestRoutingStateBlocksQuotaPressuredGeminiSeat(t *testing.T) {
 	}
 	if routing.RecoveryAt.IsZero() {
 		t.Fatal("expected quota-pressured Gemini seat to publish a recovery_at hint")
+	}
+}
+
+func TestNoteGeminiOperationalFailureLockedPrefersPreciseCooldown(t *testing.T) {
+	now := time.Date(2026, 3, 27, 15, 31, 42, 0, time.UTC)
+	preciseUntil := time.Date(2026, 3, 27, 15, 31, 46, 0, time.UTC)
+	acc := &Account{
+		ID:             "gemini-seat",
+		Type:           AccountTypeGemini,
+		RateLimitUntil: now.Add(45 * time.Second),
+	}
+	err := &geminiCodeAssistHTTPError{
+		StatusCode: http.StatusTooManyRequests,
+		Status:     "429 Too Many Requests",
+		Message: `{
+  "error": {
+    "code": 429,
+    "message": "You have exhausted your capacity on this model. Your quota will reset after 3s.",
+    "status": "RESOURCE_EXHAUSTED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "RATE_LIMIT_EXCEEDED",
+        "metadata": {
+          "quotaResetTimeStamp": "2026-03-27T15:31:46Z",
+          "quotaResetDelay": "3.923606893s"
+        }
+      },
+      {
+        "@type": "type.googleapis.com/google.rpc.RetryInfo",
+        "retryDelay": "3.923606893s"
+      }
+    ]
+  }
+}`,
+	}
+
+	acc.mu.Lock()
+	noteGeminiOperationalFailureLocked(acc, now, "operator_smoke", err)
+	gotUntil := acc.RateLimitUntil
+	gotState := acc.GeminiOperationalState
+	acc.mu.Unlock()
+
+	if !gotUntil.Equal(preciseUntil) {
+		t.Fatalf("rate_limit_until=%s, want %s", gotUntil, preciseUntil)
+	}
+	if gotState != geminiOperationalTruthStateCooldown {
+		t.Fatalf("operational_state=%q", gotState)
+	}
+}
+
+func TestNoteGeminiOperationalFailureLockedFallbackDoesNotShortenCooldown(t *testing.T) {
+	now := time.Date(2026, 3, 27, 15, 31, 42, 0, time.UTC)
+	existingUntil := now.Add(2 * time.Minute)
+	acc := &Account{
+		ID:             "gemini-seat",
+		Type:           AccountTypeGemini,
+		RateLimitUntil: existingUntil,
+	}
+	err := &geminiCodeAssistHTTPError{
+		StatusCode: http.StatusTooManyRequests,
+		Status:     "429 Too Many Requests",
+		Message:    "temporary 429 without structured cooldown metadata",
+	}
+
+	acc.mu.Lock()
+	noteGeminiOperationalFailureLocked(acc, now, "operator_smoke", err)
+	gotUntil := acc.RateLimitUntil
+	acc.mu.Unlock()
+
+	if !gotUntil.Equal(existingUntil) {
+		t.Fatalf("rate_limit_until=%s, want %s", gotUntil, existingUntil)
 	}
 }
 

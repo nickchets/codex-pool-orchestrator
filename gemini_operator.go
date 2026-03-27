@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -172,6 +173,25 @@ type geminiCodeAssistHTTPError struct {
 	Message    string
 }
 
+type geminiCodeAssistErrorEnvelope struct {
+	Error struct {
+		Message string            `json:"message,omitempty"`
+		Details []json.RawMessage `json:"details,omitempty"`
+	} `json:"error,omitempty"`
+}
+
+type geminiCodeAssistErrorDetail struct {
+	Type       string         `json:"@type,omitempty"`
+	RetryDelay string         `json:"retryDelay,omitempty"`
+	Metadata   map[string]any `json:"metadata,omitempty"`
+}
+
+var (
+	geminiCooldownTimestampRE    = regexp.MustCompile(`quotaResetTimeStamp"\s*:\s*"([^"]+)"`)
+	geminiCooldownDelayRE        = regexp.MustCompile(`(?:quotaResetDelay|retryDelay)"\s*:\s*"([^"]+)"`)
+	geminiCooldownMessageDelayRE = regexp.MustCompile(`reset after ([0-9]+(?:\.[0-9]+)?[a-z]+)`)
+)
+
 func (e *geminiCodeAssistHTTPError) Error() string {
 	if e == nil {
 		return ""
@@ -188,6 +208,124 @@ func (e *geminiCodeAssistHTTPError) Error() string {
 		return "gemini code assist request failed: " + status
 	}
 	return fmt.Sprintf("gemini code assist request failed: %s: %s", status, message)
+}
+
+func geminiCodeAssistMetadataString(metadata map[string]any, keys ...string) string {
+	for _, key := range keys {
+		value, ok := metadata[strings.TrimSpace(key)]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case string:
+			if trimmed := strings.TrimSpace(typed); trimmed != "" {
+				return trimmed
+			}
+		case fmt.Stringer:
+			if trimmed := strings.TrimSpace(typed.String()); trimmed != "" {
+				return trimmed
+			}
+		case json.Number:
+			if trimmed := strings.TrimSpace(typed.String()); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func geminiCodeAssistCooldownInfo(err error, now time.Time) (time.Time, string, bool, bool) {
+	var httpErr *geminiCodeAssistHTTPError
+	if !errors.As(err, &httpErr) || httpErr == nil || httpErr.StatusCode != http.StatusTooManyRequests {
+		return time.Time{}, "", false, false
+	}
+
+	reason := sanitizeStatusMessage(httpErr.Error())
+	var envelope geminiCodeAssistErrorEnvelope
+	precise := false
+	if json.Unmarshal([]byte(httpErr.Message), &envelope) == nil {
+		if parsedReason := sanitizeStatusMessage(envelope.Error.Message); parsedReason != "" {
+			reason = parsedReason
+		}
+		var until time.Time
+		for _, raw := range envelope.Error.Details {
+			var detail geminiCodeAssistErrorDetail
+			if json.Unmarshal(raw, &detail) != nil {
+				continue
+			}
+			if resetAt := geminiCodeAssistMetadataString(detail.Metadata, "quotaResetTimeStamp"); resetAt != "" {
+				if parsed, parseErr := time.Parse(time.RFC3339, resetAt); parseErr == nil && parsed.After(now) {
+					until = parsed.UTC()
+					precise = true
+					break
+				}
+			}
+			delay := firstNonEmpty(
+				geminiCodeAssistMetadataString(detail.Metadata, "quotaResetDelay"),
+				strings.TrimSpace(detail.RetryDelay),
+			)
+			if delay == "" {
+				continue
+			}
+			if parsedDelay, parseErr := time.ParseDuration(delay); parseErr == nil && parsedDelay > 0 {
+				candidate := now.Add(parsedDelay).UTC()
+				if candidate.After(until) {
+					until = candidate
+					precise = true
+				}
+			}
+		}
+		if !until.IsZero() {
+			return until, reason, precise, true
+		}
+	}
+
+	if until, ok := geminiCodeAssistCooldownUntilFromText(httpErr.Message, now); ok {
+		return until, reason, true, true
+	}
+	if until, ok := geminiCodeAssistCooldownUntilFromText(httpErr.Error(), now); ok {
+		return until, reason, true, true
+	}
+
+	return now.Add(managedGeminiRateLimitWait).UTC(), reason, false, true
+}
+
+func geminiCodeAssistCooldownUntilFromText(text string, now time.Time) (time.Time, bool) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return time.Time{}, false
+	}
+
+	for _, match := range geminiCooldownTimestampRE.FindAllStringSubmatch(text, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(match[1]))
+		if err == nil && parsed.After(now) {
+			return parsed.UTC(), true
+		}
+	}
+
+	var best time.Time
+	for _, pattern := range []*regexp.Regexp{geminiCooldownDelayRE, geminiCooldownMessageDelayRE} {
+		for _, match := range pattern.FindAllStringSubmatch(text, -1) {
+			if len(match) < 2 {
+				continue
+			}
+			parsedDelay, err := time.ParseDuration(strings.TrimSpace(match[1]))
+			if err != nil || parsedDelay <= 0 {
+				continue
+			}
+			candidate := now.Add(parsedDelay).UTC()
+			if candidate.After(best) {
+				best = candidate
+			}
+		}
+	}
+	if best.IsZero() {
+		return time.Time{}, false
+	}
+	return best, true
 }
 
 type antigravityGeminiProviderTruth struct {

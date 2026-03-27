@@ -906,6 +906,82 @@ func TestBuildPoolDashboardDataMarksGeminiProviderTruthStaleFromQuotaAge(t *test
 	if data.Accounts[0].ProviderTruth.FreshUntil != "2026-03-24T10:30:00Z" {
 		t.Fatalf("provider_truth.fresh_until=%q", data.Accounts[0].ProviderTruth.FreshUntil)
 	}
+	if data.Accounts[0].Routing.BlockReason != "stale_quota_snapshot" {
+		t.Fatalf("routing.block_reason=%q", data.Accounts[0].Routing.BlockReason)
+	}
+	if data.GeminiPool == nil {
+		t.Fatal("expected gemini_pool aggregate")
+	}
+	if data.GeminiPool.StaleTruthSeats != 1 || data.GeminiPool.StaleQuotaSeats != 1 {
+		t.Fatalf("gemini_pool=%+v", *data.GeminiPool)
+	}
+	if !strings.Contains(data.GeminiPool.Note, "stale quota snapshot") {
+		t.Fatalf("gemini_pool.note=%q", data.GeminiPool.Note)
+	}
+}
+
+func TestBuildPoolDashboardDataCountsEligibleGeminiCooldownSeats(t *testing.T) {
+	now := time.Date(2026, 3, 24, 10, 40, 0, 0, time.UTC)
+	seat := &Account{
+		ID:                      "gemini_ready_cooldown",
+		Type:                    AccountTypeGemini,
+		PlanType:                "gemini",
+		AuthMode:                accountAuthModeOAuth,
+		OperatorSource:          geminiOperatorSourceAntigravityImport,
+		AntigravityProjectID:    "project-1",
+		GeminiProviderCheckedAt: now.Add(-5 * time.Minute),
+		GeminiOperationalState:  geminiOperationalTruthStateCooldown,
+		GeminiOperationalReason: "quota resets in 4s",
+	}
+
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{seat}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	data := h.buildPoolDashboardData(now)
+	if data.GeminiPool == nil {
+		t.Fatal("expected gemini_pool aggregate")
+	}
+	if data.GeminiPool.CooldownSeats != 1 {
+		t.Fatalf("gemini_pool=%+v", *data.GeminiPool)
+	}
+	if data.GeminiPool.EligibleSeats != 1 || data.GeminiPool.CleanEligibleSeats != 0 || data.GeminiPool.DegradedEligibleSeats != 1 {
+		t.Fatalf("gemini_pool=%+v", *data.GeminiPool)
+	}
+	if data.Accounts[0].Routing.State != routingDisplayStateDegradedEnabled {
+		t.Fatalf("routing.state=%q", data.Accounts[0].Routing.State)
+	}
+}
+
+func TestBuildPoolDashboardDataCountsCleanEligibleGeminiSeatsSeparately(t *testing.T) {
+	now := time.Date(2026, 3, 24, 10, 40, 0, 0, time.UTC)
+	seat := &Account{
+		ID:                      "gemini_ready_clean",
+		Type:                    AccountTypeGemini,
+		PlanType:                "gemini",
+		AuthMode:                accountAuthModeOAuth,
+		OperatorSource:          geminiOperatorSourceAntigravityImport,
+		AntigravityProjectID:    "project-1",
+		GeminiProviderCheckedAt: now.Add(-5 * time.Minute),
+		GeminiOperationalState:  geminiOperationalTruthStateCleanOK,
+	}
+
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{seat}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	data := h.buildPoolDashboardData(now)
+	if data.GeminiPool == nil {
+		t.Fatal("expected gemini_pool aggregate")
+	}
+	if data.GeminiPool.EligibleSeats != 1 || data.GeminiPool.CleanEligibleSeats != 1 || data.GeminiPool.DegradedEligibleSeats != 0 {
+		t.Fatalf("gemini_pool=%+v", *data.GeminiPool)
+	}
+	if data.Accounts[0].Routing.State != routingDisplayStateEnabled {
+		t.Fatalf("routing.state=%q", data.Accounts[0].Routing.State)
+	}
 }
 
 func TestBuildPoolDashboardDataBlocksGitLabTokensMissingGatewayState(t *testing.T) {
@@ -3327,7 +3403,7 @@ func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 		"deleteAccountFromStatus",
 		"account-action-status",
 		"/v1/responses",
-		"codex_pool_manager.py codex-oauth-start",
+		"POST /operator/codex/oauth-start",
 		"/operator/codex/oauth-start",
 		"Open OAuth Page",
 		"keeps the popup opener attached",
@@ -3393,7 +3469,7 @@ func TestServeStatusPageHidesOperatorActionOutsideLoopback(t *testing.T) {
 	for _, forbidden := range []string{
 		"Import Gemini",
 		"Start Codex OAuth",
-		"codex_pool_manager.py codex-oauth-start",
+		"POST /operator/codex/oauth-start",
 		"/operator/codex/oauth-start",
 		"Fallback API Pool",
 		"Antigravity Gemini Auth",

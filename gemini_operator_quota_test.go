@@ -179,3 +179,24 @@ func TestApplyAntigravityGeminiQuotaRefreshLockedMarksEmptySnapshotFresh(t *test
 		t.Fatalf("quota_updated_at=%s, want %s", acc.GeminiQuotaUpdatedAt, now)
 	}
 }
+
+func TestGeminiCodeAssistCooldownInfoFallsBackToTextMetadata(t *testing.T) {
+	now := time.Date(2026, 3, 27, 15, 31, 42, 0, time.UTC)
+	wantUntil := time.Date(2026, 3, 27, 15, 31, 46, 0, time.UTC)
+	err := &geminiCodeAssistHTTPError{
+		StatusCode: http.StatusTooManyRequests,
+		Status:     "429 Too Many Requests",
+		Message:    `gemini code assist request failed: 429 Too Many Requests: {"error":{"message":"You have exhausted your capacity on this model. Your quota will reset after 3s.","details":[{"metadata":{"quotaResetTimeStamp":"2026-03-27T15:31:46Z","quotaResetDelay":"3.923606893s"}},{"retryDelay":"3.923606893s"}]}}`,
+	}
+
+	gotUntil, _, precise, ok := geminiCodeAssistCooldownInfo(err, now)
+	if !ok {
+		t.Fatal("expected cooldown info")
+	}
+	if !precise {
+		t.Fatal("expected precise cooldown metadata")
+	}
+	if !gotUntil.Equal(wantUntil) {
+		t.Fatalf("until=%s, want %s", gotUntil, wantUntil)
+	}
+}
