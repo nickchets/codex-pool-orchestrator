@@ -1631,3 +1631,19 @@
   - `/home/lap/.root_layer/shared/spikes/t57_release_085_20260328/agcode_run.txt`
 - Notes
   - This publish closes the current bounded `T57` wave, not the entire long-tail Gemini policy backlog. Remaining future work is narrower and explicit: decide how much historical/model-specific cooldown residue to keep visible in the shared operator picture, and treat the still-real `missing_project_id` seat as provider/runtime follow-up rather than as a selector bug.
+
+### 2026-03-28T10:45:00Z | REPO-CPO-CLOSE-P2-T57 repo-local closure audit and board cleanup
+- Commands
+  - `git status --short --branch`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="gemini")|{id,health_status,routing:.routing,provider_state:.provider_truth.state,operational_state:.operational_truth.state}]}'`
+  - `python3 /home/lap/tools/codex_pool_manager.py status --strict`
+  - `git rev-list --left-right --count origin/main...main`
+- Result
+  - PASS
+  - The repo-local wave is now truthfully closed, not merely published. `git status` is clean, local `main` is aligned with `origin/main`, and the live pool still reports the same stable Gemini truth after `0.8.5`: `5 total`, `5 eligible`, `1 clean`, `4 degraded`, `2 cooling`, `1 missing project`.
+  - The last visible `missing_project_id` seat is explicitly reclassified as operational/provider truth rather than repository debt. The code already routes and exports it truthfully through the degraded fallback-project lane, so there is no remaining repo-local diff required to “finish T57”.
+  - `ACTION_PLAN.md` was cleaned up to match that truth: `T57` no longer sits in `DOING`, and the repo board no longer pretends that an external provider/account condition is unfinished code work inside this repository.
+- Artifacts
+  - `/home/lap/projects/codex-pool-orchestrator/docs/T57_FINAL_CLOSURE_SPEC_20260328.ru.md`
+- Notes
+  - This closure is intentionally strict about scope. If a future wave revisits model-specific cooldown visibility or provider remediation for the remaining seat, that must start as a new directive/card instead of keeping `T57` artificially open forever.

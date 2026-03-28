@@ -8,11 +8,24 @@
 2. External audit inputs captured on `2026-03-27` align on the same dependency chain: `T47 -> T50 -> T44 -> T51 -> T54`. The current repo-local truth after the post-restart live proof wave is: `T47`, `T50`, and `T44` are closed with fresh runtime evidence; `T51` stays in scope for this release, but its release-gate interpretation is narrowed to safe tooling delivery plus live rollback proof rather than a forced operator browser-auth re-add drill.
 3. The combined Gemini/Antigravity/OpenCode + observability wave is now publish-ready as `0.8.0`: full verify is green on the release candidate binary, GitLab Claude recovery (`T53`) is no longer blocking, and the remaining truthful residue is narrowed to post-release operational follow-up (`T55`) rather than to any unresolved release gate.
 4. The post-release audit wave on `2026-03-27` converged on the execution order `T55 -> T58 -> T56 -> T57`: first re-prove one fresh browser-auth add on the published binary, then repair the false-negative `gemini-3.1-pro` operator smoke path it exposed, then make `agcode` / OpenCode the canonical no-prompt local entrypoint, and only after that pay down the broader Gemini admission / dead-source brittleness.
-5. The same follow-through wave on `2026-03-27` is now mostly closed in runtime truth as well: `T55`, `T58`, and `T56` all passed with fresh live proof on the running pool, so the only truthful repo-local successor left from this chain is `T57`.
+5. The same follow-through wave on `2026-03-27` is now closed in repo-local truth as well: `T55`, `T58`, `T56`, and `T57` all passed with fresh live proof on the running pool and are published through `0.8.5`.
+6. The one still-live `missing_project_id` Gemini seat is no longer treated as a repo-local blocker. After the `0.8.5` closure audit, it is classified as operational/provider truth: the pool exports/routs it truthfully through the degraded fallback-project lane, and further “fix” work would require provider-side account/project remediation rather than another repo-local code wave.
 
 ## Board
 
 ### DOING
+
+_None._
+
+### NEXT
+
+_None._
+
+### BLOCKED
+
+_None._
+
+### DONE
 
 #### REPO-CPO-ARCH-P2-T57: Stabilize Gemini admission taxonomy and quarantine dead-source residue
 1. The biggest post-release technical risk is now model-state brittleness, not missing features: `provider_truth`, `operational_truth`, and `routing.state` are correct but spread across a large admission surface that still depends on upstream error-shape heuristics and historical dead seats remaining visible in the same operator picture.
@@ -31,15 +44,9 @@ Progress note (2026-03-27):
 - Done: stale Antigravity Gemini truth refresh is now proactive rather than late-by-one-poll. The poller refreshes seats inside the next `10m` lead window before `fresh_until`, which prevents ready seats from falling out of routing as `stale_provider_truth` between scheduled refresh ticks.
 - Done: Gemini cooldown seats now publish `health_status="cooldown"` on status-style JSON surfaces instead of masquerading as generic `healthy`, so operator-facing top-level status agrees with `operational_truth.state=cooldown` and `routing.state=degraded_enabled`.
 - Note: a shared local `agcode run` can currently trip `SQLiteError: database is locked` when another long-lived `opencode` process owns the default local state DB, but the same smoke passes through the pool on an isolated `XDG_CONFIG_HOME`/`XDG_DATA_HOME`, so this is classified as local OpenCode state contention rather than a Gemini pool runtime regression.
-- Remaining: the broader cleanup policy stays open around how much historical/model-specific cooldown residue to keep visible in the shared pool, and one seat still truthfully remains `missing_project_id` even though it is now exportable/routable through the fallback-project degraded lane.
+- Closure note (2026-03-28): no repo-local code tail remains for this card. The still-live `missing_project_id` seat and any future policy choice about historical/model-specific cooldown visibility are now explicitly outside this card's scope: they are operational/provider follow-up, not unresolved repository work.
 
 **Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestCandidate.*Gemini|TestRoutingState.*Gemini|TestBuildPoolDashboardData.*Gemini|TestBuildOpenCodeConfigBundle.*|TestOperatorGeminiSeatSmoke.*|TestLoadAccountsQuarantinesLongDeadAccount|TestServeStatusPageReturnsJSONForFormatQuery|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction' ./... && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,gitlab_claude_pool:.gitlab_claude_pool,accounts:[.accounts[]|select((.type=="gemini") or (.type=="claude" and .plan_type=="gitlab_duo"))|{id,type,health_status,dead,routing:.routing,provider:.provider_truth,operational:.operational_truth}]}' && timeout 120s agcode --agcode-setup-only >/dev/null && jq '{activeIndex,accounts:[.accounts[]|{email,enabled,lastSwitchReason,cachedQuota}]}' /home/lap/.config/opencode/antigravity-accounts.json && timeout 180s agcode run 'Reply with exactly T57_LIVE_OK.'`
-
-### NEXT
-
-### BLOCKED
-
-### DONE
 
 #### REPO-CPO-ALIGN-P2-T56: Make agcode/OpenCode the canonical no-prompt local entrypoint
 1. `agcode` is now the documented first-class local OpenCode entrypoint for this pool rather than one of several competing setup paths. The landing page, README, exported config bundle, and local wrapper all align on `antigravity-manager/gemini-3.1-pro` as the day-one model.
