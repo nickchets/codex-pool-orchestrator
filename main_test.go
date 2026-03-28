@@ -227,6 +227,91 @@ func TestCodexProviderLoadsManagedOpenAIAPIKeyAccount(t *testing.T) {
 	}
 }
 
+func TestSaveCodexAccountPersistsOAuthHealthState(t *testing.T) {
+	apiBase, _ := url.Parse("https://chatgpt.com")
+	provider := NewCodexProvider(apiBase, apiBase, apiBase, apiBase)
+
+	accFile := filepath.Join(t.TempDir(), "codex_oauth.json")
+	if err := os.WriteFile(accFile, []byte(`{"tokens":{"access_token":"seed-access","refresh_token":"seed-refresh"}}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	healthCheckedAt := time.Date(2026, 3, 28, 14, 0, 0, 0, time.UTC)
+	lastHealthyAt := healthCheckedAt.Add(-30 * time.Minute)
+	acc := &Account{
+		ID:              "seat-oauth",
+		Type:            AccountTypeCodex,
+		File:            accFile,
+		AccessToken:     "next-access",
+		RefreshToken:    "next-refresh",
+		HealthStatus:    codexRefreshInvalidHealthStatus,
+		HealthError:     codexRefreshInvalidHealthError,
+		HealthCheckedAt: healthCheckedAt,
+		LastHealthyAt:   lastHealthyAt,
+	}
+
+	if err := saveCodexAccount(acc); err != nil {
+		t.Fatalf("save codex account: %v", err)
+	}
+
+	raw, err := os.ReadFile(accFile)
+	if err != nil {
+		t.Fatalf("read auth file: %v", err)
+	}
+	loaded, err := provider.LoadAccount(filepath.Base(accFile), accFile, raw)
+	if err != nil {
+		t.Fatalf("load account: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("expected account")
+	}
+	if loaded.HealthStatus != codexRefreshInvalidHealthStatus {
+		t.Fatalf("health_status=%q", loaded.HealthStatus)
+	}
+	if loaded.HealthError != codexRefreshInvalidHealthError {
+		t.Fatalf("health_error=%q", loaded.HealthError)
+	}
+	if !loaded.HealthCheckedAt.Equal(healthCheckedAt) {
+		t.Fatalf("health_checked_at=%v", loaded.HealthCheckedAt)
+	}
+	if !loaded.LastHealthyAt.Equal(lastHealthyAt) {
+		t.Fatalf("last_healthy_at=%v", loaded.LastHealthyAt)
+	}
+	if loaded.Dead {
+		t.Fatal("expected seat to stay non-dead")
+	}
+	if !loaded.DeadSince.IsZero() {
+		t.Fatalf("dead_since=%v", loaded.DeadSince)
+	}
+}
+
+func TestCodexProviderLoadsLegacyDeadOAuthAccountAsDeadHealth(t *testing.T) {
+	apiBase, _ := url.Parse("https://chatgpt.com")
+	provider := NewCodexProvider(apiBase, apiBase, apiBase, apiBase)
+
+	payload := []byte(`{
+	  "tokens": {
+	    "access_token": "seed-access",
+	    "refresh_token": "seed-refresh"
+	  },
+	  "dead": true
+	}`)
+
+	acc, err := provider.LoadAccount("legacy-dead.json", "/tmp/legacy-dead.json", payload)
+	if err != nil {
+		t.Fatalf("load account: %v", err)
+	}
+	if acc == nil {
+		t.Fatal("expected account")
+	}
+	if !acc.Dead {
+		t.Fatal("expected dead flag")
+	}
+	if acc.HealthStatus != "dead" {
+		t.Fatalf("health_status=%q", acc.HealthStatus)
+	}
+}
+
 func TestCodexProviderRefreshTokenLogsTrace(t *testing.T) {
 	refreshBase, _ := url.Parse("https://auth.openai.com")
 	provider := NewCodexProvider(refreshBase, refreshBase, refreshBase, refreshBase)
@@ -1005,6 +1090,38 @@ func TestFinalizeWebSocketSuccessStateRecoversManagedAPIAccountOnNonSwitching2xx
 	}
 }
 
+func TestFinalizeWebSocketSuccessStatePersistsRuntimeLastUsed(t *testing.T) {
+	store, err := newUsageStore(filepath.Join(t.TempDir(), "usage.db"), 7)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	acc := &Account{
+		ID:       "seat-ws",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.12,
+			SecondaryUsedPercent: 0.18,
+			PrimaryResetAt:       time.Now().Add(time.Hour),
+			SecondaryResetAt:     time.Now().Add(12 * time.Hour),
+		},
+	}
+	h := &proxyHandler{store: store}
+
+	h.finalizeWebSocketSuccessState(acc, "", http.StatusSwitchingProtocols)
+
+	restored := &Account{ID: "seat-ws", Type: AccountTypeCodex}
+	_, _, _, restoredRuntime := restorePersistedUsageState([]*Account{restored}, store)
+	if restoredRuntime != 1 {
+		t.Fatalf("restoredRuntime=%d", restoredRuntime)
+	}
+	if restored.LastUsed.IsZero() {
+		t.Fatal("expected LastUsed to be restored from runtime store")
+	}
+}
+
 func TestFinalizeWebSocketSuccessStateSkipsFailedHandshake(t *testing.T) {
 	acc := &Account{
 		ID:             "openai_api_deadbeef",
@@ -1044,6 +1161,50 @@ func TestFinalizeWebSocketSuccessStateSkipsFailedHandshake(t *testing.T) {
 	}
 	if acc.RateLimitUntil.IsZero() {
 		t.Fatal("expected rate limit state to remain unchanged")
+	}
+}
+
+func TestFinalizeProxyResponsePersistsRuntimeLastUsed(t *testing.T) {
+	store, err := newUsageStore(filepath.Join(t.TempDir(), "usage.db"), 7)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	acc := &Account{
+		ID:       "seat-buffered",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.11,
+			SecondaryUsedPercent: 0.17,
+			PrimaryResetAt:       time.Now().Add(time.Hour),
+			SecondaryResetAt:     time.Now().Add(12 * time.Hour),
+		},
+	}
+	h := &proxyHandler{store: store}
+
+	h.finalizeProxyResponse(
+		"req-test",
+		nil,
+		acc,
+		"user-1",
+		http.StatusOK,
+		true,
+		false,
+		"",
+		0,
+		0,
+		nil,
+	)
+
+	restored := &Account{ID: "seat-buffered", Type: AccountTypeCodex}
+	_, _, _, restoredRuntime := restorePersistedUsageState([]*Account{restored}, store)
+	if restoredRuntime != 1 {
+		t.Fatalf("restoredRuntime=%d", restoredRuntime)
+	}
+	if restored.LastUsed.IsZero() {
+		t.Fatal("expected LastUsed to be restored from runtime store")
 	}
 }
 
@@ -1229,6 +1390,15 @@ func TestApplyPreCopyUpstreamStatusDispositionMarksPermanentCodexAuthFailureDead
 	}
 	if acc.Penalty != 100.0 {
 		t.Fatalf("penalty = %v", acc.Penalty)
+	}
+	if acc.HealthStatus != "dead" {
+		t.Fatalf("health_status=%q", acc.HealthStatus)
+	}
+	if acc.HealthError != "codex upstream account_deactivated" {
+		t.Fatalf("health_error=%q", acc.HealthError)
+	}
+	if acc.HealthCheckedAt.IsZero() {
+		t.Fatal("expected health_checked_at to be set")
 	}
 }
 

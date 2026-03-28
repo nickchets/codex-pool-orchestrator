@@ -2,6 +2,43 @@
 
 > Repo-local evidence for root harness proof execution.
 
+### 2026-03-28T17:03:00Z | REPO-CPO-REL-P2 publish verify for 0.8.6 Codex health + canonical Gemini/OpenCode cleanup
+- Commands
+  - `gofmt -w dead_cleanup.go frontend.go gemini_operator.go handlers.go main.go main_test.go opencode_contract.go opencode_contract_test.go pool.go pool_test.go provider_codex.go reload_accounts_test.go status.go status_dashboard_test.go storage.go usage_state.go usage_state_test.go usage_tracking.go frontend_setup_scripts_test.go handlers_force_refresh_test.go usage_tracking_test.go`
+  - `go test -count=1 -run 'TestCandidateColdStartCodexTieBreakIgnoresRoundRobinOffset|TestCandidateKeepsActiveCodexSeatWhileEligible|TestCandidateDropsActiveCodexSeatAtExactPrimaryThreshold|TestSaveCodexAccountPersistsOAuthHealthState|TestCodexProviderLoadsLegacyDeadOAuthAccountAsDeadHealth|TestRestorePersistedUsageStateRestoresSnapshotAndTotals|TestRestorePersistedUsageStateBridgesFromTotalsWhenSnapshotMissing|TestRestorePersistedUsageStatePrefersNewerTotalsWhenSnapshotStale|TestRestorePersistedUsageStateRestoresLastUsedRuntime|TestReloadAccountsKeepsCodexOAuthPersistedHealthState|TestFetchUsageCodexRefreshInvalidKeepsLiveCurrentAccess|TestFetchUsageCodexUnauthorizedAfterRefreshInvalidKeepsLiveWhenModelsStillWork|TestForceRefreshAccountPersistsPermanentCodexRefreshFailure|TestForceRefreshAccountMarksDeadWhenCodexModelsProbeConfirmsDeactivatedWorkspace|TestServeStatusPageShowsCodexRefreshInvalidHealthLine|TestBuildOpenCodeConfigBundle|TestBuildOpenCodeConfigBundlePrefersEnabledSeatForActiveIndex|TestBuildOpenCodeConfigBundleExportsGeminiModelRateLimitResetTimes|TestServeGeminiSetupScript_PowerShell|TestServeGeminiSetupScript_Bash|TestServeOpenCodeSetupScript_PowerShell|TestServeOpenCodeSetupScript_Bash|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction' ./...`
+  - `go build ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `systemctl --user show codex-pool.service -p MainPID,ActiveState,SubState,ExecMainStartTimestamp`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `python3 /home/lap/tools/codex_pool_manager.py status --strict`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json | jq '{codex_pool:.codex_pool,gitlab_claude_pool:.gitlab_claude_pool,gemini_pool:.gemini_pool,accounts:[.accounts[]|select((.type=="codex") or (.type=="gemini"))|{id,type,dead,health_status,health_error,routing_state:(.routing.state//null),routing_eligible:(.routing.eligible//false),operator_source:(.operator_source//null)}]}'`
+  - `timeout 180s opencode run -m codex-pool/gemini-3.1-pro-high 'Reply with exactly RELEASE_086_OK.'`
+- Result
+  - PASS
+  - The 0.8.6 release slice verifies as one coherent publishable wave instead of a docs-only cleanup. The focused Codex regression set passed, both Go builds succeeded, and the restarted user service came back `ActiveState=active`, `SubState=running` on port `8989`.
+  - Live runtime truth stayed aligned with the intended routing policy. `python3 /home/lap/tools/codex_pool_manager.py status --strict` returned `PASS` with zero failures, `gemini_pool` still reports `5 total / 5 eligible`, and the Codex workspace groups continue to exclude the three `<10%% primary headroom` seats (`andy_2`, `john4454_5`, `l4698328`) from fresh routing.
+  - The canonical Gemini client path remained healthy after the publish verify. `opencode run -m codex-pool/gemini-3.1-pro-high` returned exact output `RELEASE_086_OK.`, so the renamed provider/export contract still works end-to-end on the restarted binary.
+
+### 2026-03-28T16:42:27Z | REPO-CPO-VERIFY-P2 isolated OpenCode Gemini canonical smoke + doc cleanup
+- Commands
+  - `python3 /home/lap/tools/codex_pool_manager.py status --strict`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="gemini")|{id,health_status,operator_source,provider_state:(.provider_truth.state//null),routing_state:(.routing.state//null),eligible:(.routing.eligible//false)}]}'`
+  - `env XDG_CONFIG_HOME="$TMPDIR/config" XDG_DATA_HOME="$TMPDIR/data" AGCODE_RECREATE_USER=1 agcode --agcode-setup-only`
+  - `env XDG_CONFIG_HOME="$TMPDIR/config" XDG_DATA_HOME="$TMPDIR/data" timeout 180s opencode run -m codex-pool/gemini-3.1-pro-high 'Reply with exactly GEMINI_OK.'`
+  - `jq '{model,provider_keys:(.provider|keys),base_url:.provider["codex-pool"].options.baseURL}' /home/lap/.root_layer/shared/spikes/gemini_opencode_pool_smoke_20260328/opencode.json`
+  - `jq '{activeIndex,activeIndexByFamily}' /home/lap/.root_layer/shared/spikes/gemini_opencode_pool_smoke_20260328/pool-gemini-accounts.json`
+- Result
+  - PASS
+  - The current live repo-owned export remains correct after the documentation cleanup wave: isolated setup rewrote OpenCode state with `model=codex-pool/gemini-3.1-pro-high`, provider `codex-pool`, and `/v1` base URL from the running pool.
+  - The practical client proof passed without relying on old shared local state. With isolated `XDG_CONFIG_HOME` / `XDG_DATA_HOME`, `opencode run -m codex-pool/gemini-3.1-pro-high` returned exact output `GEMINI_OK.` and `activeIndex=0` stayed on an enabled Gemini seat.
+  - Repo-local documentation now matches the governed execution path more tightly: `docs/T57_FINAL_CLOSURE_SPEC_20260328.ru.md` now verifies setup via `agcode --agcode-setup-only` and execution via `opencode run -m codex-pool/gemini-3.1-pro-high ...` instead of presenting the wrapper as the primary execution lane.
+- Artifacts
+  - `/home/lap/.root_layer/shared/spikes/gemini_opencode_pool_smoke_20260328/opencode.json`
+  - `/home/lap/.root_layer/shared/spikes/gemini_opencode_pool_smoke_20260328/pool-gemini-accounts.json`
+  - `/home/lap/.root_layer/shared/spikes/gemini_opencode_pool_smoke_20260328/opencode_run.stdout`
+  - `/home/lap/.root_layer/shared/spikes/gemini_opencode_pool_smoke_20260328/opencode_run.stderr`
+
 ### 2026-03-27T20:30:00Z | REPO-CPO-VERIFY-P2 post-commit head proof for runtime cleanup stack
 - Commands
   - `go build ./...`
@@ -386,13 +423,13 @@
   - `ps -eo pid,etime,cmd | rg 'cpo-antigravity-gemini-audit-20260325|opus-run-stream|claude-opus-4-6' -S`
 - Result
   - PASS (planning-only)
-  - Refreshed the Gemini/Antigravity architecture plan against three evidence lanes: the current dirty repo state, the live local Antigravity installation, and upstream `Antigravity-Manager` behavior as summarized by governed explorer lanes.
+  - Refreshed the Gemini pool architecture plan against three evidence lanes: the current dirty repo state, the live local legacy Gemini runtime, and the upstream comparison baseline summarized by governed explorer lanes.
   - Kept the current implementation stream unchanged: `REPO-CPO-ARCH-P1-T46` stays active and `REPO-CPO-BUG-P1-T47` stays the immediate successor.
   - Added explicit follow-on plan slices for the gaps the audit surfaced: quota-first contract freeze (`T49`), Gemini CLI/OpenCode parity (`T50`), and a controlled live seat reset/reimport proof (`T51`) that remains deferred by design.
-  - Recorded a repo-local analyst packet at `docs/GEMINI_ANTIGRAVITY_AUDIT_PLAN_20260325.ru.md`; no live seats were deleted, no services were restarted, and no pool config was mutated in this planning sync.
-  - An Opus audit lane was launched for the same brief, but it stalled after a stream-fallback path before emitting a final packet; the plan sync therefore uses the completed explorer outputs plus live local evidence and earlier governed Antigravity comparison artifacts.
+  - Recorded a repo-local analyst packet at `docs/GEMINI_POOL_AUDIT_PLAN_20260325.ru.md`; no live seats were deleted, no services were restarted, and no pool config was mutated in this planning sync.
+  - An Opus audit lane was launched for the same brief, but it stalled after a stream-fallback path before emitting a final packet; the plan sync therefore uses the completed explorer outputs plus live local evidence and earlier governed comparison artifacts.
 - Artifacts
-  - `docs/GEMINI_ANTIGRAVITY_AUDIT_PLAN_20260325.ru.md`
+  - `docs/GEMINI_POOL_AUDIT_PLAN_20260325.ru.md`
 - Notes
   - Controlled seat deletion/reimport remains blocked behind truthful provider-truth persistence, routing reasons, CLI/OpenCode parity, and operator/dashboard parity.
   - This entry records planning state only; it does not claim code verification beyond the board/doc sync itself.
@@ -1647,3 +1684,42 @@
   - `/home/lap/projects/codex-pool-orchestrator/docs/T57_FINAL_CLOSURE_SPEC_20260328.ru.md`
 - Notes
   - This closure is intentionally strict about scope. If a future wave revisits model-specific cooldown visibility or provider remediation for the remaining seat, that must start as a new directive/card instead of keeping `T57` artificially open forever.
+
+### 2026-03-28T16:02:48Z | REPO-CPO-CODEX refresh-invalid false-dead audit and live rollout
+- Commands
+  - manual direct access-token audit for previously dead Codex OAuth seats with `refresh_token_reused` / `invalid_grant` against `https://chatgpt.com/backend-api/codex/models?client_version=0.106.0`
+  - `go test ./... -run 'TestFetchUsageCodexRefreshInvalidKeepsLiveCurrentAccess|TestFetchUsageCodexUnauthorizedAfterRefreshInvalidKeepsLiveWhenModelsStillWork|TestForceRefreshAccountPersistsPermanentCodexRefreshFailure|TestForceRefreshAccountMarksDeadWhenCodexModelsProbeConfirmsDeactivatedWorkspace|TestRestorePersistedUsageState|TestCandidateRetryPathDoesNotMoveActiveCodexSeat|TestCandidateSkipsRateLimitedLocalCodexSeat|TestProxyWebSocketMarksDeactivatedCodexAccountDeadAndFallsThroughNextSeat|TestApplyPreCopyUpstreamStatusDispositionMarksPermanentCodexAuthFailureDead|TestSaveCodexAccountPersistsOAuthHealthState|TestReloadAccountsPreservesRuntimeState' ./...`
+  - `go build ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `python3 /home/lap/tools/codex_pool_manager.py status --strict`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json`
+- Result
+  - PASS
+  - The false-dead classification was real, not hypothetical. In the archived dead-seat forensic bundle, `14` of `15` seats previously marked dead because refresh returned `refresh_token_reused` / `invalid_grant` still returned `200` on the live `codex/models` endpoint with their current `access_token`; only `1` seat (`ghjh8782`) was truly dead with `402 deactivated_workspace`.
+  - The pool no longer kills Codex OAuth seats on refresh invalid alone. It now probes the live `codex/models` path with the current `access_token` before deciding whether a refresh-invalid seat is truly dead, and the force-refresh operator path now exposes truthful `health_status` / `health_error` / `dead` fields instead of collapsing everything to dead.
+  - The HTML status dashboard now renders `health refresh_invalid ...` for ordinary Codex OAuth seats too, so operator truth is visible without switching to JSON.
+  - The focused regression slice passed and the patched binary built cleanly.
+  - The live service restarted cleanly on `/home/lap/.local/bin/codex-pool`; `python3 /home/lap/tools/codex_pool_manager.py status --strict` returned `PASS`, `/healthz` returned `{"status":"ok",...}`, and `/status?format=json` reported `11` Codex seats with `0` dead seats at rollout verification time.
+- Artifacts
+  - `/home/lap/.root_layer/shared/spikes/codex_refresh_invalid_probe_20260328.md`
+- Notes
+  - This slice intentionally fixes the false-dead policy in the proactive/operator lanes first. It does not claim that every possible 401/403 in every upstream request path is semantically identical; it closes the concrete defect that was burning live seats on refresh invalid alone.
+
+### 2026-03-28T16:09:06Z | REPO-CPO-CODEX archived backup-material recheck after rollout
+- Commands
+  - archived backup-material recheck saved to `/home/lap/.root_layer/codex_pool/backups/manual_dead_probe_20260328T151446Z/backup_material_recheck_20260328T160906Z.json`
+  - current active-pool recheck saved to `/home/lap/.root_layer/codex_pool/backups/manual_dead_probe_20260328T151446Z/current_access_recheck_20260328T160819Z.json`
+  - `systemctl --user is-active codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `python3 /home/lap/tools/codex_pool_manager.py status --strict`
+- Result
+  - PASS
+  - The archived dead-seat material confirms the core defect precisely: of the `19` seats parked in `manual_dead_probe_20260328T151446Z`, `13` still return `200` on `backend-api/codex/models` with their saved `access_token`, while `6` now classify as `workspace_deactivated`.
+  - The refresh-invalid classification was materially over-aggressive. All `13` surviving seats came from the old `health_error="refresh token revoked/invalid"` bucket; only `2` seats from that bucket have since converged to `workspace_deactivated`, while the original `4` explicit `deactivated_workspace` seats remain dead.
+  - The live runtime is clean after rollout: `systemctl --user is-active codex-pool.service` returned `active`, `/healthz` returned `{"status":"ok","uptime":"28s"}`, and `python3 /home/lap/tools/codex_pool_manager.py status --strict` passed with `11` Codex seats loaded, `10` eligible, and no active Codex seats still marked dead in the live pool directory.
+- Artifacts
+  - `/home/lap/.root_layer/codex_pool/backups/manual_dead_probe_20260328T151446Z/backup_material_recheck_20260328T160906Z.json`
+  - `/home/lap/.root_layer/codex_pool/backups/manual_dead_probe_20260328T151446Z/current_access_recheck_20260328T160819Z.json`
+- Notes
+  - `workspac_5` and the other archived dead files were no longer present under the active `pool/codex` directory at rollout time, so this wave did not silently resurrect archived material back into the live intake set. The code path is fixed; restoring any archived seat is now an explicit operator decision instead of an accidental side effect.

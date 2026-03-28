@@ -230,12 +230,13 @@ func main() {
 	}
 	defer store.Close()
 
-	if restoredTotals, restoredSnapshots, bridged := restorePersistedUsageState(pool.accounts, store); restoredTotals > 0 || restoredSnapshots > 0 || bridged > 0 {
+	if restoredTotals, restoredSnapshots, bridged, restoredRuntime := restorePersistedUsageState(pool.accounts, store); restoredTotals > 0 || restoredSnapshots > 0 || bridged > 0 || restoredRuntime > 0 {
 		log.Printf(
-			"restored usage state from disk: totals=%d snapshots=%d bridged_from_totals=%d",
+			"restored usage state from disk: totals=%d snapshots=%d bridged_from_totals=%d runtime=%d",
 			restoredTotals,
 			restoredSnapshots,
 			bridged,
+			restoredRuntime,
 		)
 	}
 
@@ -491,7 +492,7 @@ func isPermanentCodexAuthFailure(resp *http.Response, body []byte) bool {
 func markAccountDead(reqID string, acc *Account, reason string) {
 	now := time.Now().UTC()
 	acc.mu.Lock()
-	markAccountDeadStateLocked(acc, now, 100.0)
+	markAccountDeadWithReasonLocked(acc, now, 100.0, reason)
 	acc.mu.Unlock()
 	log.Printf("[%s] marking account %s as dead: %s", reqID, acc.ID, reason)
 	if err := saveAccount(acc); err != nil {
@@ -539,7 +540,7 @@ func (h *proxyHandler) applyUpstreamAuthFailureDisposition(reqID string, acc *Ac
 	if refreshFailed && acc.Type != AccountTypeCodex {
 		now := time.Now().UTC()
 		acc.mu.Lock()
-		markAccountDeadStateLocked(acc, now, 1.0)
+		markAccountDeadWithReasonLocked(acc, now, 1.0, "refresh failed after upstream auth failure")
 		acc.mu.Unlock()
 		if err := saveAccount(acc); err != nil {
 			log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
@@ -1210,7 +1211,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 		if strings.Contains(retryInspection.Text, "deactivated_workspace") || strings.Contains(retryInspection.Text, "subscription") {
 			now := time.Now().UTC()
 			acc.mu.Lock()
-			markAccountDeadStateLocked(acc, now, 100.0)
+			markAccountDeadWithReasonLocked(acc, now, 100.0, retryInspection.Text)
 			acc.mu.Unlock()
 			log.Printf("[%s] marking account %s as DEAD: %s", reqID, acc.ID, retryInspection.Text)
 			if err := saveAccount(acc); err != nil {
@@ -1915,6 +1916,7 @@ func (h *proxyHandler) finalizeWebSocketSuccessState(acc *Account, conversationI
 	}
 	applySuccessfulAccountStateLocked(acc, now)
 	acc.mu.Unlock()
+	persistAccountRuntimeState(h.store, acc)
 	if shouldPersistGemini {
 		if err := saveAccount(acc); err != nil {
 			log.Printf("warning: failed to persist healthy gemini account %s after websocket success: %v", acc.ID, err)
@@ -2350,6 +2352,7 @@ func (h *proxyHandler) finalizeProxyResponse(reqID string, provider Provider, ac
 	}
 	applySuccessfulAccountStateLocked(acc, now)
 	acc.mu.Unlock()
+	persistAccountRuntimeState(h.store, acc)
 	if shouldPersistAccountState {
 		if err := saveAccount(acc); err != nil {
 			log.Printf("[%s] warning: failed to persist healthy %s account %s: %v", reqID, persistLabel, acc.ID, err)
@@ -3011,15 +3014,36 @@ func (h *proxyHandler) tryOnce(
 					errStr := err.Error()
 					if isRateLimitError(err) {
 						h.applyRateLimit(acc, nil, defaultRateLimitBackoff)
-					} else if strings.Contains(errStr, "invalid_grant") || strings.Contains(errStr, "refresh_token_reused") {
-						// If refresh token is permanently invalid, mark account as dead immediately
-						now := time.Now().UTC()
-						acc.mu.Lock()
-						markAccountDeadStateLocked(acc, now, 100.0)
-						acc.mu.Unlock()
-						log.Printf("[%s] marking account %s as dead: refresh token revoked/invalid", reqID, acc.ID)
-						if err := saveAccount(acc); err != nil {
-							log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
+					} else if isCodexRefreshTokenInvalidError(err) {
+						if acc.Type == AccountTypeCodex {
+							probeCtx, cancel := context.WithTimeout(ctx, codexModelsFetchTimeout)
+							probe, probeErr := h.probeCodexCurrentAccess(probeCtx, acc)
+							cancel()
+							now := time.Now().UTC()
+							acc.mu.Lock()
+							if probeErr == nil {
+								applyCodexRefreshInvalidProbeResultLocked(acc, now, probe, codexRefreshInvalidHealthError)
+							} else {
+								markCodexRefreshInvalidStateLocked(acc, now, codexRefreshInvalidHealthError, false)
+							}
+							acc.mu.Unlock()
+							if saveErr := saveAccount(acc); saveErr != nil {
+								log.Printf("[%s] warning: failed to persist codex account %s after refresh-invalid probe: %v", reqID, acc.ID, saveErr)
+							}
+							if probeErr != nil {
+								log.Printf("[%s] codex current access probe after refresh failure for %s failed: %v", reqID, acc.ID, probeErr)
+							} else {
+								log.Printf("[%s] codex current access probe after refresh failure for %s: status=%d working=%v mark_dead=%v reason=%q", reqID, acc.ID, probe.StatusCode, probe.Working, probe.MarkDead, probe.Reason)
+							}
+						} else {
+							now := time.Now().UTC()
+							acc.mu.Lock()
+							markAccountDeadWithReasonLocked(acc, now, 100.0, codexRefreshInvalidHealthError)
+							acc.mu.Unlock()
+							log.Printf("[%s] marking account %s as dead: %s", reqID, acc.ID, codexRefreshInvalidHealthError)
+							if err := saveAccount(acc); err != nil {
+								log.Printf("[%s] warning: failed to save dead account %s: %v", reqID, acc.ID, err)
+							}
 						}
 						refreshFailed = true
 					} else if !strings.Contains(errStr, "rate limited") {

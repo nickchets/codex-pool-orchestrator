@@ -1206,16 +1206,16 @@ brew install claude-code</pre>
                     <div class="surface-header">
                         <div>
                             <h3>Operator Actions</h3>
-                            <p>Antigravity Gemini browser auth lands seats directly in the shared Gemini pool here.</p>
+                            <p>Gemini Browser Auth lands seats directly in the shared Gemini pool here.</p>
                         </div>
                     </div>
                     <div class="action-stack">
                         <div class="action-card">
                             <p>
-                                Antigravity Gemini browser auth mirrors the original sign-in flow, resolves the Code Assist project automatically,
-                                and stores the result as an Antigravity-backed Gemini seat in this pool.
+                                Gemini Browser Auth mirrors the original sign-in flow, resolves the Code Assist project automatically,
+                                and stores the result as a browser-auth Gemini seat in this pool.
                             </p>
-                            <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromWeb()">Start Antigravity Gemini Auth</button>
+                            <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromWeb()">Start Gemini Browser Auth</button>
                             <div id="gemini-oauth-start-status" class="status-line"></div>
                             <div id="gemini-operator-note" class="status-line"></div>
                             <div id="gemini-oauth-start-result" style="display: none; margin-top: 16px;">
@@ -1224,7 +1224,7 @@ brew install claude-code</pre>
                                     <pre id="gemini-oauth-start-url"></pre>
                                 </div>
                                 <div id="gemini-oauth-start-outcome" class="status-line"></div>
-                                <a id="gemini-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px; color: var(--accent); font-weight: 700; text-decoration: none;">Open Antigravity Auth Page</a>
+                                <a id="gemini-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px; color: var(--accent); font-weight: 700; text-decoration: none;">Open Gemini Browser Auth Page</a>
                             </div>
                         </div>
                     </div>
@@ -1283,24 +1283,21 @@ brew install claude-code</pre>
             </section>
 
             <details class="details-card">
-                <summary>Gemini CLI / OpenCode Setup</summary>
+                <summary>Gemini Setup via OpenCode</summary>
                 <div class="details-body">
                     <div class="details-grid">
                         <div class="detail-block">
-                            <h4>Install CLI</h4>
+                            <h4>Install OpenCode</h4>
                             <div class="code-shell">
                                 <button class="copy-btn" onclick="copyToClipboard('gemini-install', this)">Copy</button>
                                 <pre id="gemini-install"># Using NPM
-npm install -g @google/gemini-cli
-
-# Or Homebrew (macOS)
-brew install gemini-cli</pre>
+npm install -g opencode</pre>
                             </div>
                         </div>
 
                         <div class="detail-block">
-                            <h4>One-Line Setup</h4>
-                            <p>Configures the Gemini CLI endpoint and points you to the same dashboard/operator flow used for seat onboarding.</p>
+                            <h4>Compatibility Setup (Advanced)</h4>
+                            <p>Optional <code>.gemini/settings.json</code> compatibility bundle. OpenCode below is the canonical Gemini path for this pool.</p>
                             <div class="code-shell">
                                 <button class="copy-btn" onclick="copyToClipboard('gemini-one-liner', this)">Copy</button>
                                 <pre id="gemini-one-liner"></pre>
@@ -1308,7 +1305,7 @@ brew install gemini-cli</pre>
                         </div>
 
                         <div class="detail-block">
-                            <h4>Manual Config</h4>
+                            <h4>Compatibility JSON (Advanced)</h4>
                             <div class="code-shell">
                                 <button class="copy-btn" onclick="copyToClipboard('gemini-config', this)">Copy</button>
                                 <pre id="gemini-config"></pre>
@@ -1323,13 +1320,13 @@ brew install gemini-cli</pre>
 python3 -m webbrowser '{{.BaseURL}}/'
 # Or the raw status dashboard
 python3 -m webbrowser '{{.BaseURL}}/status'
-# Then click: Start Antigravity Gemini Auth</pre>
+# Then click: Start Gemini Browser Auth</pre>
                             </div>
                         </div>
 
                         <div class="detail-block">
-                            <h4>OpenCode Recommended Path</h4>
-                            <p>Preferred for this pool: run the per-user OpenCode setup bundle, then start OpenCode on <code>antigravity-manager/gemini-3.1-pro</code> without manual API entry.</p>
+                            <h4>Canonical Gemini Path</h4>
+                            <p>Preferred for this pool: run the per-user OpenCode setup bundle, then start OpenCode on <code>codex-pool/gemini-3.1-pro-high</code> without manual API entry.</p>
                             <div class="code-shell">
                                 <button class="copy-btn" onclick="copyToClipboard('opencode-one-liner', this)">Copy</button>
                                 <pre id="opencode-one-liner"></pre>
@@ -2077,9 +2074,9 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                     tone: (geminiPool.restricted_seats || 0) > 0 || (geminiPool.missing_project_seats || 0) > 0 ? 'warning' : 'neutral',
                 },
                 {
-                    label: 'Antigravity Seats',
+                    label: 'Gemini Browser Auth Seats',
                     value: formatNumber(geminiOperator.antigravity_seat_count || 0),
-                    detail: 'Antigravity-backed Gemini seats in the shared pool, added through browser auth.',
+                    detail: 'Gemini seats in the shared pool added through Gemini Browser Auth.',
                     tone: (geminiOperator.antigravity_seat_count || 0) > 0 ? 'success' : 'neutral',
                 },
                 {
@@ -2159,7 +2156,7 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             if (result && !geminiOAuthDone) {
                 result.style.display = 'none';
             }
-            note.textContent = String(operator.note || 'Antigravity browser auth is the only supported Gemini seat onboarding flow for this pool.');
+            note.textContent = String(operator.note || 'Gemini Browser Auth is the only supported Gemini seat onboarding flow for this pool.');
             note.className = (Number(operator.legacy_seat_count || 0) + Number(operator.managed_seat_count || 0)) > 0 ? 'status-line warning' : 'status-line';
         }
 
@@ -2453,7 +2450,7 @@ export ANTHROPIC_API_KEY="local-pool"`;
 echo "Config written. Add or refresh a Gemini seat from:"
 echo "  ${BASE_URL}/"
 echo "  ${BASE_URL}/status"
-echo 'Then click: Start Antigravity Gemini Auth'`;
+echo 'Then click: Start Gemini Browser Auth'`;
 
             document.getElementById('gemini-config').textContent =
 `{
@@ -2464,7 +2461,7 @@ echo 'Then click: Start Antigravity Gemini Auth'`;
 `# Preferred path
 # 1. Open the real per-user /setup/opencode/... URL emitted by this pool.
 # 2. Run the returned installer script.
-opencode run -m antigravity-manager/gemini-3.1-pro "Reply with exactly OK."
+opencode run -m codex-pool/gemini-3.1-pro-high "Reply with exactly OK."
 
 # Shared snippet intentionally does not embed the real tokenized setup URL.
 # This shared snippet intentionally does not embed a reusable download token.`;
@@ -2475,7 +2472,7 @@ opencode run -m antigravity-manager/gemini-3.1-pro "Reply with exactly OK."
 
 # Setup installer: use the real per-user /setup/opencode/... URL emitted
 # for that pool user.
-# It writes ~/.config/opencode/opencode.json and antigravity-accounts.json
+# It writes ~/.config/opencode/opencode.json and pool-gemini-accounts.json
 # from the same exported bundle and keeps the /v1 Anthropic-compatible
 # transport aligned for OpenCode via this Gemini pool.`;
         }
@@ -2893,18 +2890,18 @@ opencode run -m antigravity-manager/gemini-3.1-pro "Reply with exactly OK."
         function geminiOAuthDescribeOutcome(before, after, backendMode) {
             const mode = String(backendMode || '').trim().toLowerCase();
             if (mode === 'added') {
-                return 'Antigravity Gemini auth completed. Added a new seat; refreshing status now.';
+                return 'Gemini Browser Auth completed. Added a new seat; refreshing status now.';
             }
             if (mode === 'refreshed') {
-                return 'Antigravity Gemini auth completed. Refreshed an existing seat; refreshing status now.';
+                return 'Gemini Browser Auth completed. Refreshed an existing seat; refreshing status now.';
             }
             if (after.count > before.count) {
-                return 'Antigravity Gemini auth completed. Added a new seat; refreshing status now.';
+                return 'Gemini Browser Auth completed. Added a new seat; refreshing status now.';
             }
             if (after.signature !== before.signature) {
-                return 'Antigravity Gemini auth completed. Refreshed an existing seat; refreshing status now.';
+                return 'Gemini Browser Auth completed. Refreshed an existing seat; refreshing status now.';
             }
-            return 'Antigravity Gemini auth completed. Refreshing status now.';
+            return 'Gemini Browser Auth completed. Refreshing status now.';
         }
 
         function geminiOAuthReadPendingState() {
@@ -2938,7 +2935,7 @@ opencode run -m antigravity-manager/gemini-3.1-pro "Reply with exactly OK."
             }
             try {
                 popup.document.open();
-                popup.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Preparing Antigravity Gemini Auth</title></head><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 24px;"><div style="max-width: 640px; margin: 64px auto; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 24px;">Opening Antigravity Gemini auth session...</div></body></html>`);
+                popup.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Preparing Gemini Browser Auth</title></head><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 24px;"><div style="max-width: 640px; margin: 64px auto; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 24px;">Opening Gemini Browser Auth session...</div></body></html>`);
                 popup.document.close();
                 popup.focus();
             } catch (error) {
@@ -3021,9 +3018,9 @@ opencode run -m antigravity-manager/gemini-3.1-pro "Reply with exactly OK."
                 }
                 if (status) {
                     status.style.color = 'var(--danger)';
-                    status.textContent = 'Antigravity Gemini auth completed, but status refresh failed: ' + (error && error.message ? error.message : error);
+                    status.textContent = 'Gemini Browser Auth completed, but status refresh failed: ' + (error && error.message ? error.message : error);
                 }
-                geminiOAuthSetOutcome('Refresh failed. Use the Open Antigravity Auth Page link or retry after clearing the popup blocker.');
+                geminiOAuthSetOutcome('Refresh failed. Use the Open Gemini Browser Auth Page link or retry after clearing the popup blocker.');
                 geminiOAuthClearPendingState();
             }
         }
@@ -3043,19 +3040,19 @@ opencode run -m antigravity-manager/gemini-3.1-pro "Reply with exactly OK."
                     if (!geminiOAuthSnapshotsEqual(beforeSnapshot, afterSnapshot)) {
                         if (status) {
                             status.style.color = 'var(--success)';
-                            status.textContent = 'Antigravity Gemini auth callback applied. Refreshing status now.';
+                            status.textContent = 'Gemini Browser Auth callback applied. Refreshing status now.';
                         }
                         void geminiOAuthFinalize(beforeSnapshot, backendMode, null);
                         return;
                     }
                     if (status) {
                         status.style.color = 'var(--muted)';
-                        status.textContent = 'Waiting for the Antigravity Gemini seat state to change...';
+                        status.textContent = 'Waiting for the Gemini Browser Auth seat state to change...';
                     }
                 } catch (error) {
                     if (status) {
                         status.style.color = 'var(--muted)';
-                        status.textContent = 'Waiting for the Antigravity Gemini seat state to change...';
+                        status.textContent = 'Waiting for the Gemini Browser Auth seat state to change...';
                     }
                 }
                 if (attempts >= maxAttempts) {
@@ -3067,16 +3064,16 @@ opencode run -m antigravity-manager/gemini-3.1-pro "Reply with exactly OK."
                     }
                     if (status) {
                         status.style.color = 'var(--warning)';
-                        status.textContent = 'Timed out waiting for the Antigravity Gemini seat state to change. Use the Open Antigravity Auth Page link to retry.';
+                        status.textContent = 'Timed out waiting for the Gemini Browser Auth seat state to change. Use the Open Gemini Browser Auth Page link to retry.';
                     }
-                    geminiOAuthSetOutcome('No Antigravity Gemini seat state change was detected yet.');
+                    geminiOAuthSetOutcome('No Gemini Browser Auth seat state change was detected yet.');
                     return;
                 }
                 geminiOAuthWatcher = window.setTimeout(tick, 2000);
             };
             if (status) {
                 status.style.color = 'var(--muted)';
-                status.textContent = 'Waiting for the Antigravity Gemini seat state to change...';
+                status.textContent = 'Waiting for the Gemini Browser Auth seat state to change...';
             }
             geminiOAuthWatcher = window.setTimeout(tick, 2000);
         }
@@ -3119,10 +3116,10 @@ opencode run -m antigravity-manager/gemini-3.1-pro "Reply with exactly OK."
                     return;
                 }
 
-                const message = String((data && data.message) || 'Antigravity Gemini auth failed.').trim();
+                const message = String((data && data.message) || 'Gemini Browser Auth failed.').trim();
                 geminiOAuthSetOutcome(message);
                 status.style.color = 'var(--danger)';
-                status.textContent = message || 'Antigravity Gemini auth failed.';
+                status.textContent = message || 'Gemini Browser Auth failed.';
             }, false);
         }
 
@@ -3144,7 +3141,7 @@ opencode run -m antigravity-manager/gemini-3.1-pro "Reply with exactly OK."
 
             button.disabled = true;
             status.style.color = 'var(--muted)';
-            status.textContent = 'Starting Antigravity Gemini auth session...';
+            status.textContent = 'Starting Gemini Browser Auth session...';
             result.style.display = 'none';
             urlNode.textContent = '';
             openLink.href = '#';
@@ -3152,7 +3149,7 @@ opencode run -m antigravity-manager/gemini-3.1-pro "Reply with exactly OK."
 
             try {
                 const beforeSnapshot = geminiOAuthSnapshot((await codexOAuthFetchStatusSnapshot()).accounts);
-                const response = await fetch('/operator/gemini/antigravity/oauth-start', {
+                const response = await fetch('/operator/gemini/oauth-start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({})
@@ -3171,9 +3168,9 @@ opencode run -m antigravity-manager/gemini-3.1-pro "Reply with exactly OK."
                 result.style.display = 'block';
                 status.style.color = geminiOAuthPopup ? 'var(--success)' : 'var(--warning)';
                 status.textContent = geminiOAuthPopup
-                    ? 'Antigravity auth URL generated. Complete sign-in in the popup; this page will refresh when Gemini seat state changes.'
-                    : 'Antigravity auth URL generated, but the popup was blocked. Open the page from the link below.';
-                geminiOAuthSetOutcome(geminiOAuthPopup ? 'Waiting for the Antigravity Gemini seat state to change.' : 'Open the Antigravity auth URL manually.');
+                    ? 'Gemini Browser Auth URL generated. Complete sign-in in the popup; this page will refresh when Gemini seat state changes.'
+                    : 'Gemini Browser Auth URL generated, but the popup was blocked. Open the page from the link below.';
+                geminiOAuthSetOutcome(geminiOAuthPopup ? 'Waiting for the Gemini Browser Auth seat state to change.' : 'Open the Gemini Browser Auth URL manually.');
                 try {
                     sessionStorage.setItem(geminiOAuthStatusKey, JSON.stringify({
                         before: beforeSnapshot,
@@ -3194,8 +3191,8 @@ opencode run -m antigravity-manager/gemini-3.1-pro "Reply with exactly OK."
                 geminiOAuthClearPendingState();
                 button.disabled = false;
                 status.style.color = 'var(--danger)';
-                status.textContent = 'Failed to start Antigravity Gemini auth: ' + (error && error.message ? error.message : error);
-                geminiOAuthSetOutcome('Retry after clearing the popup blocker or open the Antigravity auth URL manually.');
+                status.textContent = 'Failed to start Gemini Browser Auth: ' + (error && error.message ? error.message : error);
+                geminiOAuthSetOutcome('Retry after clearing the popup blocker or open the Gemini Browser Auth URL manually.');
             }
         }
 

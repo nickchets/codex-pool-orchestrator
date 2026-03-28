@@ -189,7 +189,7 @@ func (h *proxyHandler) handleFriendClaim(w http.ResponseWriter, r *http.Request)
 		"download_token":   newUser.Token,
 		"auth_json":        string(authJSONBytes),
 		"gemini_auth_json": string(geminiJSONBytes),
-		"gemini_api_key":   geminiAPIKey,               // API key for Gemini CLI API key mode
+		"gemini_api_key":   geminiAPIKey,               // API key for advanced Gemini compatibility mode
 		"claude_api_key":   claudeAuthData.AccessToken, // JWT token to use as API key
 	})
 }
@@ -857,7 +857,8 @@ func (h *proxyHandler) serveGeminiSetupScript(w http.ResponseWriter, r *http.Req
 
 	publicURL := h.getEffectivePublicURL(r)
 
-	// Script keeps Gemini CLI in API key mode and routes requests through the pool.
+	// Compatibility script keeps Gemini API-key mode available, but OpenCode
+	// remains the canonical Gemini path through the pool.
 	if wantsPowerShell(r) {
 		script := fmt.Sprintf(`#requires -Version 5.1
 Set-StrictMode -Version Latest
@@ -873,7 +874,7 @@ function Set-Utf8NoBom {
   [System.IO.File]::WriteAllText($Path, $Value, $utf8)
 }
 
-Write-Host 'Configuring Gemini CLI for pool access...'
+Write-Host 'Configuring Gemini API-key compatibility for pool access...'
 Write-Host ''
 
 # Use API key mode in the current session
@@ -886,8 +887,8 @@ $profilePath = $PROFILE.CurrentUserAllHosts
 New-Item -ItemType Directory -Force -Path (Split-Path $profilePath) | Out-Null
 if (-not (Test-Path $profilePath)) { New-Item -ItemType File -Force -Path $profilePath | Out-Null }
 
-$start = '# >>> Gemini Pool Configuration >>>'
-$end = '# <<< Gemini Pool Configuration <<<'
+$start = '# >>> Gemini Pool Compatibility >>>'
+$end = '# <<< Gemini Pool Compatibility <<<'
 $nl = [Environment]::NewLine
 $blockLines = @(
   $start,
@@ -909,7 +910,7 @@ if ([regex]::IsMatch($existing, $pattern, [Text.RegularExpressions.RegexOptions]
 }
 
 Set-Utf8NoBom -Path $profilePath -Value $updated
-Write-Host ("Added Gemini pool config to " + $profilePath)
+Write-Host ("Added Gemini compatibility config to " + $profilePath)
 
 # Ensure Gemini config directory exists and keep settings on API key mode.
 $geminiDir = Join-Path $HOME '.gemini'
@@ -935,8 +936,9 @@ Write-Host ("Updated " + $settingsFile)
 Write-Host ''
 Write-Host 'Setup complete!'
 Write-Host ''
-Write-Host ("Gemini CLI will use the pool proxy at: " + $BaseUrl)
-Write-Host 'Gemini API key mode is enabled; no Google login required.'
+Write-Host ("Gemini compatibility mode will use the pool proxy at: " + $BaseUrl)
+Write-Host 'OpenCode via codex-pool/gemini-3.1-pro-high remains the canonical Gemini path.'
+Write-Host 'Gemini API key compatibility mode is enabled; no Google login required.'
 Write-Host ''
 Write-Host 'Start a new terminal, or run: . $PROFILE'
 `, publicURL, geminiAPIKey)
@@ -951,10 +953,10 @@ set -e
 BASE_URL="%s"
 GEMINI_API_KEY_VALUE="%s"
 
-echo "Configuring Gemini CLI for pool access..."
+echo "Configuring Gemini API-key compatibility for pool access..."
 echo ""
 
-# Add env vars to shell profile (Gemini CLI reads them from process.env).
+# Add env vars to shell profile for the advanced compatibility path.
 add_to_profile() {
     for profile in "$HOME/.zshrc" "$HOME/.bashrc" "$HOME/.bash_profile" "$HOME/.profile"; do
         if [ -f "$profile" ]; then
@@ -967,14 +969,14 @@ add_to_profile() {
             grep -v "GOOGLE_CLOUD_ACCESS_TOKEN=" 2>/dev/null > "$profile.tmp" || true
             mv "$profile.tmp" "$profile"
 
-            # Add pool configuration
+            # Add compatibility configuration
             cat >> "$profile" << 'ENVEOF'
 
-# Gemini Pool Configuration
+# Gemini Pool Compatibility
 export GEMINI_API_KEY="%s"
 export GOOGLE_GEMINI_BASE_URL="%s"
 ENVEOF
-            echo "✓ Added Gemini pool config to $(basename $profile)"
+            echo "✓ Added Gemini compatibility config to $(basename $profile)"
             return
         fi
     done
@@ -982,16 +984,16 @@ ENVEOF
     # Fallback: create .zshrc
     cat >> "$HOME/.zshrc" << 'ENVEOF'
 
-# Gemini Pool Configuration
+# Gemini Pool Compatibility
 export GEMINI_API_KEY="%s"
 export GOOGLE_GEMINI_BASE_URL="%s"
 ENVEOF
-    echo "✓ Created ~/.zshrc with Gemini pool config"
+    echo "✓ Created ~/.zshrc with Gemini compatibility config"
 }
 
 add_to_profile
 
-# Keep Gemini CLI in external API key mode.
+# Keep Gemini compatibility mode in external API key mode.
 GEMINI_DIR="$HOME/.gemini"
 SETTINGS_FILE="$GEMINI_DIR/settings.json"
 mkdir -p "$GEMINI_DIR"
@@ -1024,10 +1026,11 @@ echo "✓ Updated $SETTINGS_FILE"
 echo ""
 echo "Setup complete!"
 echo ""
-echo "Gemini CLI will use the pool proxy at: $BASE_URL"
-echo "Gemini API key mode is enabled; no Google login required."
+echo "Gemini compatibility mode will use the pool proxy at: $BASE_URL"
+echo "OpenCode via codex-pool/gemini-3.1-pro-high remains the canonical Gemini path."
+echo "Gemini API key compatibility mode is enabled; no Google login required."
 echo ""
-echo "Run 'source ~/.zshrc' or start a new terminal, then run 'gemini'."
+echo "Run 'source ~/.zshrc' or start a new terminal, then use this only if you need the advanced compatibility path."
 `, publicURL, geminiAPIKey,
 		geminiAPIKey, publicURL,
 		geminiAPIKey, publicURL)
@@ -1066,7 +1069,7 @@ $ErrorActionPreference = 'Stop'
 $ConfigUrl = '%s'
 $OpenCodeDir = Join-Path $HOME '.config/opencode'
 $ConfigFile = Join-Path $OpenCodeDir 'opencode.json'
-$AccountsFile = Join-Path $OpenCodeDir 'antigravity-accounts.json'
+$AccountsFile = Join-Path $OpenCodeDir 'pool-gemini-accounts.json'
 
 function Set-Utf8NoBom {
   param([string]$Path, [string]$Value)
@@ -1074,7 +1077,7 @@ function Set-Utf8NoBom {
   [System.IO.File]::WriteAllText($Path, $Value, $utf8)
 }
 
-Write-Host 'Configuring OpenCode for the pure Antigravity pool line...'
+Write-Host 'Configuring OpenCode for the canonical Gemini pool path...'
 Write-Host ''
 
 $payload = Invoke-RestMethod -Uri $ConfigUrl -Method Get
@@ -1088,14 +1091,14 @@ if (Test-Path $AccountsFile) {
 }
 
 Set-Utf8NoBom -Path $ConfigFile -Value (($payload.opencode_config | ConvertTo-Json -Depth 20) + [Environment]::NewLine)
-Set-Utf8NoBom -Path $AccountsFile -Value (($payload.antigravity_accounts | ConvertTo-Json -Depth 20) + [Environment]::NewLine)
+Set-Utf8NoBom -Path $AccountsFile -Value (($payload.pool_gemini_accounts | ConvertTo-Json -Depth 20) + [Environment]::NewLine)
 
 Write-Host ('Updated ' + $ConfigFile)
 Write-Host ('Updated ' + $AccountsFile)
 Write-Host ''
 Write-Host ('Provider: ' + $payload.provider_id)
 Write-Host ('Base URL: ' + $payload.base_url)
-Write-Host 'OpenCode will use the Antigravity pool line via /v1.'
+Write-Host 'OpenCode will use codex-pool/gemini-3.1-pro-high via codex-pool /v1.'
 `, configURL)
 
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -1108,9 +1111,9 @@ set -e
 CONFIG_URL="%s"
 OPENCODE_DIR="$HOME/.config/opencode"
 CONFIG_FILE="$OPENCODE_DIR/opencode.json"
-ACCOUNTS_FILE="$OPENCODE_DIR/antigravity-accounts.json"
+ACCOUNTS_FILE="$OPENCODE_DIR/pool-gemini-accounts.json"
 
-echo "Configuring OpenCode for the pure Antigravity pool line..."
+echo "Configuring OpenCode for the canonical Gemini pool path..."
 echo ""
 
 mkdir -p "$OPENCODE_DIR"
@@ -1130,7 +1133,7 @@ const fs = require('fs');
 const payload = JSON.parse(fs.readFileSync(process.env.TMP_JSON, 'utf8'));
 fs.mkdirSync(process.env.OPENCODE_DIR, { recursive: true });
 fs.writeFileSync(process.env.CONFIG_FILE, JSON.stringify(payload.opencode_config, null, 2) + '\n', { mode: 0o600 });
-fs.writeFileSync(process.env.ACCOUNTS_FILE, JSON.stringify(payload.antigravity_accounts, null, 2) + '\n', { mode: 0o600 });
+fs.writeFileSync(process.env.ACCOUNTS_FILE, JSON.stringify(payload.pool_gemini_accounts, null, 2) + '\n', { mode: 0o600 });
 NODE
 chmod 600 "$CONFIG_FILE" "$ACCOUNTS_FILE"
 rm -f "$TMP_JSON"
@@ -1138,7 +1141,7 @@ rm -f "$TMP_JSON"
 echo "Updated $CONFIG_FILE"
 echo "Updated $ACCOUNTS_FILE"
 echo ""
-echo "OpenCode will use the Antigravity pool line via /v1."
+echo "OpenCode will use codex-pool/gemini-3.1-pro-high via codex-pool /v1."
 `, configURL)
 
 	w.Header().Set("Content-Type", "text/x-shellscript")

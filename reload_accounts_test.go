@@ -105,6 +105,105 @@ func TestReloadAccountsPreservesRuntimeState(t *testing.T) {
 	}
 }
 
+func TestReloadAccountsKeepsCodexOAuthPersistedHealthState(t *testing.T) {
+	tmp := t.TempDir()
+	poolDir := filepath.Join(tmp, "codex")
+	if err := os.MkdirAll(poolDir, 0o755); err != nil {
+		t.Fatalf("mkdir pool dir: %v", err)
+	}
+
+	authPath := filepath.Join(poolDir, "seat-health.json")
+	healthCheckedAt := time.Date(2026, 3, 28, 14, 0, 0, 0, time.UTC)
+	lastHealthyAt := time.Date(2026, 3, 28, 13, 30, 0, 0, time.UTC)
+	auth := map[string]any{
+		"tokens": map[string]any{
+			"access_token":  "new-access",
+			"refresh_token": "new-refresh",
+			"account_id":    "workspace-a",
+		},
+		"health_status":     codexRefreshInvalidHealthStatus,
+		"health_error":      codexRefreshInvalidHealthError,
+		"health_checked_at": healthCheckedAt.Format(time.RFC3339),
+		"last_healthy_at":   lastHealthyAt.Format(time.RFC3339),
+	}
+	buf, err := json.MarshalIndent(auth, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal auth: %v", err)
+	}
+	if err := os.WriteFile(authPath, buf, 0o600); err != nil {
+		t.Fatalf("write auth: %v", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	handler := &proxyHandler{
+		cfg: config{poolDir: tmp},
+		pool: newPoolState([]*Account{{
+			ID:           "seat-health",
+			Type:         AccountTypeCodex,
+			File:         authPath,
+			AccessToken:  "old-access",
+			RefreshToken: "old-refresh",
+			Usage: UsageSnapshot{
+				PrimaryUsedPercent:   0.18,
+				SecondaryUsedPercent: 0.29,
+				RetrievedAt:          now.Add(-time.Minute),
+				Source:               "runtime",
+			},
+			Penalty:        1.75,
+			LastPenalty:    now.Add(-5 * time.Minute),
+			LastUsed:       now.Add(-30 * time.Second),
+			RateLimitUntil: now.Add(10 * time.Minute),
+			Totals: AccountUsage{
+				TotalBillableTokens: 321,
+				RequestCount:        4,
+				LastPrimaryPct:      0.18,
+				LastSecondaryPct:    0.29,
+				LastUpdated:         now.Add(-30 * time.Second),
+			},
+		}}, false),
+		registry: &ProviderRegistry{
+			byType: map[AccountType]Provider{
+				AccountTypeCodex: &CodexProvider{},
+			},
+		},
+	}
+
+	handler.reloadAccounts()
+
+	if handler.pool.count() != 1 {
+		t.Fatalf("reloaded accounts=%d", handler.pool.count())
+	}
+
+	reloaded := handler.pool.allAccounts()[0]
+	if reloaded.HealthStatus != codexRefreshInvalidHealthStatus {
+		t.Fatalf("health_status=%q", reloaded.HealthStatus)
+	}
+	if reloaded.HealthError != codexRefreshInvalidHealthError {
+		t.Fatalf("health_error=%q", reloaded.HealthError)
+	}
+	if !reloaded.HealthCheckedAt.Equal(healthCheckedAt) {
+		t.Fatalf("health_checked_at=%v", reloaded.HealthCheckedAt)
+	}
+	if !reloaded.LastHealthyAt.Equal(lastHealthyAt) {
+		t.Fatalf("last_healthy_at=%v", reloaded.LastHealthyAt)
+	}
+	if reloaded.Dead {
+		t.Fatal("expected codex seat to reload as non-dead")
+	}
+	if !reloaded.DeadSince.IsZero() {
+		t.Fatalf("dead_since=%v", reloaded.DeadSince)
+	}
+	if reloaded.Usage.PrimaryUsedPercent != 0.18 || reloaded.Usage.SecondaryUsedPercent != 0.29 {
+		t.Fatalf("usage lost across reload: %+v", reloaded.Usage)
+	}
+	if !reloaded.LastUsed.Equal(now.Add(-30 * time.Second)) {
+		t.Fatalf("last used=%v", reloaded.LastUsed)
+	}
+	if reloaded.Totals.TotalBillableTokens != 321 || reloaded.Totals.RequestCount != 4 {
+		t.Fatalf("totals lost across reload: %+v", reloaded.Totals)
+	}
+}
+
 func TestReloadAccountsKeepsGeminiPersistedStateWhilePreservingRuntimeUsage(t *testing.T) {
 	tmp := t.TempDir()
 	poolDir := filepath.Join(tmp, "gemini")

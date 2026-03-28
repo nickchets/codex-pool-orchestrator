@@ -23,6 +23,13 @@ type CodexProvider struct {
 	apiBase       *url.URL
 }
 
+type codexCurrentAccessProbeResult struct {
+	StatusCode int
+	Working    bool
+	MarkDead   bool
+	Reason     string
+}
+
 // NewCodexProvider creates a new Codex provider.
 func NewCodexProvider(responsesBase, whamBase, refreshBase, apiBase *url.URL) *CodexProvider {
 	return &CodexProvider{
@@ -101,6 +108,17 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 	acc.Dead = aj.Dead
 	if aj.DeadSince != nil {
 		acc.DeadSince = aj.DeadSince.UTC()
+	}
+	if aj.HealthCheckedAt != nil {
+		acc.HealthCheckedAt = aj.HealthCheckedAt.UTC()
+	}
+	if aj.LastHealthyAt != nil {
+		acc.LastHealthyAt = aj.LastHealthyAt.UTC()
+	}
+	acc.HealthStatus = strings.TrimSpace(aj.HealthStatus)
+	acc.HealthError = strings.TrimSpace(aj.HealthError)
+	if acc.Dead && acc.HealthStatus == "" {
+		acc.HealthStatus = "dead"
 	}
 	return acc, nil
 }
@@ -199,6 +217,7 @@ func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transpor
 		return err
 	}
 
+	now := time.Now().UTC()
 	acc.mu.Lock()
 	acc.AccessToken = payload.AccessToken
 	if payload.RefreshToken != "" {
@@ -220,8 +239,9 @@ func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transpor
 			acc.PlanType = claims.PlanType
 		}
 	}
-	acc.LastRefresh = time.Now().UTC()
+	acc.LastRefresh = now
 	setAccountDeadStateLocked(acc, false, acc.LastRefresh)
+	clearCodexRefreshInvalidStateLocked(acc, now)
 	acc.mu.Unlock()
 
 	if err := saveAccount(acc); err != nil {
@@ -235,6 +255,86 @@ func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transpor
 
 func (p *CodexProvider) ParseUsage(obj map[string]any) *RequestUsage {
 	return parseCodexUsageDelta(obj).Usage
+}
+
+func isCodexRefreshTokenInvalidError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "invalid_grant") || strings.Contains(msg, "refresh_token_reused")
+}
+
+func (h *proxyHandler) probeCodexCurrentAccess(ctx context.Context, acc *Account) (codexCurrentAccessProbeResult, error) {
+	var result codexCurrentAccessProbeResult
+	if h == nil || acc == nil {
+		return result, errors.New("nil codex account")
+	}
+	if h.registry == nil {
+		return result, errors.New("missing provider registry")
+	}
+	provider, ok := h.registry.ForType(AccountTypeCodex).(*CodexProvider)
+	if !ok || provider == nil {
+		return result, errors.New("codex provider unavailable")
+	}
+
+	const path = "/backend-api/codex/models"
+	targetBase := providerUpstreamURLForAccount(provider, path, acc)
+	if targetBase == nil {
+		return result, errors.New("codex models probe base unavailable")
+	}
+	outURL := *targetBase
+	outURL.Path = singleJoin(targetBase.Path, providerNormalizePathForAccount(provider, path, acc))
+	outURL.RawQuery = ""
+	ensureCodexModelsQueryDefaults(&outURL)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, outURL.String(), nil)
+	if err != nil {
+		return result, err
+	}
+	req.Header = make(http.Header)
+	req.Header.Set("Accept", "application/json")
+	removeConflictingProxyHeaders(req.Header)
+	provider.SetAuthHeaders(req, acc)
+
+	transport := h.transport
+	if transport == nil {
+		transport = h.refreshTransport
+	}
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		return result, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 8*1024))
+	if err != nil {
+		return result, err
+	}
+	result.StatusCode = resp.StatusCode
+	text := strings.TrimSpace(safeText(body))
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		result.Working = true
+	case resp.StatusCode == http.StatusTooManyRequests:
+		result.Working = true
+		result.Reason = firstNonEmpty(text, resp.Status)
+	case resp.StatusCode == http.StatusPaymentRequired && strings.Contains(strings.ToLower(text), "subscription"):
+		result.MarkDead = true
+		result.Reason = firstNonEmpty(text, "codex upstream subscription required")
+	case isPermanentCodexAuthFailure(resp, body):
+		result.MarkDead = true
+		result.Reason = firstNonEmpty(text, "codex upstream account_deactivated")
+	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+		result.MarkDead = true
+		result.Reason = firstNonEmpty(text, fmt.Sprintf("codex current access unauthorized: %s", resp.Status))
+	default:
+		result.Reason = firstNonEmpty(text, fmt.Sprintf("codex current access probe failed: %s", resp.Status))
+	}
+	return result, nil
 }
 
 func (p *CodexProvider) ParseUsageHeaders(acc *Account, headers http.Header) {

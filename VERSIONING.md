@@ -72,4 +72,6 @@ Optional git metadata may be attached in release automation only, for example:
 - `0.5.1`: proxy response-handling seam cleanup across buffered, streamed, and websocket lanes with expanded regression coverage and text-first operator docs cleanup
 - `0.6.0`: Gemini operator onboarding, quarantine visibility, persistent Codex usage restore/models cache, and live-proven fallback/cooldown routing hardening
 - `0.6.1`: Gemini operator lane split, explicit source labels, and honest managed-OAuth degradation when local Gemini client credentials are absent
-- `0.7.0`: Antigravity Gemini onboarding/import, pooled Gemini Code Assist facade, provider-truth routing for imported Gemini seats, and end-to-end Claude trace observability
+- `0.7.0`: browser-auth Gemini onboarding/import, pooled Gemini Code Assist facade, provider-truth routing for imported Gemini seats, and end-to-end Claude trace observability
+- `0.8.0`: Gemini Browser Auth onboarding, OpenCode export/setup, reset tooling, and provider-scoped observability across Codex, Claude, and Gemini lanes
+- `0.8.6`: Codex refresh-invalid health truth, deterministic sticky Codex seat selection, and canonical browser-auth Gemini/OpenCode operator cleanup

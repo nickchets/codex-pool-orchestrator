@@ -10,10 +10,12 @@ import (
 )
 
 const (
-	longDeadAccountQuarantineAfter = 72 * time.Hour
-	longDeadCleanupPollInterval    = 15 * time.Minute
-	quarantineSubdir               = "quarantine"
-	quarantineRecentLimit          = 8
+	longDeadAccountQuarantineAfter  = 72 * time.Hour
+	longDeadCleanupPollInterval     = 15 * time.Minute
+	quarantineSubdir                = "quarantine"
+	quarantineRecentLimit           = 8
+	codexRefreshInvalidHealthStatus = "refresh_invalid"
+	codexRefreshInvalidHealthError  = "refresh token revoked/invalid"
 )
 
 type QuarantineEntry struct {
@@ -48,6 +50,66 @@ func markAccountDeadStateLocked(a *Account, now time.Time, penaltyDelta float64)
 	}
 	setAccountDeadStateLocked(a, true, now)
 	a.Penalty += penaltyDelta
+}
+
+func setAccountHealthStateLocked(a *Account, now time.Time, status, reason string) {
+	if a == nil {
+		return
+	}
+	a.HealthStatus = strings.TrimSpace(status)
+	a.HealthError = sanitizeStatusMessage(strings.TrimSpace(reason))
+	a.HealthCheckedAt = now.UTC()
+}
+
+func markAccountDeadWithReasonLocked(a *Account, now time.Time, penaltyDelta float64, reason string) {
+	if a == nil {
+		return
+	}
+	markAccountDeadStateLocked(a, now, penaltyDelta)
+	setAccountHealthStateLocked(a, now, "dead", reason)
+}
+
+func markCodexRefreshInvalidStateLocked(a *Account, now time.Time, reason string, provenLive bool) {
+	if a == nil {
+		return
+	}
+	if provenLive {
+		clearAccountDeadStateLocked(a, now, true)
+		a.LastHealthyAt = now.UTC()
+	}
+	if a.Dead && !provenLive {
+		return
+	}
+	setAccountHealthStateLocked(a, now, codexRefreshInvalidHealthStatus, firstNonEmpty(strings.TrimSpace(reason), codexRefreshInvalidHealthError))
+}
+
+func clearCodexRefreshInvalidStateLocked(a *Account, now time.Time) bool {
+	if a == nil {
+		return false
+	}
+	if strings.TrimSpace(a.HealthStatus) != codexRefreshInvalidHealthStatus &&
+		strings.TrimSpace(a.HealthError) != codexRefreshInvalidHealthError &&
+		!(a.Dead && strings.TrimSpace(a.HealthError) == codexRefreshInvalidHealthError) {
+		return false
+	}
+	clearAccountDeadStateLocked(a, now, false)
+	a.HealthStatus = ""
+	a.HealthError = ""
+	a.HealthCheckedAt = now.UTC()
+	a.LastHealthyAt = now.UTC()
+	return true
+}
+
+func applyCodexRefreshInvalidProbeResultLocked(a *Account, now time.Time, probe codexCurrentAccessProbeResult, reason string) bool {
+	if a == nil {
+		return false
+	}
+	if probe.MarkDead {
+		markAccountDeadWithReasonLocked(a, now, 100.0, firstNonEmpty(strings.TrimSpace(probe.Reason), strings.TrimSpace(reason), codexRefreshInvalidHealthError))
+		return true
+	}
+	markCodexRefreshInvalidStateLocked(a, now, reason, probe.Working)
+	return false
 }
 
 func clearAccountDeadStateLocked(a *Account, now time.Time, resetPenalty bool) {

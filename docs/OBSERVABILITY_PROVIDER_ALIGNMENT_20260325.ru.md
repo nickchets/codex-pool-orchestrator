@@ -1,4 +1,4 @@
-# Unified Observability Wave — Codex и Gemini/Antigravity
+# Unified Observability Wave — Codex и Gemini Pool
 
 ## Цель
 - Довести observability для `codex` и `gemini` до того же уровня, что уже есть у `claude`, не создавая второй trace-схемы.

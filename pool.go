@@ -1724,7 +1724,7 @@ func (p *poolState) stickyEligibleCandidateMatchingLocked(now time.Time, exclude
 
 func (p *poolState) selectEligibleCandidateLocked(now time.Time, exclude map[string]bool, accountType AccountType, requiredPlan string, advanceRR bool) *Account {
 	if accountType == AccountTypeCodex {
-		if acc := p.selectEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, advanceRR, func(a *Account) bool {
+		if acc := p.selectEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, advanceRR, true, func(a *Account) bool {
 			return !isManagedCodexAPIKeyAccount(a)
 		}); acc != nil {
 			return acc
@@ -1732,14 +1732,14 @@ func (p *poolState) selectEligibleCandidateLocked(now time.Time, exclude map[str
 		if acc := p.activeCodexCandidateLocked(now, exclude, "", true); acc != nil {
 			return acc
 		}
-		return p.selectEligibleCandidateMatchingLocked(now, exclude, accountType, "", advanceRR, func(a *Account) bool {
+		return p.selectEligibleCandidateMatchingLocked(now, exclude, accountType, "", advanceRR, false, func(a *Account) bool {
 			return isManagedCodexAPIKeyAccount(a)
 		})
 	}
-	return p.selectEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, advanceRR, nil)
+	return p.selectEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, advanceRR, false, nil)
 }
 
-func (p *poolState) selectEligibleCandidateMatchingLocked(now time.Time, exclude map[string]bool, accountType AccountType, requiredPlan string, advanceRR bool, include func(*Account) bool) *Account {
+func (p *poolState) selectEligibleCandidateMatchingLocked(now time.Time, exclude map[string]bool, accountType AccountType, requiredPlan string, advanceRR bool, stableOrder bool, include func(*Account) bool) *Account {
 	n := len(p.accounts)
 	if n == 0 {
 		return nil
@@ -1752,8 +1752,27 @@ func (p *poolState) selectEligibleCandidateMatchingLocked(now time.Time, exclude
 		score        float64
 	}
 	var eligible []scoredAccount
+	stableCodexTieBreak := accountType == AccountTypeCodex
+	betterScoredAccount := func(candidate, incumbent *scoredAccount) bool {
+		if candidate == nil {
+			return false
+		}
+		if incumbent == nil {
+			return true
+		}
+		if candidate.score != incumbent.score {
+			return candidate.score > incumbent.score
+		}
+		if !stableCodexTieBreak {
+			return false
+		}
+		return strings.Compare(candidate.acc.ID, incumbent.acc.ID) < 0
+	}
 
-	start := int(p.rr % uint64(n))
+	start := 0
+	if !stableOrder {
+		start = int(p.rr % uint64(n))
+	}
 	for i := 0; i < n; i++ {
 		a := p.accounts[(start+i)%n]
 		if include != nil && !include(a) {
@@ -1797,13 +1816,13 @@ func (p *poolState) selectEligibleCandidateMatchingLocked(now time.Time, exclude
 	for i := range eligible {
 		sa := &eligible[i]
 		if sa.tier == 1 && sa.secondaryPct < threshold {
-			if bestTier1 == nil || sa.score > bestTier1.score {
+			if bestTier1 == nil || betterScoredAccount(sa, bestTier1) {
 				bestTier1 = sa
 			}
 		}
 	}
 	if bestTier1 != nil {
-		if advanceRR {
+		if advanceRR && !stableOrder {
 			p.rr++
 		}
 		return bestTier1.acc
@@ -1813,13 +1832,13 @@ func (p *poolState) selectEligibleCandidateMatchingLocked(now time.Time, exclude
 	for i := range eligible {
 		sa := &eligible[i]
 		if sa.tier == 2 && sa.secondaryPct < threshold {
-			if bestTier2 == nil || sa.score > bestTier2.score {
+			if bestTier2 == nil || betterScoredAccount(sa, bestTier2) {
 				bestTier2 = sa
 			}
 		}
 	}
 	if bestTier2 != nil {
-		if advanceRR {
+		if advanceRR && !stableOrder {
 			p.rr++
 		}
 		return bestTier2.acc
@@ -1828,12 +1847,12 @@ func (p *poolState) selectEligibleCandidateMatchingLocked(now time.Time, exclude
 	var bestAll *scoredAccount
 	for i := range eligible {
 		sa := &eligible[i]
-		if bestAll == nil || sa.score > bestAll.score {
+		if bestAll == nil || betterScoredAccount(sa, bestAll) {
 			bestAll = sa
 		}
 	}
 	if bestAll != nil {
-		if advanceRR {
+		if advanceRR && !stableOrder {
 			p.rr++
 		}
 		return bestAll.acc
@@ -2110,6 +2129,11 @@ func saveCodexAccount(a *Account) error {
 	if !a.LastRefresh.IsZero() {
 		root["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
 	}
+
+	setJSONField(root, "health_status", strings.TrimSpace(a.HealthStatus), strings.TrimSpace(a.HealthStatus) != "")
+	setJSONField(root, "health_error", strings.TrimSpace(a.HealthError), strings.TrimSpace(a.HealthError) != "")
+	setJSONTimeField(root, "health_checked_at", a.HealthCheckedAt)
+	setJSONTimeField(root, "last_healthy_at", a.LastHealthyAt)
 
 	// Persist dead flag so accounts stay dead across restarts
 	if a.Dead {

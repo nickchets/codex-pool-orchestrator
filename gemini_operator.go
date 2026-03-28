@@ -1021,7 +1021,7 @@ func antigravityGeminiRedirectURI(r *http.Request) (string, error) {
 	}
 	host := strings.TrimSpace(r.Host)
 	if !isLoopbackHost(host) {
-		return "", fmt.Errorf("loopback host required for Antigravity Gemini auth")
+		return "", fmt.Errorf("loopback host required for Gemini Browser Auth")
 	}
 	_, port, err := net.SplitHostPort(host)
 	if err != nil {
@@ -1033,7 +1033,7 @@ func antigravityGeminiRedirectURI(r *http.Request) (string, error) {
 	}
 	port = strings.TrimSpace(port)
 	if port == "" {
-		return "", fmt.Errorf("loopback port required for Antigravity Gemini auth")
+		return "", fmt.Errorf("loopback port required for Gemini Browser Auth")
 	}
 	return "http://localhost:" + port + antigravityOAuthCallbackPath, nil
 }
@@ -2208,21 +2208,21 @@ func serveAntigravityGeminiOAuthPopupResult(w http.ResponseWriter, ok bool, outc
 		"ok":   ok,
 	}
 
-	title := "Antigravity Gemini Auth Failed"
-	heading := "Antigravity Gemini auth failed"
+	title := "Gemini Browser Auth Failed"
+	heading := "Gemini Browser Auth failed"
 	body := sanitizeStatusMessage(errMessage)
 	if ok && outcome != nil {
-		title = "Antigravity Gemini Auth Complete"
-		heading = "Antigravity Gemini seat added"
-		body = "Antigravity Gemini auth completed. Reloading the operator dashboard."
+		title = "Gemini Browser Auth Complete"
+		heading = "Gemini seat added"
+		body = "Gemini Browser Auth completed. Reloading the operator dashboard."
 		if !outcome.Created {
-			heading = "Antigravity Gemini seat refreshed"
-			body = "Antigravity Gemini auth completed. An existing Gemini seat was refreshed."
+			heading = "Gemini seat refreshed"
+			body = "Gemini Browser Auth completed. An existing Gemini seat was refreshed."
 		}
 		if !outcome.ProbeOK || (!outcome.ProviderTruthReady && strings.TrimSpace(outcome.ProviderTruthState) != "") {
-			title = "Antigravity Gemini Auth Saved Partial Seat"
-			heading = "Antigravity Gemini seat saved with provider block"
-			body = "Antigravity Gemini auth completed, but the seat is not eligible yet. Reloading the operator dashboard."
+			title = "Gemini Browser Auth Saved Partial Seat"
+			heading = "Gemini seat saved with provider block"
+			body = "Gemini Browser Auth completed, but the seat is not eligible yet. Reloading the operator dashboard."
 		}
 		payload["account_id"] = outcome.AccountID
 		payload["created"] = outcome.Created
@@ -2238,7 +2238,7 @@ func serveAntigravityGeminiOAuthPopupResult(w http.ResponseWriter, ok bool, outc
 		payload["message"] = body
 	} else {
 		if body == "" {
-			body = "Antigravity Gemini auth did not complete."
+			body = "Gemini Browser Auth did not complete."
 		}
 		payload["message"] = body
 	}
@@ -2301,7 +2301,7 @@ func (h *proxyHandler) handleOperatorGeminiAntigravityOAuthCallback(w http.Respo
 
 	session, ok := claimAntigravityGeminiOAuthSession(state)
 	if !ok {
-		serveAntigravityGeminiOAuthPopupResult(w, false, nil, "The Antigravity Gemini OAuth session is missing or expired. Start the flow again.")
+		serveAntigravityGeminiOAuthPopupResult(w, false, nil, "The Gemini Browser Auth session is missing or expired. Start the flow again.")
 		return
 	}
 

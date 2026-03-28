@@ -14,6 +14,7 @@ const (
 	bucketUsageRequests      = "usage_requests"
 	bucketAccountUsage       = "account_usage"
 	bucketAccountUsageStates = "account_usage_snapshots"
+	bucketAccountRuntime     = "account_runtime_state"
 	bucketPlanCapacity       = "plan_capacity"
 	bucketCapacitySamples    = "capacity_samples"
 	bucketUserUsage          = "user_usage"
@@ -80,6 +81,10 @@ type rateLimitSnapshot struct {
 	Timestamp    time.Time
 }
 
+type persistedAccountRuntime struct {
+	LastUsed time.Time `json:"last_used,omitempty"`
+}
+
 // CapacitySample records a single observation of tokens vs rate limit change.
 type CapacitySample struct {
 	Timestamp       time.Time `json:"ts"`
@@ -103,7 +108,7 @@ func newUsageStore(path string, retentionDays int) (*usageStore, error) {
 		return nil, err
 	}
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range []string{bucketUsageRequests, bucketAccountUsage, bucketAccountUsageStates, bucketPlanCapacity, bucketCapacitySamples, bucketUserUsage, bucketUserDailyUsage, bucketUserHourlyUsage, bucketGlobalHourlyUsage} {
+		for _, bucket := range []string{bucketUsageRequests, bucketAccountUsage, bucketAccountUsageStates, bucketAccountRuntime, bucketPlanCapacity, bucketCapacitySamples, bucketUserUsage, bucketUserDailyUsage, bucketUserHourlyUsage, bucketGlobalHourlyUsage} {
 			if _, e := tx.CreateBucketIfNotExists([]byte(bucket)); e != nil {
 				return e
 			}
@@ -511,6 +516,37 @@ func (s *usageStore) loadAllAccountUsageSnapshots() (map[string]UsageSnapshot, e
 			var snapshot UsageSnapshot
 			if err := json.Unmarshal(v, &snapshot); err == nil {
 				out[string(k)] = snapshot
+			}
+			return nil
+		})
+	})
+	return out, err
+}
+
+func (s *usageStore) saveAccountRuntime(accountID string, state persistedAccountRuntime) error {
+	if s == nil || s.db == nil || strings.TrimSpace(accountID) == "" {
+		return nil
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	return s.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte(bucketAccountRuntime)).Put([]byte(accountID), raw)
+	})
+}
+
+func (s *usageStore) loadAllAccountRuntime() (map[string]persistedAccountRuntime, error) {
+	out := make(map[string]persistedAccountRuntime)
+	if s == nil || s.db == nil {
+		return out, nil
+	}
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(bucketAccountRuntime))
+		return b.ForEach(func(k, v []byte) error {
+			var state persistedAccountRuntime
+			if err := json.Unmarshal(v, &state); err == nil {
+				out[string(k)] = state
 			}
 			return nil
 		})

@@ -68,7 +68,7 @@ func TestBuildOpenCodeConfigBundle(t *testing.T) {
 	if bundle.ProviderID != openCodeAntigravityProviderID {
 		t.Fatalf("provider_id = %q", bundle.ProviderID)
 	}
-	if got, _ := bundle.OpenCodeConfig["model"].(string); got != "antigravity-manager/gemini-3.1-pro" {
+	if got, _ := bundle.OpenCodeConfig["model"].(string); got != "codex-pool/gemini-3.1-pro-high" {
 		t.Fatalf("model = %q", got)
 	}
 	if bundle.BaseURL != "http://pool.local/v1" {

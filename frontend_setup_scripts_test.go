@@ -118,6 +118,12 @@ func TestServeGeminiSetupScript_PowerShell(t *testing.T) {
 	if !strings.Contains(body, "useExternal -Value $true") {
 		t.Fatalf("expected PowerShell settings.json external auth update in body, got:\n%s", body)
 	}
+	if !strings.Contains(body, "OpenCode via codex-pool/gemini-3.1-pro-high remains the canonical Gemini path.") {
+		t.Fatalf("expected canonical OpenCode note in PowerShell body, got:\n%s", body)
+	}
+	if strings.Contains(body, "Gemini CLI") {
+		t.Fatalf("did not expect Gemini CLI wording in PowerShell body, got:\n%s", body)
+	}
 	if strings.Contains(body, "`") {
 		t.Fatalf("PowerShell script should not contain backticks (Go raw string safety), got:\n%s", body)
 	}
@@ -161,9 +167,9 @@ func TestServeOpenCodeSetupScript_PowerShell(t *testing.T) {
 	for _, fragment := range []string{
 		"Invoke-RestMethod -Uri $ConfigUrl -Method Get",
 		"opencode.json",
-		"antigravity-accounts.json",
+		"pool-gemini-accounts.json",
 		".codex-pool.bak",
-		"Antigravity pool line via /v1",
+		"codex-pool/gemini-3.1-pro-high via codex-pool /v1",
 	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("expected %q in PowerShell body, got:\n%s", fragment, body)
@@ -212,9 +218,9 @@ func TestServeOpenCodeSetupScript_Bash(t *testing.T) {
 	for _, fragment := range []string{
 		"curl -fsSL \"$CONFIG_URL\" -o \"$TMP_JSON\"",
 		"opencode.json",
-		"antigravity-accounts.json",
+		"pool-gemini-accounts.json",
 		".codex-pool.bak",
-		"OpenCode will use the Antigravity pool line via /v1.",
+		"OpenCode will use codex-pool/gemini-3.1-pro-high via codex-pool /v1.",
 	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("expected %q in bash body, got:\n%s", fragment, body)
@@ -263,10 +269,14 @@ func TestServeGeminiSetupScript_Bash(t *testing.T) {
 		"settings.security.auth.selectedType = 'gemini-api-key';",
 		"settings.security.auth.useExternal = true;",
 		"settings.codeAssistEndpoint = baseUrl;",
+		"OpenCode via codex-pool/gemini-3.1-pro-high remains the canonical Gemini path.",
 	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("expected %q in bash body, got:\n%s", fragment, body)
 		}
+	}
+	if strings.Contains(body, "Gemini CLI") {
+		t.Fatalf("did not expect Gemini CLI wording in bash body, got:\n%s", body)
 	}
 }
 
@@ -344,20 +354,20 @@ func TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction(t *testing.T) 
 		"overview-quarantine-detail",
 		"Long-dead seats moved out of active rotation",
 		"dead since",
-		"Antigravity Gemini browser auth lands seats directly in the shared Gemini pool here",
-		"Gemini CLI / OpenCode Setup",
-		"Configures the Gemini CLI endpoint and points you to the same dashboard/operator flow used for seat onboarding",
-		"OpenCode Recommended Path",
-		"opencode run -m antigravity-manager/gemini-3.1-pro \"Reply with exactly OK.\"",
+		"Gemini Browser Auth lands seats directly in the shared Gemini pool here",
+		"Gemini Setup via OpenCode",
+		"Optional <code>.gemini/settings.json</code> compatibility bundle. OpenCode below is the canonical Gemini path for this pool.",
+		"Canonical Gemini Path",
+		"opencode run -m codex-pool/gemini-3.1-pro-high \"Reply with exactly OK.\"",
 		"OpenCode Manual Config",
 		"shared snippet intentionally does not",
 		"per-user /setup/opencode/... URL",
 		"transport aligned for OpenCode via this Gemini pool",
-		"Start Antigravity Gemini Auth",
-		"/operator/gemini/antigravity/oauth-start",
+		"Start Gemini Browser Auth",
+		"/operator/gemini/oauth-start",
 		"gemini_oauth_result",
 		"python3 -m webbrowser",
-		"Antigravity browser auth is the only supported Gemini seat onboarding flow for this pool.",
+		"Gemini Browser Auth is the only supported Gemini seat onboarding flow for this pool.",
 		"Fallback API Pool",
 		"GitLab Claude Pool",
 		"Start Codex OAuth",
@@ -402,13 +412,12 @@ func TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction(t *testing.T) 
 		"hero-wrapper",
 		"/admin/codex/add",
 		"/admin/accounts",
-		"Downloads credentials and configures Gemini CLI endpoint",
 		"open http://127.0.0.1:8989/status",
 		"cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json",
 		"Import oauth_creds.json",
 		"gemini-seat-json-input",
 		"/operator/gemini/import-oauth-creds",
-		"If you already have a real Gemini oauth_creds.json or Antigravity account JSON",
+		"If you already have a real Gemini oauth_creds.json or imported account JSON",
 		"import it into the Gemini manual-import field on / or /status",
 		"noopener noreferrer",
 		"auth_expires_in || ''",

@@ -61,9 +61,29 @@ func persistUsageSnapshot(store *usageStore, a *Account) {
 	}
 }
 
-func restorePersistedUsageState(accs []*Account, store *usageStore) (int, int, int) {
+func persistAccountRuntimeState(store *usageStore, a *Account) {
+	if store == nil || a == nil {
+		return
+	}
+
+	a.mu.Lock()
+	accountID := a.ID
+	state := persistedAccountRuntime{
+		LastUsed: a.LastUsed,
+	}
+	a.mu.Unlock()
+
+	if accountID == "" || state.LastUsed.IsZero() {
+		return
+	}
+	if err := store.saveAccountRuntime(accountID, state); err != nil {
+		log.Printf("warning: failed to persist runtime state for %s: %v", accountID, err)
+	}
+}
+
+func restorePersistedUsageState(accs []*Account, store *usageStore) (int, int, int, int) {
 	if len(accs) == 0 || store == nil {
-		return 0, 0, 0
+		return 0, 0, 0, 0
 	}
 
 	totals, err := store.loadAllAccountUsage()
@@ -74,10 +94,15 @@ func restorePersistedUsageState(accs []*Account, store *usageStore) (int, int, i
 	if err != nil {
 		log.Printf("warning: failed to restore persisted account usage snapshots: %v", err)
 	}
+	runtimeState, err := store.loadAllAccountRuntime()
+	if err != nil {
+		log.Printf("warning: failed to restore persisted account runtime state: %v", err)
+	}
 
 	restoredTotals := 0
 	restoredSnapshots := 0
 	bridged := 0
+	restoredRuntime := 0
 	for _, a := range accs {
 		if a == nil {
 			continue
@@ -97,6 +122,14 @@ func restorePersistedUsageState(accs []*Account, store *usageStore) (int, int, i
 		if bridgeUsageFromTotals(a) {
 			bridged++
 		}
+		if state, ok := runtimeState[a.ID]; ok && !state.LastUsed.IsZero() {
+			a.mu.Lock()
+			if state.LastUsed.After(a.LastUsed) {
+				a.LastUsed = state.LastUsed
+			}
+			a.mu.Unlock()
+			restoredRuntime++
+		}
 	}
-	return restoredTotals, restoredSnapshots, bridged
+	return restoredTotals, restoredSnapshots, bridged, restoredRuntime
 }

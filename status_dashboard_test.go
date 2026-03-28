@@ -565,7 +565,7 @@ func TestBuildPoolDashboardDataCountsAntigravityGeminiImports(t *testing.T) {
 	if len(data.Accounts) != 1 {
 		t.Fatalf("accounts=%d", len(data.Accounts))
 	}
-	if data.Accounts[0].OperatorSource != "antigravity browser auth" {
+	if data.Accounts[0].OperatorSource != "Gemini Browser Auth" {
 		t.Fatalf("operator_source=%q", data.Accounts[0].OperatorSource)
 	}
 	if data.Accounts[0].Email != "ag@example.com" {
@@ -1370,6 +1370,48 @@ func TestServeStatusPageClarifiesQuotaVsLocalFields(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("unexpected fragment %q in body", forbidden)
 		}
+	}
+}
+
+func TestServeStatusPageShowsCodexRefreshInvalidHealthLine(t *testing.T) {
+	now := time.Now().UTC()
+	account := &Account{
+		ID:              "refresh-invalid",
+		Type:            AccountTypeCodex,
+		PlanType:        "team",
+		AccountID:       "workspace-a",
+		IDToken:         testCodexIDToken(t, "user-a", "workspace-a", "a@example.com", "sub-a", now.Add(4*time.Hour)),
+		HealthStatus:    codexRefreshInvalidHealthStatus,
+		HealthError:     codexRefreshInvalidHealthError,
+		HealthCheckedAt: now.Add(-2 * time.Minute),
+		LastHealthyAt:   now.Add(-5 * time.Minute),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.15,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(90 * time.Minute),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+			RetrievedAt:          now.Add(-time.Minute),
+			Source:               "wham",
+		},
+	}
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{account}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/status", nil)
+	rr := httptest.NewRecorder()
+	h.serveStatusPage(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "health refresh_invalid") {
+		t.Fatalf("missing refresh_invalid health line in body: %s", body)
+	}
+	if !strings.Contains(body, codexRefreshInvalidHealthError) {
+		t.Fatalf("missing refresh_invalid detail in body: %s", body)
 	}
 }
 
@@ -2271,7 +2313,7 @@ func TestLocalOperatorGeminiAntigravityOAuthStartAllowsLoopbackWithoutAdminHeade
 		cfg: config{adminToken: "secret"},
 	}
 
-	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/gemini/antigravity/oauth-start", strings.NewReader(`{}`))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/gemini/oauth-start", strings.NewReader(`{}`))
 	req.Host = "127.0.0.1:8989"
 	req.RemoteAddr = "127.0.0.1:4242"
 	req.Header.Set("Content-Type", "application/json")
@@ -2626,7 +2668,7 @@ func TestLocalOperatorGeminiAntigravityOAuthCallbackStoresImportedSeat(t *testin
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "Antigravity Gemini seat added") {
+	if !strings.Contains(rr.Body.String(), "Gemini seat added") {
 		t.Fatalf("unexpected body=%s", rr.Body.String())
 	}
 	if h.pool.count() != 1 {
@@ -2849,7 +2891,7 @@ func TestLocalOperatorGeminiAntigravityOAuthCallbackStoresValidationBlockedSeat(
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "Antigravity Gemini seat saved with provider block") {
+	if !strings.Contains(rr.Body.String(), "Gemini seat saved with provider block") {
 		t.Fatalf("unexpected body=%s", rr.Body.String())
 	}
 	if h.pool.count() != 1 {
@@ -3001,7 +3043,7 @@ func TestLocalOperatorGeminiAntigravityOAuthCallbackStoresMissingProjectSeat(t *
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "Antigravity Gemini seat saved with provider block") {
+	if !strings.Contains(rr.Body.String(), "Gemini seat saved with provider block") {
 		t.Fatalf("unexpected body=%s", rr.Body.String())
 	}
 	if h.pool.count() != 1 {
@@ -3683,12 +3725,12 @@ func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 	for _, fragment := range []string{
 		"Start Codex OAuth",
 		"Fallback API Pool",
-		"Antigravity Gemini Auth",
-		"Start Antigravity Gemini Auth",
+		"Gemini Browser Auth",
+		"Start Gemini Browser Auth",
 		"Add API Key",
 		"openai-api-key-input",
 		"/operator/codex/api-key-add",
-		"/operator/gemini/antigravity/oauth-start",
+		"/operator/gemini/oauth-start",
 		"/operator/account-delete",
 		"deleteAccountFromStatus",
 		"account-action-status",
@@ -3700,8 +3742,8 @@ func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 		"refreshes this page automatically when pool seat state changes",
 		"Waiting for pool seat state to change...",
 		"Waiting for pool seat state to change.",
-		"Waiting for the Antigravity Gemini seat state to change...",
-		"Timed out waiting for the Antigravity Gemini seat state to change.",
+		"Waiting for the Gemini Browser Auth seat state to change...",
+		"Timed out waiting for the Gemini Browser Auth seat state to change.",
 		"codex-oauth-result",
 		"gemini_oauth_result",
 		"auth_expires_at",
@@ -3762,10 +3804,10 @@ func TestServeStatusPageHidesOperatorActionOutsideLoopback(t *testing.T) {
 		"POST /operator/codex/oauth-start",
 		"/operator/codex/oauth-start",
 		"Fallback API Pool",
-		"Antigravity Gemini Auth",
-		"Start Antigravity Gemini Auth",
+		"Gemini Browser Auth",
+		"Start Gemini Browser Auth",
 		"/operator/codex/api-key-add",
-		"/operator/gemini/antigravity/oauth-start",
+		"/operator/gemini/oauth-start",
 		"/operator/account-delete",
 	} {
 		if strings.Contains(body, forbidden) {

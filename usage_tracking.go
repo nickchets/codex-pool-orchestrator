@@ -161,17 +161,42 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 				h.applyRateLimit(a, nil, defaultRateLimitBackoff)
 				return nil
 			}
-			// If refresh token is permanently invalid, mark account as dead
-			if strings.Contains(errStr, "invalid_grant") || strings.Contains(errStr, "refresh_token_reused") {
-				now := time.Now().UTC()
-				a.mu.Lock()
-				markAccountDeadStateLocked(a, now, 100.0)
-				a.mu.Unlock()
-				log.Printf("marking account %s as dead: refresh token revoked/invalid", a.ID)
-				if err := saveAccount(a); err != nil {
-					log.Printf("warning: failed to save dead account %s: %v", a.ID, err)
+			if isCodexRefreshTokenInvalidError(err) {
+				if a.Type == AccountTypeCodex {
+					probeCtx, cancel := context.WithTimeout(context.Background(), codexModelsFetchTimeout)
+					probe, probeErr := h.probeCodexCurrentAccess(probeCtx, a)
+					cancel()
+					probeNow := time.Now().UTC()
+					a.mu.Lock()
+					provenDead := false
+					if probeErr == nil {
+						provenDead = applyCodexRefreshInvalidProbeResultLocked(a, probeNow, probe, codexRefreshInvalidHealthError)
+					} else {
+						markCodexRefreshInvalidStateLocked(a, probeNow, codexRefreshInvalidHealthError, false)
+					}
+					a.mu.Unlock()
+					if saveErr := saveAccount(a); saveErr != nil {
+						log.Printf("warning: failed to persist codex account %s after refresh-invalid probe: %v", a.ID, saveErr)
+					}
+					if probeErr != nil {
+						log.Printf("codex current access probe after proactive refresh failure for %s failed: %v", a.ID, probeErr)
+					} else {
+						log.Printf("codex current access probe after proactive refresh failure for %s: status=%d working=%v mark_dead=%v reason=%q", a.ID, probe.StatusCode, probe.Working, probe.MarkDead, probe.Reason)
+					}
+					if provenDead {
+						return fmt.Errorf("refresh token invalid and current access unusable: %w", err)
+					}
+				} else {
+					now := time.Now().UTC()
+					a.mu.Lock()
+					markAccountDeadWithReasonLocked(a, now, 100.0, codexRefreshInvalidHealthError)
+					a.mu.Unlock()
+					log.Printf("marking account %s as dead: %s", a.ID, codexRefreshInvalidHealthError)
+					if err := saveAccount(a); err != nil {
+						log.Printf("warning: failed to save dead account %s: %v", a.ID, err)
+					}
+					return fmt.Errorf("refresh token invalid: %w", err)
 				}
-				return fmt.Errorf("refresh token invalid: %w", err)
 			}
 			// If refresh was rate limited, skip this usage fetch cycle entirely.
 			if strings.Contains(errStr, "rate limited") {
@@ -248,17 +273,42 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 				}
 			} else {
 				// Refresh failed - check if it's a permanent failure
-				errStr := err.Error()
 				if isRateLimitError(err) {
 					h.applyRateLimit(a, nil, defaultRateLimitBackoff)
 					return nil
 				}
-				if strings.Contains(errStr, "invalid_grant") || strings.Contains(errStr, "refresh_token_reused") {
+				if isCodexRefreshTokenInvalidError(err) {
+					if a.Type == AccountTypeCodex {
+						probeCtx, cancel := context.WithTimeout(context.Background(), codexModelsFetchTimeout)
+						probe, probeErr := h.probeCodexCurrentAccess(probeCtx, a)
+						cancel()
+						now := time.Now().UTC()
+						a.mu.Lock()
+						provenDead := false
+						if probeErr == nil {
+							provenDead = applyCodexRefreshInvalidProbeResultLocked(a, now, probe, codexRefreshInvalidHealthError)
+						} else {
+							markCodexRefreshInvalidStateLocked(a, now, codexRefreshInvalidHealthError, false)
+						}
+						a.mu.Unlock()
+						if saveErr := saveAccount(a); saveErr != nil {
+							log.Printf("warning: failed to persist codex account %s after usage refresh-invalid probe: %v", a.ID, saveErr)
+						}
+						if probeErr != nil {
+							log.Printf("codex current access probe after usage refresh failure for %s failed: %v", a.ID, probeErr)
+							return fmt.Errorf("usage unauthorized and refresh invalid: %w", err)
+						}
+						log.Printf("codex current access probe after usage refresh failure for %s: status=%d working=%v mark_dead=%v reason=%q", a.ID, probe.StatusCode, probe.Working, probe.MarkDead, probe.Reason)
+						if provenDead {
+							return fmt.Errorf("refresh token invalid and current access unusable: %w", err)
+						}
+						return fmt.Errorf("usage unauthorized but current codex access still works for %s", a.ID)
+					}
 					now := time.Now().UTC()
 					a.mu.Lock()
-					markAccountDeadStateLocked(a, now, 100.0)
+					markAccountDeadWithReasonLocked(a, now, 100.0, codexRefreshInvalidHealthError)
 					a.mu.Unlock()
-					log.Printf("marking account %s as dead: refresh token revoked", a.ID)
+					log.Printf("marking account %s as dead: %s", a.ID, codexRefreshInvalidHealthError)
 					if err := saveAccount(a); err != nil {
 						log.Printf("warning: failed to save dead account %s: %v", a.ID, err)
 					}
@@ -274,7 +324,7 @@ func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
 			// No refresh token - mark as dead
 			now := time.Now().UTC()
 			a.mu.Lock()
-			markAccountDeadStateLocked(a, now, 100.0)
+			markAccountDeadWithReasonLocked(a, now, 100.0, "no refresh token and usage 401/403")
 			a.mu.Unlock()
 			log.Printf("marking account %s as dead: no refresh token and usage 401/403", a.ID)
 			if err := saveAccount(a); err != nil {

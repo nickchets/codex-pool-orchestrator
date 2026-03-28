@@ -17,7 +17,7 @@ rsync -a \
   --exclude='orchestrator/' \
   --exclude='tests/' \
   --exclude='screenshots/' \
-  --exclude='docs/GEMINI_ANTIGRAVITY_AUDIT_PLAN_20260325.ru.md' \
+  --exclude='docs/GEMINI_POOL_AUDIT_PLAN_20260325.ru.md' \
   --exclude='docs/OBSERVABILITY_PROVIDER_ALIGNMENT_20260325.ru.md' \
   --exclude='docs/STATUS_TRUTH_WAVE_20260325.ru.md' \
   --exclude='__pycache__/' \
@@ -57,7 +57,7 @@ declare -a forbidden_paths=(
   orchestrator
   tests
   screenshots
-  docs/GEMINI_ANTIGRAVITY_AUDIT_PLAN_20260325.ru.md
+  docs/GEMINI_POOL_AUDIT_PLAN_20260325.ru.md
   docs/OBSERVABILITY_PROVIDER_ALIGNMENT_20260325.ru.md
   docs/STATUS_TRUTH_WAVE_20260325.ru.md
 )

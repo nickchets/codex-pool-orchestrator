@@ -196,7 +196,7 @@ func geminiOperatorSourceLabel(source string) string {
 	case geminiOperatorSourceManualImport, geminiOperatorSourceManualImportLegacy:
 		return "legacy local import"
 	case geminiOperatorSourceAntigravityImport:
-		return "antigravity browser auth"
+		return "Gemini Browser Auth"
 	default:
 		return ""
 	}
@@ -263,7 +263,7 @@ func managedOpenAIAPIPoolStatusNote(pool OpenAIAPIPoolStatus) string {
 }
 
 func geminiOperatorStatusNote(status GeminiOperatorStatus) string {
-	parts := []string{"Antigravity browser auth is the only supported Gemini seat onboarding flow for this pool."}
+	parts := []string{"Gemini Browser Auth is the only supported Gemini seat onboarding flow for this pool."}
 	if status.LegacySeatCount > 0 {
 		parts = append(parts, fmt.Sprintf("%d legacy local Gemini seat(s) still remain in the pool.", status.LegacySeatCount))
 	}
@@ -1895,26 +1895,26 @@ const statusHTML = `<!DOCTYPE html>
             <div id="gitlab-claude-token-add-status" class="muted" style="margin-top: 10px;"></div>
         </div>
         <div class="operator-card">
-            <div class="operator-title">Antigravity Gemini Auth</div>
+            <div class="operator-title">Gemini Browser Auth</div>
             <div class="muted">
-                This lane mirrors the original Antigravity browser sign-in flow, resolves the Code Assist project automatically, and stores the result as an Antigravity-backed Gemini seat in this pool. Browser auth is the only supported Gemini seat onboarding flow for this pool.
+                This lane opens the Gemini browser sign-in flow, resolves the Code Assist project automatically, and stores the result as a browser-auth Gemini seat in this pool. Gemini Browser Auth is the only supported Gemini seat onboarding flow for this pool.
             </div>
             <div class="result-block">
-                <div><strong>Antigravity seats:</strong> {{.GeminiOperator.AntigravitySeatCount}}</div>
+                <div><strong>Browser-auth seats:</strong> {{.GeminiOperator.AntigravitySeatCount}}</div>
                 {{if .GeminiOperator.LegacySeatCount}}<div><strong>Legacy local seats:</strong> {{.GeminiOperator.LegacySeatCount}}</div>{{end}}
                 {{if .GeminiOperator.ManagedSeatCount}}<div><strong>Legacy managed seats:</strong> {{.GeminiOperator.ManagedSeatCount}}</div>{{end}}
                 <div><strong>Total Gemini seats:</strong> {{.GeminiCount}}</div>
             </div>
             {{if .GeminiOperator.Note}}<div class="muted" style="margin-top: 10px;">{{.GeminiOperator.Note}}</div>{{end}}
             <div class="action-row">
-                <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromStatus()">Start Antigravity Gemini Auth</button>
+                <button id="gemini-oauth-start-btn" class="action-btn" onclick="startGeminiOAuthFromStatus()">Start Gemini Browser Auth</button>
             </div>
             <div id="gemini-oauth-start-status" class="muted" style="margin-top: 10px;"></div>
             <div id="gemini-oauth-start-result" class="result-block" style="display: none;">
-                <div><strong>Antigravity Auth URL</strong></div>
+                <div><strong>Gemini Browser Auth URL</strong></div>
                 <div id="gemini-oauth-start-url" class="mono" style="word-break: break-all;"></div>
                 <div id="gemini-oauth-start-outcome" class="muted" style="margin-top: 10px;"></div>
-                <a id="gemini-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px;">Open Antigravity Auth Page</a>
+                <a id="gemini-oauth-start-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px;">Open Gemini Browser Auth Page</a>
             </div>
         </div>
         {{if gt .Quarantine.Total 0}}
@@ -2157,7 +2157,7 @@ const statusHTML = `<!DOCTYPE html>
                 {{if .UsageObserved}}<br><small class="detail-line">usage {{.UsageObserved}}</small>{{end}}
                 {{if .GitLabRateLimitName}}<br><small class="detail-line" title="{{.GitLabRateLimitName}}{{if .GitLabRateLimitResetAt}} · reset {{.GitLabRateLimitResetAt}}{{end}}">gitlab api {{.GitLabRateLimitRemaining}}/{{.GitLabRateLimitLimit}}{{if .GitLabRateLimitResetIn}} · resets in {{.GitLabRateLimitResetIn}}{{end}}</small>{{end}}
                 {{if .GitLabQuotaExceededCount}}<br><small class="detail-line">quota backoff ×{{.GitLabQuotaExceededCount}}{{if .GitLabQuotaProbeIn}} · next probe {{.GitLabQuotaProbeIn}}{{end}}</small>{{end}}
-                {{if or .FallbackOnly (eq .PlanType "gitlab_duo") (eq .Type "gemini")}}<br><small class="detail-line" title="{{sanitize .HealthError}}">health {{if .HealthStatus}}{{.HealthStatus}}{{else}}unknown{{end}}{{if .HealthError}} · {{clip (sanitize .HealthError) 88}}{{end}}</small>{{end}}
+                {{if or .HealthStatus .HealthError}}<br><small class="detail-line" title="{{sanitize .HealthError}}">health {{if .HealthStatus}}{{.HealthStatus}}{{else}}unknown{{end}}{{if .HealthError}} · {{clip (sanitize .HealthError) 88}}{{end}}</small>{{end}}
                 {{if and (eq .Type "gemini") .ProviderTruth}}<br><small class="detail-line">provider {{if .ProviderTruth.State}}{{.ProviderTruth.State}}{{else if .ProviderTruth.Ready}}ready{{else}}unknown{{end}}{{if .ProviderTruth.Stale}} · stale{{end}}{{if .ProviderTruth.ProjectID}} · project <span class="mono" title="{{.ProviderTruth.ProjectID}}">{{clipOpaque .ProviderTruth.ProjectID}}</span>{{end}}</small>{{end}}
                 {{if and (eq .Type "gemini") .OperationalTruth}}<br><small class="detail-line">operational {{if .OperationalTruth.State}}{{.OperationalTruth.State}}{{else}}unknown{{end}}{{if .OperationalTruth.Reason}} · {{clip .OperationalTruth.Reason 88}}{{end}}{{if .OperationalTruth.CheckedAt}} · checked {{.OperationalTruth.CheckedAt}}{{end}}</small>{{end}}
                 {{if and (eq .Type "gemini") .ProviderQuotaSummary}}<br><small class="detail-line">quota {{.ProviderQuotaSummary}}</small>{{end}}
@@ -2736,18 +2736,18 @@ const statusHTML = `<!DOCTYPE html>
         function geminiOAuthDescribeOutcome(before, after, backendMode) {
             const mode = String(backendMode || '').trim().toLowerCase();
             if (mode === 'added') {
-                return 'Antigravity Gemini auth completed. Added a new seat; refreshing status now.';
+                return 'Gemini Browser Auth completed. Added a new seat; refreshing status now.';
             }
             if (mode === 'refreshed') {
-                return 'Antigravity Gemini auth completed. Refreshed an existing seat; refreshing status now.';
+                return 'Gemini Browser Auth completed. Refreshed an existing seat; refreshing status now.';
             }
             if (after.count > before.count) {
-                return 'Antigravity Gemini auth completed. Added a new seat; refreshing status now.';
+                return 'Gemini Browser Auth completed. Added a new seat; refreshing status now.';
             }
             if (after.signature !== before.signature) {
-                return 'Antigravity Gemini auth completed. Refreshed an existing seat; refreshing status now.';
+                return 'Gemini Browser Auth completed. Refreshed an existing seat; refreshing status now.';
             }
-            return 'Antigravity Gemini auth completed. Refreshing status now.';
+            return 'Gemini Browser Auth completed. Refreshing status now.';
         }
 
         async function geminiOAuthFetchStatusSnapshot() {
@@ -2791,7 +2791,7 @@ const statusHTML = `<!DOCTYPE html>
             }
             try {
                 popup.document.open();
-                popup.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Preparing Antigravity Gemini Auth</title></head><body style="font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 24px;"><div style="max-width: 640px; margin: 64px auto; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 24px;">Opening Antigravity Gemini auth session...</div></body></html>');
+                popup.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Preparing Gemini Browser Auth</title></head><body style="font-family: -apple-system, BlinkMacSystemFont, \'Segoe UI\', sans-serif; background: #0d1117; color: #c9d1d9; margin: 0; padding: 24px;"><div style="max-width: 640px; margin: 64px auto; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 24px;">Opening Gemini Browser Auth session...</div></body></html>');
                 popup.document.close();
                 popup.focus();
             } catch (error) {
@@ -2874,9 +2874,9 @@ const statusHTML = `<!DOCTYPE html>
                 }
                 if (status) {
                     status.style.color = '#f85149';
-                    status.textContent = 'Antigravity Gemini auth completed, but status refresh failed: ' + (error && error.message ? error.message : error);
+                    status.textContent = 'Gemini Browser Auth completed, but status refresh failed: ' + (error && error.message ? error.message : error);
                 }
-                geminiOAuthSetOutcome('Refresh failed. Use the Open Antigravity Auth Page link or retry after clearing the popup blocker.');
+                geminiOAuthSetOutcome('Refresh failed. Use the Open Gemini Browser Auth Page link or retry after clearing the popup blocker.');
                 geminiOAuthClearPendingState();
             }
         }
@@ -2896,19 +2896,19 @@ const statusHTML = `<!DOCTYPE html>
                     if (!geminiOAuthSnapshotsEqual(beforeSnapshot, afterSnapshot)) {
                         if (status) {
                             status.style.color = '#3fb950';
-                            status.textContent = 'Antigravity Gemini auth callback applied. Refreshing status now.';
+                            status.textContent = 'Gemini Browser Auth callback applied. Refreshing status now.';
                         }
                         void geminiOAuthFinalize(beforeSnapshot, backendMode, null);
                         return;
                     }
                     if (status) {
                         status.style.color = '#8b949e';
-                        status.textContent = 'Waiting for the Antigravity Gemini seat state to change...';
+                        status.textContent = 'Waiting for the Gemini Browser Auth seat state to change...';
                     }
                 } catch (error) {
                     if (status) {
                         status.style.color = '#8b949e';
-                        status.textContent = 'Waiting for the Antigravity Gemini seat state to change...';
+                        status.textContent = 'Waiting for the Gemini Browser Auth seat state to change...';
                     }
                 }
                 if (attempts >= maxAttempts) {
@@ -2920,16 +2920,16 @@ const statusHTML = `<!DOCTYPE html>
                     }
                     if (status) {
                         status.style.color = '#d29922';
-                        status.textContent = 'Timed out waiting for the Antigravity Gemini seat state to change. Use the Open Antigravity Auth Page link to retry.';
+                        status.textContent = 'Timed out waiting for the Gemini Browser Auth seat state to change. Use the Open Gemini Browser Auth Page link to retry.';
                     }
-                    geminiOAuthSetOutcome('No Antigravity Gemini seat state change was detected yet.');
+                    geminiOAuthSetOutcome('No Gemini Browser Auth seat state change was detected yet.');
                     return;
                 }
                 geminiOAuthWatcher = window.setTimeout(tick, 2000);
             };
             if (status) {
                 status.style.color = '#8b949e';
-                status.textContent = 'Waiting for the Antigravity Gemini seat state to change...';
+                status.textContent = 'Waiting for the Gemini Browser Auth seat state to change...';
             }
             geminiOAuthWatcher = window.setTimeout(tick, 2000);
         }
@@ -2972,10 +2972,10 @@ const statusHTML = `<!DOCTYPE html>
                     return;
                 }
 
-                const message = String((data && data.message) || 'Antigravity Gemini auth failed.').trim();
+                const message = String((data && data.message) || 'Gemini Browser Auth failed.').trim();
                 geminiOAuthSetOutcome(message);
                 status.style.color = '#f85149';
-                status.textContent = message || 'Antigravity Gemini auth failed.';
+                status.textContent = message || 'Gemini Browser Auth failed.';
             }, false);
         }
 
@@ -2997,7 +2997,7 @@ const statusHTML = `<!DOCTYPE html>
 
             button.disabled = true;
             status.style.color = '#8b949e';
-            status.textContent = 'Starting Antigravity Gemini auth session...';
+            status.textContent = 'Starting Gemini Browser Auth session...';
             result.style.display = 'none';
             urlNode.textContent = '';
             openLink.href = '#';
@@ -3005,7 +3005,7 @@ const statusHTML = `<!DOCTYPE html>
 
             try {
                 const beforeSnapshot = geminiOAuthSnapshot((await geminiOAuthFetchStatusSnapshot()).accounts);
-                const response = await fetch('/operator/gemini/antigravity/oauth-start', {
+                const response = await fetch('/operator/gemini/oauth-start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({})
@@ -3022,7 +3022,7 @@ const statusHTML = `<!DOCTYPE html>
                 urlNode.textContent = data.oauth_url;
                 openLink.href = data.oauth_url;
                 result.style.display = 'block';
-                geminiOAuthSetOutcome('Waiting for the Antigravity Gemini seat state to change.');
+                geminiOAuthSetOutcome('Waiting for the Gemini Browser Auth seat state to change.');
                 try {
                     sessionStorage.setItem(geminiOAuthStatusKey, JSON.stringify({
                         before: beforeSnapshot,
@@ -3034,10 +3034,10 @@ const statusHTML = `<!DOCTYPE html>
                 if (geminiOAuthPopup) {
                     geminiOAuthPopup.location.href = data.oauth_url;
                     status.style.color = '#3fb950';
-                    status.textContent = 'Antigravity auth URL generated. Complete sign-in in the popup; this page will refresh when the Gemini seat is stored.';
+                    status.textContent = 'Gemini Browser Auth URL generated. Complete sign-in in the popup; this page will refresh when the Gemini seat is stored.';
                 } else {
                     status.style.color = '#d29922';
-                    status.textContent = 'Antigravity auth URL generated, but the popup was blocked. Open the page from the link below; this page will keep watching for the Gemini seat.';
+                    status.textContent = 'Gemini Browser Auth URL generated, but the popup was blocked. Open the page from the link below; this page will keep watching for the Gemini seat.';
                 }
                 geminiOAuthWatchStatusChange(beforeSnapshot, data.result_mode || data.result || '');
             } catch (error) {
@@ -3046,8 +3046,8 @@ const statusHTML = `<!DOCTYPE html>
                 geminiOAuthClearPendingState();
                 button.disabled = false;
                 status.style.color = '#f85149';
-                status.textContent = 'Failed to start Antigravity Gemini auth: ' + (error && error.message ? error.message : error);
-                geminiOAuthSetOutcome('Retry after clearing the popup blocker or open the Antigravity auth URL manually.');
+                status.textContent = 'Failed to start Gemini Browser Auth: ' + (error && error.message ? error.message : error);
+                geminiOAuthSetOutcome('Retry after clearing the popup blocker or open the Gemini Browser Auth URL manually.');
             }
         }
 

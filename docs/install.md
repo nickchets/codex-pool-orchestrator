@@ -69,7 +69,9 @@ Preferred add-account flows:
 
 ```bash
 # Codex: click "Start Codex OAuth" on `/` or `/status`
-# Gemini: click "Start Antigravity Gemini Auth" on `/` or `/status`
+# Gemini: click "Start Gemini Browser Auth" on `/` or `/status`
+# Gemini client path: run the per-user /setup/opencode/... bundle, then use
+# opencode run -m codex-pool/gemini-3.1-pro-high "Reply with exactly OK."
 ```
 
 Low-level OAuth fallback:

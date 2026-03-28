@@ -237,8 +237,47 @@ func (h *proxyHandler) forceRefreshAccount(w http.ResponseWriter, accountID stri
 	// Force refresh
 	err := h.refreshAccountOnce(context.Background(), target, true)
 	if err != nil {
+		if target.Type == AccountTypeCodex {
+			if isCodexRefreshTokenInvalidError(err) {
+				probeCtx, cancel := context.WithTimeout(context.Background(), codexModelsFetchTimeout)
+				probe, probeErr := h.probeCodexCurrentAccess(probeCtx, target)
+				cancel()
+				now := time.Now().UTC()
+				target.mu.Lock()
+				provenDead := false
+				if probeErr == nil {
+					provenDead = applyCodexRefreshInvalidProbeResultLocked(target, now, probe, codexRefreshInvalidHealthError)
+				} else {
+					markCodexRefreshInvalidStateLocked(target, now, codexRefreshInvalidHealthError, false)
+				}
+				target.mu.Unlock()
+				if saveErr := saveAccount(target); saveErr != nil {
+					log.Printf("warning: failed to persist codex account %s after force refresh failure: %v", accountID, saveErr)
+				}
+				if probeErr != nil {
+					log.Printf("codex current access probe after force refresh failure for %s failed: %v", accountID, probeErr)
+				} else {
+					log.Printf("codex current access probe after force refresh failure for %s: status=%d working=%v mark_dead=%v reason=%q", accountID, probe.StatusCode, probe.Working, probe.MarkDead, probe.Reason)
+					if provenDead {
+						log.Printf("force refresh %s confirmed dead after models probe", accountID)
+					}
+				}
+			}
+		}
 		log.Printf("force refresh %s failed: %v", accountID, err)
-		respondJSON(w, map[string]any{"status": "error", "account": accountID, "error": err.Error()})
+		target.mu.Lock()
+		healthStatus := target.HealthStatus
+		healthError := target.HealthError
+		dead := target.Dead
+		target.mu.Unlock()
+		respondJSON(w, map[string]any{
+			"status":        "error",
+			"account":       accountID,
+			"error":         err.Error(),
+			"health_status": healthStatus,
+			"health_error":  healthError,
+			"dead":          dead,
+		})
 		return
 	}
 

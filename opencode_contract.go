@@ -8,9 +8,9 @@ import (
 )
 
 const (
-	openCodeAntigravityProviderID   = "antigravity-manager"
+	openCodeAntigravityProviderID   = "codex-pool"
 	openCodeConfigFileName          = "opencode.json"
-	openCodeAntigravityAccountsFile = "antigravity-accounts.json"
+	openCodeAntigravityAccountsFile = "pool-gemini-accounts.json"
 )
 
 type openCodePluginAccount struct {
@@ -43,7 +43,7 @@ type openCodeConfigBundle struct {
 	ConfigFile          string                     `json:"config_file"`
 	AccountsFile        string                     `json:"accounts_file"`
 	OpenCodeConfig      map[string]any             `json:"opencode_config"`
-	AntigravityAccounts openCodePluginAccountsFile `json:"antigravity_accounts"`
+	AntigravityAccounts openCodePluginAccountsFile `json:"pool_gemini_accounts"`
 }
 
 func normalizeOpenCodeBaseURL(input string) string {
@@ -153,12 +153,12 @@ func buildOpenCodeConfigDocument(baseURL, apiKey string, models map[string]any) 
 	}
 	return map[string]any{
 		"$schema": "https://opencode.ai/config.json",
-		"model":   openCodeAntigravityProviderID + "/gemini-3.1-pro",
+		"model":   openCodeAntigravityProviderID + "/gemini-3.1-pro-high",
 		"provider": map[string]any{
 			openCodeAntigravityProviderID: map[string]any{
 				// OpenCode reaches this local Gemini pool over its Anthropic-compatible transport.
 				"npm":  "@ai-sdk/anthropic",
-				"name": "Antigravity Manager",
+				"name": "Codex Pool Gemini",
 				"options": map[string]any{
 					"baseURL": normalizeOpenCodeBaseURL(baseURL),
 					"apiKey":  apiKey,

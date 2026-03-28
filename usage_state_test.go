@@ -42,10 +42,10 @@ func TestRestorePersistedUsageStateRestoresSnapshotAndTotals(t *testing.T) {
 	}
 
 	acc := &Account{ID: "seat-a", Type: AccountTypeCodex}
-	restoredTotals, restoredSnapshots, bridged := restorePersistedUsageState([]*Account{acc}, store)
+	restoredTotals, restoredSnapshots, bridged, restoredRuntime := restorePersistedUsageState([]*Account{acc}, store)
 
-	if restoredTotals != 1 || restoredSnapshots != 1 || bridged != 0 {
-		t.Fatalf("restore counts = (%d, %d, %d)", restoredTotals, restoredSnapshots, bridged)
+	if restoredTotals != 1 || restoredSnapshots != 1 || bridged != 0 || restoredRuntime != 0 {
+		t.Fatalf("restore counts = (%d, %d, %d, %d)", restoredTotals, restoredSnapshots, bridged, restoredRuntime)
 	}
 	if acc.Totals.TotalBillableTokens != 15 || acc.Totals.RequestCount != 1 {
 		t.Fatalf("totals=%+v", acc.Totals)
@@ -83,10 +83,10 @@ func TestRestorePersistedUsageStateBridgesFromTotalsWhenSnapshotMissing(t *testi
 	}
 
 	acc := &Account{ID: "seat-b", Type: AccountTypeCodex}
-	restoredTotals, restoredSnapshots, bridged := restorePersistedUsageState([]*Account{acc}, store)
+	restoredTotals, restoredSnapshots, bridged, restoredRuntime := restorePersistedUsageState([]*Account{acc}, store)
 
-	if restoredTotals != 1 || restoredSnapshots != 0 || bridged != 1 {
-		t.Fatalf("restore counts = (%d, %d, %d)", restoredTotals, restoredSnapshots, bridged)
+	if restoredTotals != 1 || restoredSnapshots != 0 || bridged != 1 || restoredRuntime != 0 {
+		t.Fatalf("restore counts = (%d, %d, %d, %d)", restoredTotals, restoredSnapshots, bridged, restoredRuntime)
 	}
 	if acc.Usage.PrimaryUsedPercent != 0.33 || acc.Usage.SecondaryUsedPercent != 0.66 {
 		t.Fatalf("usage=%+v", acc.Usage)
@@ -133,10 +133,10 @@ func TestRestorePersistedUsageStatePrefersNewerTotalsWhenSnapshotStale(t *testin
 	}
 
 	acc := &Account{ID: "seat-c", Type: AccountTypeCodex}
-	restoredTotals, restoredSnapshots, bridged := restorePersistedUsageState([]*Account{acc}, store)
+	restoredTotals, restoredSnapshots, bridged, restoredRuntime := restorePersistedUsageState([]*Account{acc}, store)
 
-	if restoredTotals != 1 || restoredSnapshots != 1 || bridged != 1 {
-		t.Fatalf("restore counts = (%d, %d, %d)", restoredTotals, restoredSnapshots, bridged)
+	if restoredTotals != 1 || restoredSnapshots != 1 || bridged != 1 || restoredRuntime != 0 {
+		t.Fatalf("restore counts = (%d, %d, %d, %d)", restoredTotals, restoredSnapshots, bridged, restoredRuntime)
 	}
 	if acc.Usage.PrimaryUsedPercent != 0.35 || acc.Usage.SecondaryUsedPercent != 0.91 {
 		t.Fatalf("usage=%+v", acc.Usage)
@@ -149,5 +149,32 @@ func TestRestorePersistedUsageStatePrefersNewerTotalsWhenSnapshotStale(t *testin
 	}
 	if !acc.Usage.SecondaryResetAt.Equal(now.Add(12 * time.Hour)) {
 		t.Fatalf("secondary_reset_at=%v", acc.Usage.SecondaryResetAt)
+	}
+}
+
+func TestRestorePersistedUsageStateRestoresLastUsedRuntime(t *testing.T) {
+	store, err := newUsageStore(filepath.Join(t.TempDir(), "usage.db"), 7)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+
+	lastUsed := time.Now().UTC().Truncate(time.Second)
+	if err := store.saveAccountRuntime("seat-d", persistedAccountRuntime{LastUsed: lastUsed}); err != nil {
+		t.Fatalf("save runtime state: %v", err)
+	}
+
+	acc := &Account{
+		ID:       "seat-d",
+		Type:     AccountTypeCodex,
+		LastUsed: lastUsed.Add(-5 * time.Minute),
+	}
+	restoredTotals, restoredSnapshots, bridged, restoredRuntime := restorePersistedUsageState([]*Account{acc}, store)
+
+	if restoredTotals != 0 || restoredSnapshots != 0 || bridged != 0 || restoredRuntime != 1 {
+		t.Fatalf("restore counts = (%d, %d, %d, %d)", restoredTotals, restoredSnapshots, bridged, restoredRuntime)
+	}
+	if !acc.LastUsed.Equal(lastUsed) {
+		t.Fatalf("last_used=%v want %v", acc.LastUsed, lastUsed)
 	}
 }

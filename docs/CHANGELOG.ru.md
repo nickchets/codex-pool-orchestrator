@@ -8,14 +8,24 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.8.6] - 2026-03-28
+
+### Изменено
+- Выбор Codex seat'а теперь использует стабильный score-first порядок для одинаково пригодных subscription seat'ов, поэтому cold-start round-robin offset больше не сжигает другой seat, пока лучший seat все еще находится в пределах задуманной sticky/headroom policy.
+- Operator-facing Gemini/OpenCode surface теперь последовательно описывают канонический browser-auth Gemini lane и экспортируют `codex-pool/gemini-3.1-pro-high` через `pool-gemini-accounts.json`, а legacy Gemini auth path оставлен только как compatibility alias.
+
+### Исправлено
+- Codex OAuth seat'ы больше не помечаются dead вслепую на `invalid_grant` или `refresh_token_reused`; теперь пул сначала пробует текущее `/backend-api/codex/models` access и сохраняет `health_status=refresh_invalid` для seat'ов, которые еще реально живы.
+- Codex OAuth health/runtime state теперь truthfully переживает save, reload, force-refresh и status rendering, включая сохранение `last_used`, `last_healthy_at` и operator-visible health lines.
+
 ## [0.8.5] - 2026-03-28
 
 ### Изменено
-- Refresh truth для Antigravity Gemini теперь становится proactive за один poll interval до `fresh_until`, поэтому ready seat’ы больше не выпадают в `stale_provider_truth` между плановыми refresh-циклами.
+- Refresh truth для browser-auth Gemini теперь становится proactive за один poll interval до `fresh_until`, поэтому ready seat’ы больше не выпадают в `stale_provider_truth` между плановыми refresh-циклами.
 - `/status`, `/status?format=json` и родственные status-style JSON surface теперь поднимают Gemini cooldown seat’ы в top-level `health_status="cooldown"` вместо misleading generic `healthy`.
 
 ### Исправлено
-- Warmed Antigravity Gemini seat’ы, которые всё ещё сходятся в `provider_truth.state=missing_project_id`, теперь truthfully экспортируются и в status, и в OpenCode quota rows: они остаются `degraded_enabled` с fallback-project reason, а их Gemini quota models сохраняют `routable=true`.
+- Warmed browser-auth Gemini seat’ы, которые всё ещё сходятся в `provider_truth.state=missing_project_id`, теперь truthfully экспортируются и в status, и в OpenCode quota rows: они остаются `degraded_enabled` с fallback-project reason, а их Gemini quota models сохраняют `routable=true`.
 - Operator-facing Gemini status больше не противоречит runtime truth, показывая `health_status=healthy` для seat’ов, которые реально находятся в `operational_truth.state=cooldown` и `routing.state=degraded_enabled`.
 
 ## [0.8.4] - 2026-03-28
@@ -26,12 +36,12 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 ### Исправлено
 - Gemini `429 RESOURCE_EXHAUSTED` на одной routed-модели больше не отравляет весь seat глобальным cooldown state, если seat остается пригодным для других Gemini моделей.
-- Export для OpenCode/`agcode` теперь сохраняет такие seat’ы включенными и передает model-specific reset windows вместо отключения всего seat’а из-за cooldown одной модели.
+- Export для OpenCode теперь сохраняет такие seat’ы включенными и передает model-specific reset windows вместо отключения всего seat’а из-за cooldown одной модели.
 
 ## [0.8.3] - 2026-03-27
 
 ### Изменено
-- Warmed Antigravity Gemini seat’ы с `provider_truth_state=missing_project_id` теперь остаются в `degraded_enabled`, если fallback Code Assist project реально пригоден для работы, вместо жесткой блокировки despite successful operational proof.
+- Warmed browser-auth Gemini seat’ы с `provider_truth_state=missing_project_id` теперь остаются в `degraded_enabled`, если fallback Code Assist project реально пригоден для работы, вместо жесткой блокировки despite successful operational proof.
 
 ### Исправлено
 - Routing truth, `/status` и downstream exports больше не противоречат live Gemini seat smoke для fallback-project seat’ов, которые реально отвечают на запросы даже без сохраненного provider project id.
@@ -50,45 +60,45 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 - Локальный landing теперь показывает Gemini quota не только как summary-счетчики, но и как per-model rows с reset time, состоянием `routable`/`catalog-only`, protected-флагами и ключевыми model capabilities.
 
 ### Исправлено
-- Нормализация Antigravity Gemini quota теперь считает каноничным outer key из `fetchAvailableModels`, поэтому placeholder-поля `model` внутри entry больше не схлопывают живые quota snapshots в `0 models captured`.
+- Нормализация browser-auth Gemini quota теперь считает каноничным outer key из `fetchAvailableModels`, поэтому placeholder-поля `model` внутри entry больше не схлопывают живые quota snapshots в `0 models captured`.
 - Логи refresh-пути Gemini теперь показывают реальное число hydrated quota models, а не вводящий в заблуждение count top-level quota keys.
 
 ## [0.8.0] - 2026-03-27
 
 ### Добавлено
-- Browser-first Antigravity Gemini onboarding на `/` и `/status` с сохранением provider-truth для project identity, subscription tier, protected models, typed quota snapshots и warm-seat state.
+- Browser-first Gemini onboarding через Gemini Browser Auth на `/` и `/status` с сохранением provider-truth для project identity, subscription tier, protected models, typed quota snapshots и warm-seat state.
 - OpenCode export и guided setup surfaces (`/config/opencode/<token>` и `/setup/opencode/<token>`) плюс Anthropic-compatible Gemini adapters для `/v1/messages` и `/v1/chat/completions`.
 - Loopback-only Gemini operator diagnostics и reset tooling: seat smoke, `reset-bundle`, `reset-delete`, `reset-rollback` с manifest snapshots и rollback artifacts.
 - Provider-scoped request tracing для OAuth exchange, token refresh, health probe, facade routing и metadata-cache событий across Codex, Claude и Gemini lanes.
 
 ### Изменено
 - Gemini routing теперь работает в sticky-until-pressure режиме и перед ротацией проверяет provider truth, warm-seat state, quota pressure, project availability и observed operational failure.
-- `/status`, `/status?format=json`, landing, Gemini CLI setup и OpenCode export теперь проецируют один и тот же контракт: `provider_truth`, `operational_truth`, `routing.state`, `gemini_pool`, `provider_quota_summary` и compatibility lane.
-- Setup для Gemini CLI теперь удерживает клиентов на pool root URL в external API-key mode, а legacy local/manual Gemini import убран с operator surface в пользу browser-first Antigravity auth.
+- `/status`, `/status?format=json`, landing, direct Gemini API-key setup и OpenCode export теперь проецируют один и тот же контракт: `provider_truth`, `operational_truth`, `routing.state`, `gemini_pool`, `provider_quota_summary` и compatibility lane.
+- Прямой Gemini API-key setup теперь удерживает клиентов на pool root URL в external API-key mode, а legacy local/manual Gemini import убран с operator surface в пользу Gemini Browser Auth.
 - Codex route readiness, models-cache fetches, OAuth exchange, API-key probes и refresh flows теперь публикуют trace data и сохраняют точный cutoff `>= 90%` вместе со sticky reuse seat'а.
 
 ### Исправлено
 - Gemini seat'ы после рестарта теперь честнее обновляют stale provider truth и empty-quota snapshots вместо того, чтобы ронять eligible seats в stale-routing dead end.
 - OpenCode export больше не позволяет blocked `missing_project_id` seat'у захватывать `activeIndex`; disabled seat остаётся видимым, но не становится активным аккаунтом.
 - Gemini reset rollback теперь валидирует только operator-managed paths перед delete/restore, закрывая path-traversal gap в reset tooling.
-- Restricted Antigravity seat'ы теперь можно диагностировать и, когда это допустимо, прогонять через fallback project без схлопывания provider restrictions в generic operational failure.
+- Restricted browser-auth Gemini seat'ы теперь можно диагностировать и, когда это допустимо, прогонять через fallback project без схлопывания provider restrictions в generic operational failure.
 
 ## [0.7.0] - 2026-03-25
 
 ### Добавлено
-- Antigravity-backed Gemini onboarding на `/` и `/status`: browser OAuth start/callback, нормализация импорта Antigravity account JSON, bootstrap Code Assist project и сохранение provider-truth полей, нужных для маршрутизации.
-- Facade для pooled Gemini `/v1beta/models/*:generateContent|streamGenerateContent`, который переписывает поддержанные запросы в Code Assist `v1internal` lane для импортированных Antigravity-backed seat’ов.
+- Gemini Browser Auth onboarding на `/` и `/status`: browser OAuth start/callback, нормализация импорта browser-auth account JSON, bootstrap Code Assist project и сохранение provider-truth полей, нужных для маршрутизации.
+- Facade для pooled Gemini `/v1beta/models/*:generateContent|streamGenerateContent`, который переписывает поддержанные запросы в Code Assist `v1internal` lane для импортированных browser-auth Gemini seat’ов.
 - Сквозная Claude request-trace корреляция от wrapper до pool: trace headers, счетчики SSE/usage events, детекция `chunk_gap` и явная диагностика idle-timeout.
-- Focused regression coverage для Gemini provider persistence, Antigravity onboarding, dashboard/operator JSON truth, setup scripts, facade transforms и request-trace поведения.
+- Focused regression coverage для Gemini provider persistence, Gemini Browser Auth onboarding, dashboard/operator JSON truth, setup scripts, facade transforms и request-trace поведения.
 
 ### Изменено
-- Setup scripts для Gemini CLI теперь удерживают клиент в external API key mode через `GEMINI_API_KEY` и `GOOGLE_GEMINI_BASE_URL`, а не через прежнюю OAuth-bypass схему env-переменных.
+- Setup scripts для прямого Gemini API-key клиента теперь удерживают клиент в external API key mode через `GEMINI_API_KEY` и `GOOGLE_GEMINI_BASE_URL`, а не через прежнюю OAuth-bypass схему env-переменных.
 - Gemini seat persistence и routing теперь сохраняют provenance/operator source и provider block-state поля: `proxy_disabled`, `validation_blocked`, quota-forbidden state, subscription tier и validation metadata.
-- `/status`, `/status?format=json` и landing теперь описывают Gemini seat’ы с Antigravity import provenance и provider-truth полями вместо того, чтобы сводить все non-managed seat’ы к одной generic manual-import lane.
+- `/status`, `/status?format=json` и landing теперь описывают Gemini seat’ы с browser-auth provenance и provider-truth полями вместо того, чтобы сводить все non-managed seat’ы к одной generic manual-import lane.
 - Явные operator force-refresh path теперь обходят Gemini per-account refresh throttle, когда оператор действительно просит реальный refresh.
 
 ### Исправлено
-- Gemini `v1beta` запросы больше не попадают на импортированные seat’ы без Antigravity project ID, который обязателен для Code Assist facade.
+- Gemini `v1beta` запросы больше не попадают на импортированные seat’ы без provider project id, который обязателен для Code Assist facade.
 - Детекция idle SSE timeout теперь сохраняет реальный timeout state вместо того, чтобы растворяться в generic downstream `context canceled`.
 - Local Claude tracing теперь можно коррелировать end-to-end без утечки wrapper-only headers в upstream.
 

@@ -336,6 +336,42 @@ func TestCandidateKeepsActiveCodexSeatWhileEligible(t *testing.T) {
 	}
 }
 
+func TestCandidateColdStartCodexTieBreakIgnoresRoundRobinOffset(t *testing.T) {
+	now := time.Now()
+	first := &Account{
+		ID:       "a-seat",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	second := &Account{
+		ID:       "b-seat",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{first, second}, false)
+	p.rr = 1
+
+	got := p.candidate("", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != "a-seat" {
+		t.Fatalf("expected stable cold-start codex selection, got %+v", got)
+	}
+	if p.activeCodexID != "a-seat" {
+		t.Fatalf("expected active codex seat to stay deterministic, got %q", p.activeCodexID)
+	}
+}
+
 func TestCandidateDropsActiveCodexSeatAtExactPrimaryThreshold(t *testing.T) {
 	now := time.Now()
 	active := &Account{
