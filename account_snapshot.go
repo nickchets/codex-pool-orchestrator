@@ -60,6 +60,7 @@ type accountSnapshot struct {
 	GeminiQuotaModels               []GeminiModelQuotaSnapshot
 	GeminiQuotaUpdatedAt            time.Time
 	GeminiModelForwardingRules      map[string]string
+	GeminiModelRateLimitResetTimes  map[string]time.Time
 	GitLabRateLimitName             string
 	GitLabRateLimitLimit            int
 	GitLabRateLimitRemaining        int
@@ -80,8 +81,10 @@ func snapshotAccountState(a *Account, now time.Time, accountType AccountType, re
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	syncGeminiProviderTruthStateLocked(a)
+	pruneExpiredGeminiModelRateLimitResetTimesLocked(a, now)
 
 	authMode := accountAuthMode(a)
+	quotaModels := mergeGeminiQuotaModelsWithLiveRateLimitResetTimes(a.GeminiQuotaModels, a.GeminiModelRateLimitResetTimes, now)
 	return accountSnapshot{
 		ID:                              a.ID,
 		Type:                            a.Type,
@@ -133,9 +136,10 @@ func snapshotAccountState(a *Account, now time.Time, accountType AccountType, re
 		GeminiOperationalCheckedAt:      a.GeminiOperationalCheckedAt,
 		GeminiOperationalLastSuccessAt:  a.GeminiOperationalLastSuccessAt,
 		GeminiProtectedModels:           normalizeStringSlice(a.GeminiProtectedModels),
-		GeminiQuotaModels:               cloneGeminiModelQuotaSnapshots(a.GeminiQuotaModels),
+		GeminiQuotaModels:               quotaModels,
 		GeminiQuotaUpdatedAt:            a.GeminiQuotaUpdatedAt,
 		GeminiModelForwardingRules:      cloneStringMap(a.GeminiModelForwardingRules),
+		GeminiModelRateLimitResetTimes:  cloneTimeMap(a.GeminiModelRateLimitResetTimes),
 		GitLabRateLimitName:             a.GitLabRateLimitName,
 		GitLabRateLimitLimit:            a.GitLabRateLimitLimit,
 		GitLabRateLimitRemaining:        a.GitLabRateLimitRemaining,

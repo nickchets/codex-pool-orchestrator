@@ -40,24 +40,28 @@ type operatorGeminiSeatSmokeGenerateResult struct {
 }
 
 type operatorGeminiSeatSmokeResponse struct {
-	AccountID             string                                `json:"account_id"`
-	Model                 string                                `json:"model"`
-	Prompt                string                                `json:"prompt"`
-	ProjectID             string                                `json:"project_id,omitempty"`
-	FallbackProjectUsed   bool                                  `json:"fallback_project_used,omitempty"`
-	HealthStatus          string                                `json:"health_status,omitempty"`
-	ProviderTruthState    string                                `json:"provider_truth_state,omitempty"`
-	OperationalTruth      *GeminiOperationalTruthStatus         `json:"operational_truth,omitempty"`
-	RoutingState          string                                `json:"routing_state,omitempty"`
-	RoutingBlockReason    string                                `json:"routing_block_reason,omitempty"`
-	RoutingDegradedReason string                                `json:"routing_degraded_reason,omitempty"`
-	RoutingRecoveryAt     string                                `json:"routing_recovery_at,omitempty"`
-	ValidationReasonCode  string                                `json:"validation_reason_code,omitempty"`
-	RefreshForced         bool                                  `json:"refresh_forced,omitempty"`
-	RefreshApplied        bool                                  `json:"refresh_applied,omitempty"`
-	RefreshError          string                                `json:"refresh_error,omitempty"`
-	LoadCodeAssist        *operatorGeminiSeatSmokeLoadResult    `json:"load_code_assist,omitempty"`
-	Generate              operatorGeminiSeatSmokeGenerateResult `json:"generate"`
+	AccountID                string                                `json:"account_id"`
+	Model                    string                                `json:"model"`
+	Prompt                   string                                `json:"prompt"`
+	ProjectID                string                                `json:"project_id,omitempty"`
+	FallbackProjectUsed      bool                                  `json:"fallback_project_used,omitempty"`
+	HealthStatus             string                                `json:"health_status,omitempty"`
+	ProviderTruthState       string                                `json:"provider_truth_state,omitempty"`
+	OperationalTruth         *GeminiOperationalTruthStatus         `json:"operational_truth,omitempty"`
+	RoutingState             string                                `json:"routing_state,omitempty"`
+	RoutingBlockReason       string                                `json:"routing_block_reason,omitempty"`
+	RoutingDegradedReason    string                                `json:"routing_degraded_reason,omitempty"`
+	RoutingRecoveryAt        string                                `json:"routing_recovery_at,omitempty"`
+	RequestedModelKey        string                                `json:"requested_model_key,omitempty"`
+	RequestedModelLimited    bool                                  `json:"requested_model_limited,omitempty"`
+	RequestedModelRecoveryAt string                                `json:"requested_model_recovery_at,omitempty"`
+	RateLimitResetTimes      map[string]string                     `json:"rate_limit_reset_times,omitempty"`
+	ValidationReasonCode     string                                `json:"validation_reason_code,omitempty"`
+	RefreshForced            bool                                  `json:"refresh_forced,omitempty"`
+	RefreshApplied           bool                                  `json:"refresh_applied,omitempty"`
+	RefreshError             string                                `json:"refresh_error,omitempty"`
+	LoadCodeAssist           *operatorGeminiSeatSmokeLoadResult    `json:"load_code_assist,omitempty"`
+	Generate                 operatorGeminiSeatSmokeGenerateResult `json:"generate"`
 }
 
 func (h *proxyHandler) accountByID(id string) *Account {
@@ -149,7 +153,40 @@ func (h *proxyHandler) doOperatorGeminiSeatSmokeGenerate(ctx context.Context, ac
 	return h.doGeminiCodeAssistJSON(ctx, http.MethodPost, "/v1internal:generateContent", accessToken, payload, out)
 }
 
-func (h *proxyHandler) populateOperatorGeminiSeatSmokeState(result *operatorGeminiSeatSmokeResponse, accountID string, now time.Time) {
+func formatGeminiModelRateLimitResetTimes(values map[string]time.Time, now time.Time) map[string]string {
+	values = normalizeGeminiModelRateLimitResetTimes(values, now)
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for model, resetAt := range values {
+		if resetAt.IsZero() || !resetAt.After(now) {
+			continue
+		}
+		out[model] = resetAt.UTC().Format(time.RFC3339)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func snapshotGeminiRequestedModelCooldown(snapshot accountSnapshot, requestedModel string, now time.Time) (time.Time, string, bool) {
+	modelKey := requestedGeminiModelRateLimitKey(requestedModel, "")
+	if modelKey == "" {
+		return time.Time{}, "", false
+	}
+	resetTimes := normalizeGeminiModelRateLimitResetTimes(snapshot.GeminiModelRateLimitResetTimes, now)
+	if until, ok := resetTimes[modelKey]; ok && until.After(now) {
+		return until.UTC(), modelKey, true
+	}
+	if until, ok := geminiQuotaModelRateLimitUntil(snapshot.GeminiQuotaModels, modelKey, now); ok {
+		return until.UTC(), modelKey, true
+	}
+	return time.Time{}, modelKey, false
+}
+
+func (h *proxyHandler) populateOperatorGeminiSeatSmokeState(result *operatorGeminiSeatSmokeResponse, accountID, requestedModel string, now time.Time) {
 	if h == nil || result == nil {
 		return
 	}
@@ -166,6 +203,14 @@ func (h *proxyHandler) populateOperatorGeminiSeatSmokeState(result *operatorGemi
 	result.RoutingBlockReason = strings.TrimSpace(routing.BlockReason)
 	result.RoutingDegradedReason = strings.TrimSpace(routing.DegradedReason)
 	result.RoutingRecoveryAt = strings.TrimSpace(routing.RecoveryAt)
+	result.RateLimitResetTimes = formatGeminiModelRateLimitResetTimes(snapshot.GeminiModelRateLimitResetTimes, now)
+	if until, modelKey, limited := snapshotGeminiRequestedModelCooldown(snapshot, requestedModel, now); modelKey != "" {
+		result.RequestedModelKey = modelKey
+		result.RequestedModelLimited = limited
+		if limited {
+			result.RequestedModelRecoveryAt = until.UTC().Format(time.RFC3339)
+		}
+	}
 }
 
 func (h *proxyHandler) handleOperatorGeminiSeatSmoke(w http.ResponseWriter, r *http.Request) {
@@ -229,7 +274,7 @@ func (h *proxyHandler) handleOperatorGeminiSeatSmoke(w http.ResponseWriter, r *h
 		result.FallbackProjectUsed = true
 	}
 	acc.mu.Unlock()
-	h.populateOperatorGeminiSeatSmokeState(&result, accountID, time.Now().UTC())
+	h.populateOperatorGeminiSeatSmokeState(&result, accountID, model, time.Now().UTC())
 
 	if accessToken == "" {
 		http.Error(w, "gemini account has empty access token", http.StatusServiceUnavailable)
@@ -277,7 +322,7 @@ func (h *proxyHandler) handleOperatorGeminiSeatSmoke(w http.ResponseWriter, r *h
 		if saveErr := saveAccount(acc); saveErr != nil {
 			result.RefreshError = firstNonEmpty(result.RefreshError, saveErr.Error())
 		}
-		h.populateOperatorGeminiSeatSmokeState(&result, accountID, time.Now().UTC())
+		h.populateOperatorGeminiSeatSmokeState(&result, accountID, model, time.Now().UTC())
 		w.WriteHeader(http.StatusBadRequest)
 		result.Generate.Error = "no project_id available for smoke request"
 		respondJSON(w, result)
@@ -287,8 +332,9 @@ func (h *proxyHandler) handleOperatorGeminiSeatSmoke(w http.ResponseWriter, r *h
 	reqID := "operator-gemini-smoke-" + randomID()
 	var rawEnvelope json.RawMessage
 	if err := h.doOperatorGeminiSeatSmokeGenerate(ctx, accessToken, model, result.ProjectID, reqID, prompt, &rawEnvelope); err != nil {
+		now := time.Now().UTC()
 		acc.mu.Lock()
-		noteGeminiOperationalFailureLocked(acc, time.Now().UTC(), "operator_smoke", err)
+		noteGeminiOperationalFailureForModelLocked(acc, now, "operator_smoke", err, model, "")
 		acc.mu.Unlock()
 		if saveErr := saveAccount(acc); saveErr != nil {
 			result.RefreshError = firstNonEmpty(result.RefreshError, saveErr.Error())
@@ -296,7 +342,7 @@ func (h *proxyHandler) handleOperatorGeminiSeatSmoke(w http.ResponseWriter, r *h
 		result.Generate.OK = false
 		result.Generate.HTTPStatus = geminiSmokeHTTPStatus(err)
 		result.Generate.Error = err.Error()
-		h.populateOperatorGeminiSeatSmokeState(&result, accountID, time.Now().UTC())
+		h.populateOperatorGeminiSeatSmokeState(&result, accountID, model, now)
 		respondJSON(w, result)
 		return
 	}
@@ -313,7 +359,7 @@ func (h *proxyHandler) handleOperatorGeminiSeatSmoke(w http.ResponseWriter, r *h
 		result.Generate.HTTPStatus = http.StatusOK
 		result.Generate.Error = fmt.Sprintf("unwrap response: %v", err)
 		result.Generate.RawResponse = append(json.RawMessage(nil), rawEnvelope...)
-		h.populateOperatorGeminiSeatSmokeState(&result, accountID, time.Now().UTC())
+		h.populateOperatorGeminiSeatSmokeState(&result, accountID, model, time.Now().UTC())
 		respondJSON(w, result)
 		return
 	}
@@ -328,6 +374,6 @@ func (h *proxyHandler) handleOperatorGeminiSeatSmoke(w http.ResponseWriter, r *h
 	result.Generate.HTTPStatus = http.StatusOK
 	result.Generate.RawResponse = append(json.RawMessage(nil), unwrapped...)
 	result.Generate.ResponseText = extractGeminiResponseText(unwrapped)
-	h.populateOperatorGeminiSeatSmokeState(&result, accountID, time.Now().UTC())
+	h.populateOperatorGeminiSeatSmokeState(&result, accountID, model, time.Now().UTC())
 	respondJSON(w, result)
 }

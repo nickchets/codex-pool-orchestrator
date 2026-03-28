@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -297,6 +298,7 @@ func TestOperatorGeminiSeatSmokeDefaultModelUsesGemini31Pro(t *testing.T) {
 
 func TestOperatorGeminiSeatSmokeRateLimitBecomesCooldown(t *testing.T) {
 	t.Helper()
+	expectedUntil := time.Now().UTC().Add(4 * time.Second).Truncate(time.Second)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -310,7 +312,7 @@ func TestOperatorGeminiSeatSmokeRateLimitBecomesCooldown(t *testing.T) {
 			})
 		case "/v1internal:generateContent":
 			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{
+			_, _ = w.Write([]byte(fmt.Sprintf(`{
 				"error": {
 					"code": 429,
 					"message": "You have exhausted your capacity on this model. Your quota will reset after 4s.",
@@ -320,7 +322,7 @@ func TestOperatorGeminiSeatSmokeRateLimitBecomesCooldown(t *testing.T) {
 							"@type": "type.googleapis.com/google.rpc.ErrorInfo",
 							"reason": "RATE_LIMIT_EXCEEDED",
 							"metadata": {
-								"quotaResetTimeStamp": "2026-03-27T15:00:50Z",
+								"quotaResetTimeStamp": %q,
 								"quotaResetDelay": "4s"
 							}
 						},
@@ -330,7 +332,7 @@ func TestOperatorGeminiSeatSmokeRateLimitBecomesCooldown(t *testing.T) {
 						}
 					]
 				}
-			}`))
+			}`, expectedUntil.Format(time.RFC3339))))
 		default:
 			http.NotFound(w, r)
 		}
@@ -383,19 +385,41 @@ func TestOperatorGeminiSeatSmokeRateLimitBecomesCooldown(t *testing.T) {
 	if resp.OperationalTruth == nil || resp.OperationalTruth.State != geminiOperationalTruthStateCooldown {
 		t.Fatalf("operational_truth = %+v", resp.OperationalTruth)
 	}
-	if resp.RoutingState != routingDisplayStateCooldown {
+	if resp.RoutingState != routingDisplayStateDegradedEnabled {
 		t.Fatalf("routing_state = %q", resp.RoutingState)
 	}
-	if resp.RoutingBlockReason != "rate_limited" {
+	if resp.RoutingBlockReason != "" {
 		t.Fatalf("routing_block_reason = %q", resp.RoutingBlockReason)
-	}
-	if resp.RoutingRecoveryAt == "" {
-		t.Fatalf("routing_recovery_at = %q", resp.RoutingRecoveryAt)
 	}
 	if resp.OperationalTruth.Reason == "" || !strings.Contains(strings.ToLower(resp.OperationalTruth.Reason), "capacity") {
 		t.Fatalf("operational_truth = %+v", resp.OperationalTruth)
 	}
-	if acc.RateLimitUntil.IsZero() {
-		t.Fatal("expected rate_limit_until to be set")
+	acc.mu.Lock()
+	gotSeatCooldown := acc.RateLimitUntil
+	gotModelCooldown := acc.GeminiModelRateLimitResetTimes["gemini-2.5-flash"]
+	acc.mu.Unlock()
+	if !gotSeatCooldown.IsZero() {
+		t.Fatalf("expected seat-wide rate_limit_until to stay clear, got %s", gotSeatCooldown)
+	}
+	if gotModelCooldown.IsZero() {
+		t.Fatalf("expected model cooldown for gemini-2.5-flash, got %#v", acc.GeminiModelRateLimitResetTimes)
+	}
+	if resp.RoutingRecoveryAt != "" {
+		t.Fatalf("routing_recovery_at = %q", resp.RoutingRecoveryAt)
+	}
+	if resp.RequestedModelKey != "gemini-2.5-flash" {
+		t.Fatalf("requested_model_key = %q", resp.RequestedModelKey)
+	}
+	if !resp.RequestedModelLimited {
+		t.Fatalf("requested_model_limited = %#v", resp)
+	}
+	if resp.RequestedModelRecoveryAt != gotModelCooldown.Format(time.RFC3339) {
+		t.Fatalf("requested_model_recovery_at = %q", resp.RequestedModelRecoveryAt)
+	}
+	if resp.RateLimitResetTimes["gemini-2.5-flash"] != gotModelCooldown.Format(time.RFC3339) {
+		t.Fatalf("rate_limit_reset_times = %#v", resp.RateLimitResetTimes)
+	}
+	if !gotModelCooldown.Equal(expectedUntil) {
+		t.Fatalf("expected model cooldown at %s, got %#v", expectedUntil, gotModelCooldown)
 	}
 }

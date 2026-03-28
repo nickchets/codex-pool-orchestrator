@@ -280,6 +280,10 @@ func (p *GeminiProvider) LoadAccount(name, path string, data []byte) (*Account, 
 		GeminiProtectedModels:        protectedModels,
 		GeminiQuotaModels:            cloneGeminiModelQuotaSnapshots(gj.GeminiQuotaModels),
 		GeminiModelForwardingRules:   cloneStringMap(gj.GeminiModelForwardingRules),
+		GeminiModelRateLimitResetTimes: normalizeGeminiModelRateLimitResetTimes(
+			gj.GeminiModelRateLimitResetTimes,
+			time.Now().UTC(),
+		),
 	}
 	acc.AntigravityQuotaForbidden, acc.AntigravityQuotaForbiddenReason = antigravityQuotaDisposition(acc.AntigravityQuota)
 	if gj.GeminiQuotaUpdatedAt != nil {

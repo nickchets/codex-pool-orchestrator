@@ -431,6 +431,64 @@ func TestBuildOpenCodeConfigBundleExportsGeminiCooldownState(t *testing.T) {
 	}
 }
 
+func TestBuildOpenCodeConfigBundleExportsGeminiModelRateLimitResetTimes(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	now := time.Now().UTC()
+	resetAt := now.Add(3 * time.Minute).Truncate(time.Second)
+	h := &proxyHandler{
+		pool: newPoolState([]*Account{
+			{
+				ID:                       "gemini-seat-model-cooldown",
+				Type:                     AccountTypeGemini,
+				RefreshToken:             "refresh-model-cooldown",
+				OperatorEmail:            "model-cooldown@example.com",
+				AntigravityProjectID:     "project-model-cooldown",
+				GeminiProviderCheckedAt:  now,
+				GeminiProviderTruthReady: true,
+				GeminiProviderTruthState: geminiProviderTruthStateReady,
+				GeminiOperationalState:   geminiOperationalTruthStateCooldown,
+				GeminiModelRateLimitResetTimes: map[string]time.Time{
+					"gemini-3.1-pro-high": resetAt,
+				},
+			},
+		}, false),
+	}
+	user := &PoolUser{
+		ID:       "pool-user-1234",
+		Token:    "download-token",
+		Email:    "pool@example.com",
+		PlanType: "pro",
+	}
+	req := httptest.NewRequest("GET", "http://pool.local/config/opencode/download-token", nil)
+
+	bundle, err := h.buildOpenCodeConfigBundle(req, user, getPoolJWTSecret())
+	if err != nil {
+		t.Fatalf("buildOpenCodeConfigBundle: %v", err)
+	}
+	account := bundle.AntigravityAccounts.Accounts[0]
+	if account.Enabled == nil || !*account.Enabled {
+		t.Fatalf("enabled = %#v", account.Enabled)
+	}
+	if account.CoolingDownUntil != 0 {
+		t.Fatalf("cooling_down_until = %d", account.CoolingDownUntil)
+	}
+	if account.RateLimitResetTimes["gemini-3.1-pro-high"] != resetAt.UnixMilli() {
+		t.Fatalf("rate_limit_reset_times = %#v", account.RateLimitResetTimes)
+	}
+	resetTimes, _ := account.CachedQuota["rate_limit_reset_times"].(map[string]int64)
+	if resetTimes["gemini-3.1-pro-high"] != resetAt.UnixMilli() {
+		t.Fatalf("cached_quota = %#v", account.CachedQuota)
+	}
+	cachedModels := account.CachedQuota["models"].([]map[string]any)
+	if len(cachedModels) != 1 {
+		t.Fatalf("cached_quota.models = %#v", cachedModels)
+	}
+	if cachedModels[0]["name"] != "gemini-3.1-pro-high" || cachedModels[0]["percentage"] != 100 || cachedModels[0]["reset_time"] != resetAt.Format(time.RFC3339) {
+		t.Fatalf("cached model = %#v", cachedModels[0])
+	}
+}
+
 func TestBuildOpenCodeConfigBundleOmitsExpiredGeminiCooldownMetadata(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
 

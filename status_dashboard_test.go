@@ -1424,6 +1424,55 @@ func TestServeStatusPageIncludesGeminiQuotaModelRows(t *testing.T) {
 	}
 }
 
+func TestServeStatusPageIncludesLiveGeminiModelCooldownRows(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	resetAt := now.Add(4 * time.Minute).Truncate(time.Second)
+	account := &Account{
+		ID:                       "gemini_live_model_cooldown",
+		Type:                     AccountTypeGemini,
+		PlanType:                 "gemini",
+		AuthMode:                 accountAuthModeOAuth,
+		OperatorSource:           geminiOperatorSourceAntigravityImport,
+		AntigravityProjectID:     "project-live",
+		GeminiProviderTruthReady: true,
+		GeminiProviderTruthState: geminiProviderTruthStateReady,
+		GeminiOperationalState:   geminiOperationalTruthStateCooldown,
+		GeminiProviderCheckedAt:  now,
+		GeminiModelRateLimitResetTimes: map[string]time.Time{
+			"gemini-3.1-pro-high": resetAt,
+		},
+	}
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{account}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/status?format=json", nil)
+	rr := httptest.NewRecorder()
+	h.serveStatusPage(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var payload StatusData
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode json: %v", err)
+	}
+	if len(payload.Accounts) != 1 || payload.Accounts[0].ProviderTruth == nil || payload.Accounts[0].ProviderTruth.Quota == nil {
+		t.Fatalf("payload = %#v", payload.Accounts)
+	}
+	models := payload.Accounts[0].ProviderTruth.Quota.Models
+	if len(models) != 1 {
+		t.Fatalf("models = %#v", models)
+	}
+	if models[0].Name != "gemini-3.1-pro-high" || models[0].Percentage != 100 || models[0].ResetTime != resetAt.Format(time.RFC3339) {
+		t.Fatalf("model = %#v", models[0])
+	}
+	if payload.Accounts[0].ProviderTruth.RateLimitResetTimes["gemini-3.1-pro-high"] != resetAt.Format(time.RFC3339) {
+		t.Fatalf("provider_truth.rate_limit_reset_times = %#v", payload.Accounts[0].ProviderTruth.RateLimitResetTimes)
+	}
+}
+
 func TestServeStatusPageReturnsJSONForExplicitJSONClients(t *testing.T) {
 	now := time.Now().UTC()
 	account := &Account{

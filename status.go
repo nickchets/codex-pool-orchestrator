@@ -124,6 +124,7 @@ type GeminiProviderTruthStatus struct {
 	QuotaForbidden       bool                       `json:"quota_forbidden,omitempty"`
 	QuotaForbiddenReason string                     `json:"quota_forbidden_reason,omitempty"`
 	ProtectedModels      []string                   `json:"protected_models,omitempty"`
+	RateLimitResetTimes  map[string]string          `json:"rate_limit_reset_times,omitempty"`
 	Quota                *GeminiProviderQuotaStatus `json:"quota,omitempty"`
 }
 
@@ -1038,6 +1039,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 				QuotaForbidden:       snapshot.AntigravityQuotaForbidden,
 				QuotaForbiddenReason: sanitizeStatusMessage(snapshot.AntigravityQuotaForbiddenReason),
 				ProtectedModels:      protectedModels,
+				RateLimitResetTimes:  formatGeminiModelRateLimitResetTimes(snapshot.GeminiModelRateLimitResetTimes, now),
 				Quota:                quotaStatus,
 			}
 			if !snapshot.GeminiProviderCheckedAt.IsZero() {

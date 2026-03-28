@@ -8,6 +8,16 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.8.4] - 2026-03-28
+
+### Изменено
+- `/status?format=json` теперь экспортирует `provider_truth.rate_limit_reset_times` для Gemini seat’ов, а объединенные quota rows напрямую показывают live reset time для model-specific cooldown из runtime state.
+- Gemini operator `seat-smoke` теперь возвращает `requested_model_key`, `requested_model_limited`, `requested_model_recovery_at` и live-карту `rate_limit_reset_times`, так что aliasing модели и cooldown именно запрошенной модели видны в одном ответе.
+
+### Исправлено
+- Gemini `429 RESOURCE_EXHAUSTED` на одной routed-модели больше не отравляет весь seat глобальным cooldown state, если seat остается пригодным для других Gemini моделей.
+- Export для OpenCode/`agcode` теперь сохраняет такие seat’ы включенными и передает model-specific reset windows вместо отключения всего seat’а из-за cooldown одной модели.
+
 ## [0.8.3] - 2026-03-27
 
 ### Изменено

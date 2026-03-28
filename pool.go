@@ -343,6 +343,7 @@ type Account struct {
 	GeminiQuotaModels               []GeminiModelQuotaSnapshot
 	GeminiQuotaUpdatedAt            time.Time
 	GeminiModelForwardingRules      map[string]string
+	GeminiModelRateLimitResetTimes  map[string]time.Time
 	// AccountID corresponds to Codex `auth.json` field `tokens.account_id`.
 	// Codex uses this value as the `ChatGPT-Account-ID` header.
 	AccountID string
@@ -636,6 +637,7 @@ type GeminiAuthJSON struct {
 	GeminiQuotaModels              []GeminiModelQuotaSnapshot `json:"gemini_quota_models,omitempty"`
 	GeminiQuotaUpdatedAt           *time.Time                 `json:"gemini_quota_updated_at,omitempty"`
 	GeminiModelForwardingRules     map[string]string          `json:"gemini_model_forwarding_rules,omitempty"`
+	GeminiModelRateLimitResetTimes map[string]time.Time       `json:"gemini_model_rate_limit_reset_times,omitempty"`
 }
 
 func syncGeminiProviderTruthState(acc *Account) {
@@ -756,6 +758,7 @@ func noteGeminiOperationalSuccessLocked(acc *Account, now time.Time, source stri
 	if acc == nil || acc.Type != AccountTypeGemini {
 		return
 	}
+	pruneExpiredGeminiModelRateLimitResetTimesLocked(acc, now)
 	state, reason := successfulGeminiOperationalStateLocked(acc)
 	acc.RateLimitUntil = time.Time{}
 	acc.GeminiOperationalState = state
@@ -765,7 +768,21 @@ func noteGeminiOperationalSuccessLocked(acc *Account, now time.Time, source stri
 	acc.GeminiOperationalLastSuccessAt = now.UTC()
 }
 
+func noteGeminiOperationalCooldownLocked(acc *Account, now time.Time, source, reason string) {
+	if acc == nil || acc.Type != AccountTypeGemini {
+		return
+	}
+	acc.GeminiOperationalState = geminiOperationalTruthStateCooldown
+	acc.GeminiOperationalReason = sanitizeStatusMessage(reason)
+	acc.GeminiOperationalSource = strings.TrimSpace(source)
+	acc.GeminiOperationalCheckedAt = now.UTC()
+}
+
 func noteGeminiOperationalFailureLocked(acc *Account, now time.Time, source string, err error) {
+	noteGeminiOperationalFailureForModelLocked(acc, now, source, err, "", "")
+}
+
+func noteGeminiOperationalFailureForModelLocked(acc *Account, now time.Time, source string, err error, requestedModel, path string) {
 	if acc == nil || acc.Type != AccountTypeGemini || err == nil {
 		return
 	}
@@ -774,7 +791,9 @@ func noteGeminiOperationalFailureLocked(acc *Account, now time.Time, source stri
 		acc.GeminiOperationalReason = sanitizeStatusMessage(firstNonEmpty(reason, err.Error()))
 		acc.GeminiOperationalSource = strings.TrimSpace(source)
 		acc.GeminiOperationalCheckedAt = now.UTC()
-		if precise || acc.RateLimitUntil.Before(until) {
+		if modelKey := noteGeminiModelRateLimitedLocked(acc, requestedModel, path, until); modelKey != "" {
+			acc.RateLimitUntil = time.Time{}
+		} else if precise || acc.RateLimitUntil.Before(until) {
 			acc.RateLimitUntil = until.UTC()
 		}
 		return
@@ -785,7 +804,9 @@ func noteGeminiOperationalFailureLocked(acc *Account, now time.Time, source stri
 		acc.GeminiOperationalReason = sanitizeStatusMessage(err.Error())
 		acc.GeminiOperationalSource = strings.TrimSpace(source)
 		acc.GeminiOperationalCheckedAt = now.UTC()
-		if acc.RateLimitUntil.Before(until) {
+		if modelKey := noteGeminiModelRateLimitedLocked(acc, requestedModel, path, until); modelKey != "" {
+			acc.RateLimitUntil = time.Time{}
+		} else if acc.RateLimitUntil.Before(until) {
 			acc.RateLimitUntil = until.UTC()
 		}
 		return
@@ -900,6 +921,51 @@ func cloneStringMap(values map[string]string) map[string]string {
 	return out
 }
 
+func cloneTimeMap(values map[string]time.Time) map[string]time.Time {
+	if len(values) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(values))
+	normalized := make(map[string]time.Time, len(values))
+	for key, value := range values {
+		key = strings.TrimSpace(rewriteGeminiCodeAssistFacadeModel(key))
+		if key == "" || value.IsZero() {
+			continue
+		}
+		keys = append(keys, key)
+		normalized[key] = value.UTC()
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	sort.Strings(keys)
+	out := make(map[string]time.Time, len(keys))
+	for _, key := range keys {
+		out[key] = normalized[key]
+	}
+	return out
+}
+
+func normalizeGeminiModelRateLimitResetTimes(values map[string]time.Time, now time.Time) map[string]time.Time {
+	cloned := cloneTimeMap(values)
+	if len(cloned) == 0 {
+		return nil
+	}
+	if now.IsZero() {
+		return cloned
+	}
+	filtered := make(map[string]time.Time, len(cloned))
+	for key, value := range cloned {
+		if value.After(now) {
+			filtered[key] = value.UTC()
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return cloneTimeMap(filtered)
+}
+
 func cloneSupportedMimeTypes(values map[string]bool) map[string]bool {
 	if len(values) == 0 {
 		return nil
@@ -972,6 +1038,140 @@ func cloneGeminiModelQuotaSnapshots(models []GeminiModelQuotaSnapshot) []GeminiM
 		return nil
 	}
 	return out
+}
+
+func parseGeminiQuotaModelResetTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.UTC()
+		}
+	}
+	return time.Time{}
+}
+
+func requestedGeminiModelRateLimitKey(requestedModel, path string) string {
+	if model, _, ok := parseGeminiAPIPath(strings.TrimSpace(path)); ok {
+		return rewriteGeminiCodeAssistFacadeModel(model)
+	}
+	return rewriteGeminiCodeAssistFacadeModel(strings.TrimSpace(requestedModel))
+}
+
+func geminiQuotaModelRateLimitUntil(models []GeminiModelQuotaSnapshot, requestedModel string, now time.Time) (time.Time, bool) {
+	requestedModel = strings.TrimSpace(rewriteGeminiCodeAssistFacadeModel(requestedModel))
+	if requestedModel == "" {
+		return time.Time{}, false
+	}
+	for _, model := range models {
+		modelName := strings.TrimSpace(rewriteGeminiCodeAssistFacadeModel(model.Name))
+		if modelName == "" || modelName != requestedModel {
+			continue
+		}
+		routeProvider := firstNonEmpty(strings.TrimSpace(model.RouteProvider), geminiQuotaModelRouteProvider(modelName))
+		if routeProvider != "gemini" || model.Percentage < 100 {
+			continue
+		}
+		resetAt := parseGeminiQuotaModelResetTime(model.ResetTime)
+		if resetAt.After(now) {
+			return resetAt.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
+func pruneExpiredGeminiModelRateLimitResetTimesLocked(acc *Account, now time.Time) {
+	if acc == nil || len(acc.GeminiModelRateLimitResetTimes) == 0 {
+		return
+	}
+	for key, resetAt := range acc.GeminiModelRateLimitResetTimes {
+		if resetAt.IsZero() || !resetAt.After(now) {
+			delete(acc.GeminiModelRateLimitResetTimes, key)
+		}
+	}
+	if len(acc.GeminiModelRateLimitResetTimes) == 0 {
+		acc.GeminiModelRateLimitResetTimes = nil
+	}
+}
+
+func noteGeminiModelRateLimitedLocked(acc *Account, requestedModel, path string, until time.Time) string {
+	if acc == nil || acc.Type != AccountTypeGemini || until.IsZero() {
+		return ""
+	}
+	modelKey := requestedGeminiModelRateLimitKey(requestedModel, path)
+	if modelKey == "" {
+		return ""
+	}
+	pruneExpiredGeminiModelRateLimitResetTimesLocked(acc, time.Now().UTC())
+	if acc.GeminiModelRateLimitResetTimes == nil {
+		acc.GeminiModelRateLimitResetTimes = make(map[string]time.Time)
+	}
+	if prev := acc.GeminiModelRateLimitResetTimes[modelKey]; prev.Before(until) {
+		acc.GeminiModelRateLimitResetTimes[modelKey] = until.UTC()
+	}
+	return modelKey
+}
+
+func geminiRequestedModelRateLimitUntilLocked(acc *Account, requestedModel, path string, now time.Time) (time.Time, string, bool) {
+	if acc == nil || acc.Type != AccountTypeGemini {
+		return time.Time{}, "", false
+	}
+	modelKey := requestedGeminiModelRateLimitKey(requestedModel, path)
+	if modelKey == "" {
+		return time.Time{}, "", false
+	}
+	pruneExpiredGeminiModelRateLimitResetTimesLocked(acc, now)
+	if until, ok := acc.GeminiModelRateLimitResetTimes[modelKey]; ok && until.After(now) {
+		return until.UTC(), modelKey, true
+	}
+	if until, ok := geminiQuotaModelRateLimitUntil(acc.GeminiQuotaModels, modelKey, now); ok {
+		return until.UTC(), modelKey, true
+	}
+	return time.Time{}, modelKey, false
+}
+
+func mergeGeminiQuotaModelsWithLiveRateLimitResetTimes(models []GeminiModelQuotaSnapshot, resets map[string]time.Time, now time.Time) []GeminiModelQuotaSnapshot {
+	base := cloneGeminiModelQuotaSnapshots(models)
+	resets = normalizeGeminiModelRateLimitResetTimes(resets, now)
+	if len(resets) == 0 {
+		return base
+	}
+
+	out := make([]GeminiModelQuotaSnapshot, len(base))
+	copy(out, base)
+	indexByName := make(map[string]int, len(out))
+	for idx, model := range out {
+		indexByName[strings.TrimSpace(rewriteGeminiCodeAssistFacadeModel(model.Name))] = idx
+	}
+
+	for modelName, resetAt := range resets {
+		modelName = strings.TrimSpace(rewriteGeminiCodeAssistFacadeModel(modelName))
+		if modelName == "" || !resetAt.After(now) {
+			continue
+		}
+		if idx, ok := indexByName[modelName]; ok {
+			if out[idx].Percentage < 100 {
+				out[idx].Percentage = 100
+			}
+			if current := parseGeminiQuotaModelResetTime(out[idx].ResetTime); current.IsZero() || current.Before(resetAt) {
+				out[idx].ResetTime = resetAt.UTC().Format(time.RFC3339)
+			}
+			if strings.TrimSpace(out[idx].RouteProvider) == "" {
+				out[idx].RouteProvider = "gemini"
+			}
+			continue
+		}
+		out = append(out, GeminiModelQuotaSnapshot{
+			Name:          modelName,
+			RouteProvider: "gemini",
+			Percentage:    100,
+			ResetTime:     resetAt.UTC().Format(time.RFC3339),
+		})
+	}
+
+	return cloneGeminiModelQuotaSnapshots(out)
 }
 
 func geminiQuotaModelRouteProvider(name string) string {
@@ -1999,10 +2199,12 @@ func saveGeminiAccount(a *Account) error {
 	geminiProtectedModels := normalizeStringSlice(a.GeminiProtectedModels)
 	geminiQuotaModels := cloneGeminiModelQuotaSnapshots(a.GeminiQuotaModels)
 	geminiModelForwardingRules := cloneStringMap(a.GeminiModelForwardingRules)
+	geminiModelRateLimitResetTimes := normalizeGeminiModelRateLimitResetTimes(a.GeminiModelRateLimitResetTimes, time.Now().UTC())
 	setJSONField(root, "gemini_protected_models", geminiProtectedModels, len(geminiProtectedModels) > 0)
 	setJSONField(root, "gemini_quota_models", geminiQuotaModels, len(geminiQuotaModels) > 0)
 	setJSONTimeField(root, "gemini_quota_updated_at", a.GeminiQuotaUpdatedAt)
 	setJSONField(root, "gemini_model_forwarding_rules", geminiModelForwardingRules, len(geminiModelForwardingRules) > 0)
+	setJSONField(root, "gemini_model_rate_limit_reset_times", geminiModelRateLimitResetTimes, len(geminiModelRateLimitResetTimes) > 0)
 	if !a.ExpiresAt.IsZero() {
 		root["expiry_date"] = a.ExpiresAt.UnixMilli()
 	}

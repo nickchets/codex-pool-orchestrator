@@ -32,6 +32,7 @@ func TestGeminiProviderLoadAccountLoadsPersistedState(t *testing.T) {
 	rateLimitUntil := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
 	healthCheckedAt := time.Date(2026, 3, 23, 11, 45, 0, 0, time.UTC)
 	lastHealthyAt := time.Date(2026, 3, 23, 10, 30, 0, 0, time.UTC)
+	modelResetAt := time.Date(2026, 4, 24, 16, 0, 0, 0, time.UTC)
 	raw := []byte(`{
 		"access_token": "access-token",
 		"refresh_token": "refresh-token",
@@ -42,6 +43,9 @@ func TestGeminiProviderLoadAccountLoadsPersistedState(t *testing.T) {
 		"plan_type": "gemini",
 		"last_refresh": "2026-03-23T10:00:00Z",
 		"rate_limit_until": "2026-03-24T12:00:00Z",
+		"gemini_model_rate_limit_reset_times": {
+			"gemini-3.1-pro-high": "2026-04-24T16:00:00Z"
+		},
 		"health_status": "quota_exceeded",
 		"health_error": "quota",
 		"health_checked_at": "2026-03-23T11:45:00Z",
@@ -86,6 +90,9 @@ func TestGeminiProviderLoadAccountLoadsPersistedState(t *testing.T) {
 	}
 	if acc.LastHealthyAt != lastHealthyAt {
 		t.Fatalf("LastHealthyAt = %v, want %v", acc.LastHealthyAt, lastHealthyAt)
+	}
+	if got := acc.GeminiModelRateLimitResetTimes["gemini-3.1-pro-high"]; got != modelResetAt {
+		t.Fatalf("GeminiModelRateLimitResetTimes = %#v", acc.GeminiModelRateLimitResetTimes)
 	}
 }
 

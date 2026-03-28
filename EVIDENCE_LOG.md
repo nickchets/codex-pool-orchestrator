@@ -1535,3 +1535,47 @@
   - `/home/lap/.root_layer/shared/spikes/t57_taxonomy_20260327/summary.txt`
 - Notes
   - This is a truthful in-progress `T57` landing rather than final closure. The taxonomy/diagnostic slice is live, and the main remaining policy choice is now about how much model-specific cooldown residue to keep visible in the shared pool, not about whether the suspicious seat is dead.
+
+### 2026-03-28T07:34:00Z | REPO-CPO-ARCH-P2-T57 requested-model cooldown diagnostics synced across status and operator surfaces
+- Commands
+  - `gofmt -w status.go operator_gemini_smoke.go operator_gemini_smoke_test.go status_dashboard_test.go`
+  - `go test -count=1 -run 'TestOperatorGeminiSeatSmokeRateLimitBecomesCooldown|TestServeStatusPageIncludesLiveGeminiModelCooldownRows' ./...`
+  - `go build ./...`
+  - `go build -o /tmp/codex-pool-live .`
+  - `install -m 0755 /tmp/codex-pool-live /home/lap/.local/bin/codex-pool && systemctl --user restart codex-pool.service && sleep 2 && curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS 'http://127.0.0.1:8989/status?format=json' | jq '[.accounts[] | select(.type=="gemini" and .id=="gemini_seat_4eeafc81d5e0") | {id, provider_truth: {rate_limit_reset_times: .provider_truth.rate_limit_reset_times, quota_model_31: (.provider_truth.quota.models[]? | select(.name=="gemini-3.1-pro-high") | {reset_time, percentage, routable})}, routing, operational_truth}]'`
+  - `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/seat-smoke -H 'Content-Type: application/json' --data '{"account_id":"gemini_seat_4eeafc81d5e0","model":"gemini-3.1-pro","force_refresh":true}' | jq '{account_id, model, routing_state, requested_model_key, requested_model_limited, requested_model_recovery_at, rate_limit_reset_times, operational_truth}'`
+  - `timeout 180s agcode run 'Reply with exactly T57_MODEL_DIAG_OK.'`
+  - `python3 /home/lap/tools/codex_pool_manager.py status --strict`
+- Result
+  - PASS
+  - The runtime selector did not need widening: seat-level routing for a healthy seat with only one exhausted Gemini model stays truthfully `routing.state=degraded_enabled`, while the requested-model layer now exposes the missing precision directly.
+  - `/status?format=json` now includes `provider_truth.rate_limit_reset_times`, so the live Gemini status JSON carries the same per-model reset map that was already driving OpenCode export and merged quota reset rows.
+  - Operator `seat-smoke` is now explicit about model aliasing and requested-model cooldown state: for `model=gemini-3.1-pro`, the live response on `gemini_seat_4eeafc81d5e0` reported `requested_model_key=gemini-3.1-pro-high`, `requested_model_limited=true`, `requested_model_recovery_at=2026-03-29T16:06:58Z`, and `rate_limit_reset_times.gemini-3.1-pro-high=2026-03-29T16:06:58Z`.
+  - Live client behavior remained green on the same binary. `agcode run 'Reply with exactly T57_MODEL_DIAG_OK.'` returned `T57_MODEL_DIAG_OK`, confirming this wave changed observability only and did not regress the ordinary pooled Gemini path.
+  - Historical seat-wide residue was also re-proved as non-fatal rather than silently carried forward: after fresh smoke, `gemini_seat_1506839b3bf8` now behaves like `gemini_seat_4eeafc81d5e0` in exported truth, with `gemini-2.5-flash` succeeding and `gemini-3.1-pro-high` represented as a model-specific cooldown instead of a global disabled seat.
+- Artifacts
+  - `/home/lap/.root_layer/shared/spikes/t57_model_diag_20260328/status_gemini_model_diag.json`
+  - `/home/lap/.root_layer/shared/spikes/t57_model_diag_20260328/smoke_4eea_requested_model_diag.json`
+  - `/home/lap/.root_layer/shared/spikes/t57_model_diag_20260328/strict_status.json`
+- Notes
+  - This closes the main operator-facing ambiguity left after the earlier T57 taxonomy slice: status/export/operator surfaces now agree that one Gemini seat can be usable overall while a specific routed model is cooling down.
+
+### 2026-03-28T08:05:00Z | REPO-CPO-REL-P2-T57 publish-ready verify and version sync for 0.8.4
+- Commands
+  - `go test -count=1 -run 'TestCandidate.*Gemini|TestRoutingState.*Gemini|TestBuildPoolDashboardData.*Gemini|TestBuildOpenCodeConfigBundle.*|TestOperatorGeminiSeatSmoke.*|TestLoadAccountsQuarantinesLongDeadAccount|TestServeStatusPageReturnsJSONForFormatQuery|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction' ./...`
+  - `go build ./...`
+  - `python3 /home/lap/tools/codex_pool_manager.py status --strict`
+  - `timeout 180s agcode run 'Reply with exactly T57_PUBLISH_OK.'`
+  - `ps -ef | rg 'agcode|opencode' -n -S`
+  - `env XDG_CONFIG_HOME="$(mktemp -d)" XDG_DATA_HOME="$(mktemp -d)" AGCODE_RECREATE_USER=1 timeout 180s agcode run 'Reply with exactly T57_PUBLISH_OK.'`
+- Result
+  - PASS
+  - The current dirty `T57` slice stayed green after the release-metadata sync: the focused Gemini/OpenCode/operator regression set passed, `go build ./...` passed, and `git diff --check` remained clean.
+  - The running pool stayed healthy under the same publish candidate: `python3 /home/lap/tools/codex_pool_manager.py status --strict` returned `PASS`, and `/status?format=json` kept `gemini_pool.total_seats=5`, `eligible_seats=5`, `degraded_eligible_seats=4`, `cooldown_seats=2`, and `missing_project_seats=1` on the live service.
+  - The only verify-path failure was local OpenCode state contention, not pool runtime drift. A shared-state `agcode run` hit `SQLiteError: database is locked`, and `ps` showed multiple long-lived `opencode` processes already using the default local state DB.
+  - The same smoke passed immediately through an isolated local OpenCode state root: `env XDG_CONFIG_HOME=... XDG_DATA_HOME=... AGCODE_RECREATE_USER=1 agcode run ...` returned `T57_PUBLISH_OK.`, which re-proved the canonical `antigravity-manager/gemini-3.1-pro` path without mutating or killing the operator's existing OpenCode sessions.
+  - Release metadata is now aligned with the implemented behavior: `VERSION=0.8.4`, `CHANGELOG.md`, and `docs/CHANGELOG.ru.md` all describe the model-specific Gemini cooldown/export/operator diagnostics that landed after `0.8.3`.
+- Notes
+  - This is a publish-readiness checkpoint, not a claim that all broader `T57` cleanup policy is closed. The remaining residue stays the same narrower backlog item around historical/model-specific cooldown visibility and one `missing_project_id` seat.
+  - The shared default `agcode`/OpenCode SQLite lock belongs in client-local ergonomics follow-up, not in the Gemini pool release blocker list.

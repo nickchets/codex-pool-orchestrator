@@ -910,6 +910,59 @@ func TestNoteGeminiOperationalFailureLockedFallbackDoesNotShortenCooldown(t *tes
 	}
 }
 
+func TestNoteGeminiOperationalFailureForModelLockedUsesModelSpecificCooldown(t *testing.T) {
+	now := time.Date(2026, 3, 27, 15, 31, 42, 0, time.UTC)
+	preciseUntil := time.Date(2026, 3, 27, 15, 31, 46, 0, time.UTC)
+	acc := &Account{
+		ID:             "gemini-seat",
+		Type:           AccountTypeGemini,
+		RateLimitUntil: now.Add(45 * time.Second),
+	}
+	err := &geminiCodeAssistHTTPError{
+		StatusCode: http.StatusTooManyRequests,
+		Status:     "429 Too Many Requests",
+		Message: `{
+  "error": {
+    "code": 429,
+    "message": "You have exhausted your capacity on this model. Your quota will reset after 3s.",
+    "status": "RESOURCE_EXHAUSTED",
+    "details": [
+      {
+        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+        "reason": "RATE_LIMIT_EXCEEDED",
+        "metadata": {
+          "model": "gemini-3.1-pro-high",
+          "quotaResetTimeStamp": "2026-03-27T15:31:46Z",
+          "quotaResetDelay": "3.923606893s"
+        }
+      },
+      {
+        "@type": "type.googleapis.com/google.rpc.RetryInfo",
+        "retryDelay": "3.923606893s"
+      }
+    ]
+  }
+}`,
+	}
+
+	acc.mu.Lock()
+	noteGeminiOperationalFailureForModelLocked(acc, now, "operator_smoke", err, "gemini-3.1-pro", "")
+	gotUntil := acc.RateLimitUntil
+	gotState := acc.GeminiOperationalState
+	gotModelUntil := acc.GeminiModelRateLimitResetTimes["gemini-3.1-pro-high"]
+	acc.mu.Unlock()
+
+	if !gotUntil.IsZero() {
+		t.Fatalf("rate_limit_until=%s, want zero", gotUntil)
+	}
+	if !gotModelUntil.Equal(preciseUntil) {
+		t.Fatalf("model_rate_limit_until=%s, want %s", gotModelUntil, preciseUntil)
+	}
+	if gotState != geminiOperationalTruthStateCooldown {
+		t.Fatalf("operational_state=%q", gotState)
+	}
+}
+
 func TestStaleAntigravityGeminiTruthRefreshEligibleLocked(t *testing.T) {
 	now := time.Now()
 	seat := &Account{

@@ -3,14 +3,15 @@ package main
 import "time"
 
 type proxyTestAccountSnapshot struct {
-	Dead                     bool
-	HealthStatus             string
-	HealthError              string
-	LastUsed                 time.Time
-	Penalty                  float64
-	RateLimitUntil           time.Time
-	GitLabQuotaExceededCount int
-	AccessToken              string
+	Dead                           bool
+	HealthStatus                   string
+	HealthError                    string
+	LastUsed                       time.Time
+	Penalty                        float64
+	RateLimitUntil                 time.Time
+	GeminiModelRateLimitResetTimes map[string]time.Time
+	GitLabQuotaExceededCount       int
+	AccessToken                    string
 }
 
 func snapshotProxyTestAccount(acc *Account) proxyTestAccountSnapshot {
@@ -22,13 +23,14 @@ func snapshotProxyTestAccount(acc *Account) proxyTestAccountSnapshot {
 	defer acc.mu.Unlock()
 
 	return proxyTestAccountSnapshot{
-		Dead:                     acc.Dead,
-		HealthStatus:             acc.HealthStatus,
-		HealthError:              acc.HealthError,
-		LastUsed:                 acc.LastUsed,
-		Penalty:                  acc.Penalty,
-		RateLimitUntil:           acc.RateLimitUntil,
-		GitLabQuotaExceededCount: acc.GitLabQuotaExceededCount,
-		AccessToken:              acc.AccessToken,
+		Dead:                           acc.Dead,
+		HealthStatus:                   acc.HealthStatus,
+		HealthError:                    acc.HealthError,
+		LastUsed:                       acc.LastUsed,
+		Penalty:                        acc.Penalty,
+		RateLimitUntil:                 acc.RateLimitUntil,
+		GeminiModelRateLimitResetTimes: cloneTimeMap(acc.GeminiModelRateLimitResetTimes),
+		GitLabQuotaExceededCount:       acc.GitLabQuotaExceededCount,
+		AccessToken:                    acc.AccessToken,
 	}
 }

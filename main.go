@@ -551,7 +551,54 @@ func (h *proxyHandler) applyUpstreamAuthFailureDisposition(reqID string, acc *Ac
 	acc.mu.Unlock()
 }
 
-func (h *proxyHandler) applyPreCopyUpstreamStatusDisposition(reqID string, acc *Account, resp *http.Response, refreshFailed bool, inspectedBody []byte) error {
+func geminiRateLimitUntilFromResponse(resp *http.Response, inspectedBody []byte, now time.Time) (time.Time, string, bool) {
+	if resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+		return time.Time{}, "", false
+	}
+	bodyText := strings.TrimSpace(string(inspectedBody))
+	httpErr := &geminiCodeAssistHTTPError{
+		StatusCode: resp.StatusCode,
+		Status:     resp.Status,
+		Message:    bodyText,
+	}
+	if until, reason, precise, ok := geminiCodeAssistCooldownInfo(httpErr, now); ok {
+		if wait, hasRetryAfter := parseRetryAfter(resp.Header); hasRetryAfter {
+			headerUntil := now.Add(wait).UTC()
+			if !precise && headerUntil.After(until) {
+				until = headerUntil
+			}
+		}
+		return until.UTC(), sanitizeStatusMessage(firstNonEmpty(reason, bodyText, resp.Status)), true
+	}
+	if wait, ok := parseRetryAfter(resp.Header); ok {
+		return now.Add(wait).UTC(), sanitizeStatusMessage(firstNonEmpty(bodyText, resp.Status)), true
+	}
+	return now.Add(managedGeminiRateLimitWait).UTC(), sanitizeStatusMessage(firstNonEmpty(bodyText, resp.Status)), true
+}
+
+func (h *proxyHandler) applyGeminiRateLimitDisposition(acc *Account, resp *http.Response, inspectedBody []byte, requestedModel, requestPath string) bool {
+	if acc == nil || acc.Type != AccountTypeGemini || resp == nil || resp.StatusCode != http.StatusTooManyRequests {
+		return false
+	}
+	now := time.Now().UTC()
+	until, reason, ok := geminiRateLimitUntilFromResponse(resp, inspectedBody, now)
+	if !ok || until.IsZero() {
+		return false
+	}
+	acc.mu.Lock()
+	modelKey := noteGeminiModelRateLimitedLocked(acc, requestedModel, requestPath, until)
+	if modelKey != "" {
+		acc.RateLimitUntil = time.Time{}
+	} else if acc.RateLimitUntil.Before(until) {
+		acc.RateLimitUntil = until
+	}
+	noteGeminiOperationalCooldownLocked(acc, now, "proxy", firstNonEmpty(reason, "rate limited"))
+	acc.Penalty += 1.0
+	acc.mu.Unlock()
+	return true
+}
+
+func (h *proxyHandler) applyPreCopyUpstreamStatusDisposition(reqID string, acc *Account, resp *http.Response, refreshFailed bool, inspectedBody []byte, requestedModel, requestPath string) error {
 	if acc == nil || resp == nil {
 		return nil
 	}
@@ -570,6 +617,9 @@ func (h *proxyHandler) applyPreCopyUpstreamStatusDisposition(reqID string, acc *
 		return nil
 	}
 	if resp.StatusCode == http.StatusTooManyRequests && !isManagedCodexAPIKeyAccount(acc) {
+		if h.applyGeminiRateLimitDisposition(acc, resp, inspectedBody, requestedModel, requestPath) {
+			return nil
+		}
 		h.applyRateLimit(acc, resp.Header, defaultRateLimitBackoff)
 		acc.mu.Lock()
 		acc.Penalty += 1.0
@@ -603,13 +653,14 @@ type preCopyUpstreamStatusHandlingResult struct {
 	InspectedBody  []byte
 }
 
-func (h *proxyHandler) applyPreCopyUpstreamStatusHandling(reqID string, acc *Account, resp *http.Response, refreshFailed bool, skipSwitchingProtocols bool) preCopyUpstreamStatusHandlingResult {
+func (h *proxyHandler) applyPreCopyUpstreamStatusHandling(reqID string, acc *Account, resp *http.Response, refreshFailed bool, requestedModel, requestPath string, skipSwitchingProtocols bool) preCopyUpstreamStatusHandlingResult {
 	result := preCopyUpstreamStatusHandlingResult{}
 	if resp == nil {
 		return result
 	}
 
 	result.NeedStatusBody = (isManagedCodexAPIKeyAccount(acc) && isManagedCodexAPIKeyRetryableStatus(resp.StatusCode)) ||
+		(acc != nil && acc.Type == AccountTypeGemini && resp.StatusCode == http.StatusTooManyRequests) ||
 		resp.StatusCode == http.StatusUnauthorized ||
 		resp.StatusCode == http.StatusForbidden
 	if result.NeedStatusBody {
@@ -620,7 +671,7 @@ func (h *proxyHandler) applyPreCopyUpstreamStatusHandling(reqID string, acc *Acc
 		}
 	}
 	if !(skipSwitchingProtocols && resp.StatusCode == http.StatusSwitchingProtocols) {
-		_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, result.InspectedBody)
+		_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, result.InspectedBody, requestedModel, requestPath)
 	}
 	return result
 }
@@ -1121,7 +1172,7 @@ func bufferedRetryTraceReason(statusCode int, bodyText string) string {
 	}
 }
 
-func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *requestTrace, acc *Account, resp *http.Response, refreshFailed bool, attempt, attempts int) (bool, error) {
+func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *requestTrace, acc *Account, resp *http.Response, refreshFailed bool, requestedModel, requestPath string, attempt, attempts int) (bool, error) {
 	var retryInspection bufferedRetryInspection
 	if needsBufferedRetryInspection(acc, resp.StatusCode) {
 		// Buffered retries never replay upstream bodies to the client, so one
@@ -1130,7 +1181,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 	}
 
 	if resp.StatusCode == http.StatusTooManyRequests && !isManagedCodexAPIKeyAccount(acc) {
-		_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body)
+		_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body, requestedModel, requestPath)
 		err := formatBufferedRetryStatusError(resp, retryInspection.Text)
 		h.recent.add(err.Error())
 		if h.cfg.debug {
@@ -1141,7 +1192,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 	}
 
 	if isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired) {
-		err := h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body)
+		err := h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body, requestedModel, requestPath)
 		trace.noteRetryDisposition(acc.Type, acc, attempt, attempts, resp.StatusCode, true, bufferedRetryTraceReason(resp.StatusCode, retryInspection.Text), refreshFailed)
 		return true, err
 	}
@@ -1149,7 +1200,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 	// Handle 402 Payment Required - often means deactivated workspace/subscription.
 	if resp.StatusCode == http.StatusPaymentRequired {
 		if isGitLabClaudeAccount(acc) {
-			_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body)
+			_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body, requestedModel, requestPath)
 			err := formatBufferedRetryStatusError(resp, retryInspection.Text)
 			h.recent.add(err.Error())
 			trace.noteRetryDisposition(acc.Type, acc, attempt, attempts, resp.StatusCode, true, bufferedRetryTraceReason(resp.StatusCode, retryInspection.Text), refreshFailed)
@@ -1174,7 +1225,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 
 	if isRetryableStatus(resp.StatusCode) {
 		if isManagedCodexAPIKeyAccount(acc) {
-			err := h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body)
+			err := h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body, requestedModel, requestPath)
 			if h.cfg.debug {
 				log.Printf("[%s] attempt %d/%d account=%s retryable status=%d refreshFailed=%v", reqID, attempt, attempts, acc.ID, resp.StatusCode, refreshFailed)
 			}
@@ -1182,7 +1233,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 			return true, err
 		}
 
-		_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body)
+		_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body, requestedModel, requestPath)
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 			if refreshFailed && acc.Type != AccountTypeCodex {
 				log.Printf("[%s] account %s DEAD: 401/403 refresh failed, body=%s", reqID, acc.ID, retryInspection.Text)
@@ -1237,7 +1288,7 @@ func (h *proxyHandler) runBufferedAttemptContour(
 	var lastStatus int
 
 	for attempt := 1; attempt <= attempts; attempt++ {
-		acc, err := h.candidateSupportingPath(routePlan.Shape.ConversationID, exclude, routePlan.AccountType, routePlan.RequiredPlan, routePlan.Provider, routePlan.UpstreamPath, routePlan.DebugGeminiSeatID)
+		acc, err := h.candidateSupportingPath(routePlan.Shape.ConversationID, exclude, routePlan.AccountType, routePlan.RequiredPlan, routePlan.Provider, routePlan.UpstreamPath, routePlan.Shape.RequestedModel, routePlan.DebugGeminiSeatID)
 		if err != nil {
 			lastErr = err
 			continue
@@ -1268,7 +1319,7 @@ func (h *proxyHandler) runBufferedAttemptContour(
 		}
 		lastStatus = resp.StatusCode
 
-		if retry, retryErr := h.applyBufferedRetryDisposition(reqID, trace, acc, resp, refreshFailed, attempt, attempts); retry {
+		if retry, retryErr := h.applyBufferedRetryDisposition(reqID, trace, acc, resp, refreshFailed, routePlan.Shape.RequestedModel, routePlan.UpstreamPath, attempt, attempts); retry {
 			lastErr = retryErr
 			continue
 		}
@@ -1284,7 +1335,7 @@ func (h *proxyHandler) runBufferedAttemptContour(
 	return nil, true
 }
 
-func (h *proxyHandler) candidateSupportingPath(conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string, provider Provider, path string, forcedGeminiSeatID string) (*Account, error) {
+func (h *proxyHandler) candidateSupportingPath(conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string, provider Provider, path, requestedModel, forcedGeminiSeatID string) (*Account, error) {
 	if h == nil || h.pool == nil {
 		return nil, nil
 	}
@@ -1312,15 +1363,25 @@ func (h *proxyHandler) candidateSupportingPath(conversationID string, exclude ma
 		}
 	}
 
+	now := time.Now().UTC()
 	for attempt := 0; attempt < attempts; attempt++ {
 		acc := h.pool.candidate(conversationID, exclude, accountType, requiredPlan)
 		if acc == nil {
 			return nil, nil
 		}
 		exclude[acc.ID] = true
-		if providerSupportsPathForAccount(provider, path, acc) {
-			return acc, nil
+		if !providerSupportsPathForAccount(provider, path, acc) {
+			continue
 		}
+		if acc.Type == AccountTypeGemini {
+			acc.mu.Lock()
+			until, _, limited := geminiRequestedModelRateLimitUntilLocked(acc, requestedModel, path, now)
+			acc.mu.Unlock()
+			if limited && until.After(now) {
+				continue
+			}
+		}
+		return acc, nil
 	}
 
 	return nil, nil
@@ -1674,11 +1735,13 @@ func (h *proxyHandler) proxyRequestWebSocket(w http.ResponseWriter, r *http.Requ
 	trace := requestTraceFromContext(r.Context())
 	accountType := routePlan.AccountType
 	conversationID := routePlan.Shape.ConversationID
+	requestedModel := routePlan.Shape.RequestedModel
+	requestPath := routePlan.UpstreamPath
 	userID := routePlan.Admission.UserID
 	provider := routePlan.Provider
 	targetBase := routePlan.TargetBase
 
-	acc, err := h.candidateSupportingPath(conversationID, map[string]bool{}, accountType, routePlan.RequiredPlan, provider, routePlan.UpstreamPath, routePlan.DebugGeminiSeatID)
+	acc, err := h.candidateSupportingPath(conversationID, map[string]bool{}, accountType, routePlan.RequiredPlan, provider, requestPath, requestedModel, routePlan.DebugGeminiSeatID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -1746,7 +1809,7 @@ func (h *proxyHandler) proxyRequestWebSocket(w http.ResponseWriter, r *http.Requ
 
 	var statusCode int
 	var proxyErr error
-	statusCode, proxyErr = h.servePooledWebSocketProxy(w, r, reqID, trace, outURL, targetBase, provider, acc, access, protocolAuthUsed, refreshFailed, conversationID)
+	statusCode, proxyErr = h.servePooledWebSocketProxy(w, r, reqID, trace, outURL, targetBase, provider, acc, access, protocolAuthUsed, refreshFailed, conversationID, requestedModel, requestPath)
 
 	if proxyErr != nil {
 		h.recent.add(proxyErr.Error())
@@ -1772,7 +1835,7 @@ func (h *proxyHandler) servePooledWebSocketProxy(
 	access string,
 	protocolAuthUsed bool,
 	refreshFailed bool,
-	conversationID string,
+	conversationID, requestedModel, requestPath string,
 ) (int, error) {
 	var statusCode int
 	var proxyErr error
@@ -1803,7 +1866,7 @@ func (h *proxyHandler) servePooledWebSocketProxy(
 		},
 		ModifyResponse: func(resp *http.Response) error {
 			statusCode = resp.StatusCode
-			return h.modifyWebSocketProxyResponse(reqID, trace, provider, acc, resp, refreshFailed, conversationID)
+			return h.modifyWebSocketProxyResponse(reqID, trace, provider, acc, resp, refreshFailed, conversationID, requestedModel, requestPath)
 		},
 		ErrorHandler: func(rw http.ResponseWriter, req *http.Request, err error) {
 			proxyErr = err
@@ -1859,7 +1922,7 @@ func (h *proxyHandler) finalizeWebSocketSuccessState(acc *Account, conversationI
 	}
 }
 
-func (h *proxyHandler) modifyWebSocketProxyResponse(reqID string, trace *requestTrace, provider Provider, acc *Account, resp *http.Response, refreshFailed bool, conversationID string) error {
+func (h *proxyHandler) modifyWebSocketProxyResponse(reqID string, trace *requestTrace, provider Provider, acc *Account, resp *http.Response, refreshFailed bool, conversationID, requestedModel, requestPath string) error {
 	if resp == nil {
 		return nil
 	}
@@ -1869,7 +1932,7 @@ func (h *proxyHandler) modifyWebSocketProxyResponse(reqID string, trace *request
 	if trace != nil {
 		trace.noteResponse(resp.StatusCode, resp, false)
 	}
-	h.applyPreCopyUpstreamStatusHandling(reqID, acc, resp, refreshFailed, true)
+	h.applyPreCopyUpstreamStatusHandling(reqID, acc, resp, refreshFailed, requestedModel, requestPath, true)
 	h.finalizeWebSocketSuccessState(acc, conversationID, resp.StatusCode)
 	return nil
 }
@@ -1987,7 +2050,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	provider := routePlan.Provider
 	targetBase := routePlan.TargetBase
 
-	acc, err := h.candidateSupportingPath(routePlan.Shape.ConversationID, map[string]bool{}, accountType, routePlan.RequiredPlan, provider, routePlan.UpstreamPath, routePlan.DebugGeminiSeatID)
+	acc, err := h.candidateSupportingPath(routePlan.Shape.ConversationID, map[string]bool{}, accountType, routePlan.RequiredPlan, provider, routePlan.UpstreamPath, routePlan.Shape.RequestedModel, routePlan.DebugGeminiSeatID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
@@ -2138,7 +2201,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		log.Printf("[%s] request body sample (%d bytes): %s", reqID, reqSample.Len(), safeText(reqSample.Bytes()))
 	}
 
-	statusHandling := h.applyPreCopyUpstreamStatusHandling(reqID, acc, resp, refreshFailed, false)
+	statusHandling := h.applyPreCopyUpstreamStatusHandling(reqID, acc, resp, refreshFailed, routePlan.Shape.RequestedModel, routePlan.UpstreamPath, false)
 	if statusHandling.NeedStatusBody && !isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 		log.Printf("[%s] account %s got %d from %s, body=%s", reqID, acc.ID, resp.StatusCode, outReq.URL.Host, safeText(statusHandling.InspectedBody))
 	}

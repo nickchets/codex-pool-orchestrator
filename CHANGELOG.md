@@ -9,6 +9,16 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.8.4] - 2026-03-28
+
+### Changed
+- `/status?format=json` now exports `provider_truth.rate_limit_reset_times` for Gemini seats, and the merged quota rows surface live per-model cooldown reset times directly from runtime state.
+- Gemini operator `seat-smoke` now reports `requested_model_key`, `requested_model_limited`, `requested_model_recovery_at`, and the live `rate_limit_reset_times` map, so model aliasing and requested-model cooldowns are explicit in one response.
+
+### Fixed
+- Gemini `429 RESOURCE_EXHAUSTED` on one routed model no longer poisons the whole seat with seat-wide cooldown state when the seat is still usable for other Gemini models.
+- OpenCode/`agcode` export now keeps such seats enabled and carries model-specific reset windows instead of disabling the entire seat on a single-model cooldown.
+
 ## [0.8.3] - 2026-03-27
 
 ### Changed

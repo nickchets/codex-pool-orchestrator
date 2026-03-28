@@ -202,6 +202,18 @@ func buildOpenCodeCachedQuota(snapshot accountSnapshot) map[string]any {
 	if len(snapshot.GeminiProtectedModels) > 0 {
 		quota["protected_models"] = normalizeStringSlice(snapshot.GeminiProtectedModels)
 	}
+	if len(snapshot.GeminiModelRateLimitResetTimes) > 0 {
+		resetTimes := make(map[string]int64, len(snapshot.GeminiModelRateLimitResetTimes))
+		for model, resetAt := range snapshot.GeminiModelRateLimitResetTimes {
+			if resetAt.IsZero() {
+				continue
+			}
+			resetTimes[model] = resetAt.UTC().UnixMilli()
+		}
+		if len(resetTimes) > 0 {
+			quota["rate_limit_reset_times"] = resetTimes
+		}
+	}
 	if len(snapshot.GeminiQuotaModels) > 0 {
 		models := make([]map[string]any, 0, len(snapshot.GeminiQuotaModels))
 		protected := make(map[string]struct{}, len(snapshot.GeminiProtectedModels))
@@ -381,6 +393,18 @@ func buildOpenCodeAntigravityAccounts(h *proxyHandler) openCodePluginAccountsFil
 		}
 		if !snapshot.GeminiQuotaUpdatedAt.IsZero() {
 			account.CachedQuotaUpdated = snapshot.GeminiQuotaUpdatedAt.UTC().UnixMilli()
+		}
+		if len(snapshot.GeminiModelRateLimitResetTimes) > 0 {
+			account.RateLimitResetTimes = make(map[string]int64, len(snapshot.GeminiModelRateLimitResetTimes))
+			for model, resetAt := range snapshot.GeminiModelRateLimitResetTimes {
+				if resetAt.IsZero() {
+					continue
+				}
+				account.RateLimitResetTimes[model] = resetAt.UTC().UnixMilli()
+			}
+			if len(account.RateLimitResetTimes) == 0 {
+				account.RateLimitResetTimes = nil
+			}
 		}
 		if snapshot.RateLimitUntil.After(now) {
 			account.CoolingDownUntil = snapshot.RateLimitUntil.UTC().UnixMilli()

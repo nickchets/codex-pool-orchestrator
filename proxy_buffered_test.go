@@ -434,8 +434,11 @@ func TestProxyBufferedAnthropicMessagesGemini429PinnedConversationRetriesNextSea
 	}
 
 	seatOneState := snapshotProxyTestAccount(seatOne)
-	if seatOneState.RateLimitUntil.IsZero() {
-		t.Fatal("expected first Gemini seat to enter cooldown after 429")
+	if !seatOneState.RateLimitUntil.IsZero() {
+		t.Fatalf("expected seat-wide cooldown to stay clear, got %v", seatOneState.RateLimitUntil)
+	}
+	if seatOneState.GeminiModelRateLimitResetTimes["gemini-3.1-pro-high"].IsZero() {
+		t.Fatal("expected first Gemini seat to track a live model cooldown after 429")
 	}
 	seatTwoState := waitForBufferedProxySuccessAccountState(t, seatTwo, "second Gemini seat to serve retry after 429")
 	if seatTwoState.HealthStatus != "healthy" {

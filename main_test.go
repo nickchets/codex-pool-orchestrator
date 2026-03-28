@@ -702,7 +702,7 @@ func TestCandidateSupportingPathAllowsAntigravityFallbackProjectForGeminiSeats(t
 		t.Fatalf("baseline candidate = %+v, want unsupported seat first", got)
 	}
 
-	got, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, path, "")
+	got, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, path, "gemini-2.5-flash", "")
 	if err != nil {
 		t.Fatalf("candidate supporting path: %v", err)
 	}
@@ -711,6 +711,54 @@ func TestCandidateSupportingPathAllowsAntigravityFallbackProjectForGeminiSeats(t
 	}
 	if got.ID != supported.ID {
 		t.Fatalf("candidate = %s, want %s", got.ID, supported.ID)
+	}
+}
+
+func TestCandidateSupportingPathSkipsGeminiSeatWhenRequestedModelCoolingDown(t *testing.T) {
+	now := time.Now().UTC()
+	coolingUntil := now.Add(2 * time.Minute)
+	cooling := &Account{
+		ID:                       "gemini_seat_cooling",
+		Type:                     AccountTypeGemini,
+		PlanType:                 "gemini",
+		OAuthProfileID:           geminiOAuthAntigravityProfileID,
+		AntigravitySource:        "browser_oauth",
+		AntigravityProjectID:     "project-1",
+		GeminiProviderCheckedAt:  now,
+		GeminiProviderTruthReady: true,
+		GeminiProviderTruthState: geminiProviderTruthStateReady,
+		GeminiModelRateLimitResetTimes: map[string]time.Time{
+			"gemini-3.1-pro-high": coolingUntil,
+		},
+	}
+	healthy := &Account{
+		ID:                       "gemini_seat_healthy",
+		Type:                     AccountTypeGemini,
+		PlanType:                 "gemini",
+		OAuthProfileID:           geminiOAuthAntigravityProfileID,
+		AntigravitySource:        "browser_oauth",
+		AntigravityProjectID:     "project-2",
+		GeminiProviderCheckedAt:  now,
+		GeminiProviderTruthReady: true,
+		GeminiProviderTruthState: geminiProviderTruthStateReady,
+	}
+	h := &proxyHandler{pool: newPoolState([]*Account{cooling, healthy}, false)}
+	provider := &GeminiProvider{}
+
+	got, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, "/v1beta/models/gemini-3.1-pro-high:generateContent", "gemini-3.1-pro", "")
+	if err != nil {
+		t.Fatalf("candidate supporting path: %v", err)
+	}
+	if got == nil || got.ID != healthy.ID {
+		t.Fatalf("candidate = %+v, want %s", got, healthy.ID)
+	}
+
+	got, err = h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, "/v1beta/models/gemini-2.5-flash:generateContent", "gemini-2.5-flash", "")
+	if err != nil {
+		t.Fatalf("flash candidate supporting path: %v", err)
+	}
+	if got == nil || got.ID != cooling.ID {
+		t.Fatalf("flash candidate = %+v, want %s", got, cooling.ID)
 	}
 }
 
@@ -734,7 +782,7 @@ func TestCandidateSupportingPathAllowsForcedDebugGeminiSeatForV1Internal(t *test
 	h := &proxyHandler{pool: pool}
 	provider := &GeminiProvider{}
 
-	got, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, "/v1internal:generateContent", blocked.ID)
+	got, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, "/v1internal:generateContent", "", blocked.ID)
 	if err != nil {
 		t.Fatalf("candidate supporting path: %v", err)
 	}
@@ -757,7 +805,7 @@ func TestCandidateSupportingPathAllowsForcedDebugGeminiSeatForAllowlistedBlocked
 	h := &proxyHandler{pool: pool}
 	provider := &GeminiProvider{}
 
-	got, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, "/v1beta/models/gemini-2.5-flash:generateContent", blocked.ID)
+	got, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, "/v1beta/models/gemini-2.5-flash:generateContent", "gemini-2.5-flash", blocked.ID)
 	if err != nil {
 		t.Fatalf("candidate supporting path: %v", err)
 	}
@@ -780,7 +828,7 @@ func TestCandidateSupportingPathRejectsForcedDebugGeminiSeatForUnsupportedBlocke
 	h := &proxyHandler{pool: pool}
 	provider := &GeminiProvider{}
 
-	got, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, "/v1beta/models/gemini-2.5-flash:generateContent", blocked.ID)
+	got, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeGemini, "", provider, "/v1beta/models/gemini-2.5-flash:generateContent", "gemini-2.5-flash", blocked.ID)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -1121,6 +1169,8 @@ func TestApplyPreCopyUpstreamStatusDispositionManaged5xxRecordsFallbackAndHealth
 		resp,
 		false,
 		[]byte(`{"error":{"message":"server boom"}}`),
+		"",
+		"",
 	)
 
 	if err == nil || err.Error() != "managed api fallback 502 Bad Gateway: server boom" {
@@ -1167,6 +1217,8 @@ func TestApplyPreCopyUpstreamStatusDispositionMarksPermanentCodexAuthFailureDead
 		resp,
 		false,
 		[]byte(`{"error":"account_deactivated"}`),
+		"",
+		"",
 	)
 
 	if err != nil {
@@ -1197,6 +1249,8 @@ func TestApplyPreCopyUpstreamStatusDispositionRefreshFailedMarksNonCodexDead(t *
 		resp,
 		true,
 		[]byte(`{"error":"refresh failed"}`),
+		"",
+		"",
 	)
 
 	if err != nil {
@@ -1228,6 +1282,8 @@ func TestApplyPreCopyUpstreamStatusDispositionNonManaged429AppliesRateLimitPenal
 		resp,
 		false,
 		nil,
+		"",
+		"",
 	)
 
 	if err != nil {
@@ -1238,6 +1294,103 @@ func TestApplyPreCopyUpstreamStatusDispositionNonManaged429AppliesRateLimitPenal
 	}
 	if acc.RateLimitUntil.IsZero() {
 		t.Fatal("expected RateLimitUntil to be set")
+	}
+}
+
+func TestApplyPreCopyUpstreamStatusDispositionTracksGeminiModelCooldownWithoutSeatWideCooldown(t *testing.T) {
+	acc := &Account{
+		ID:                       "gemini-1",
+		Type:                     AccountTypeGemini,
+		PlanType:                 "gemini",
+		OAuthProfileID:           geminiOAuthAntigravityProfileID,
+		AntigravitySource:        "browser_oauth",
+		AntigravityProjectID:     "project-1",
+		GeminiProviderCheckedAt:  time.Now().UTC(),
+		GeminiProviderTruthReady: true,
+		GeminiProviderTruthState: geminiProviderTruthStateReady,
+	}
+	h := &proxyHandler{}
+	resp := &http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Status:     "429 Too Many Requests",
+		Header:     http.Header{},
+	}
+	resetAt := time.Now().UTC().Add(5 * time.Minute).Truncate(time.Second)
+
+	err := h.applyPreCopyUpstreamStatusDisposition(
+		"req-test",
+		acc,
+		resp,
+		false,
+		[]byte(`{"error":{"message":"model quota exhausted","details":[{"metadata":{"quotaResetTimeStamp":"`+resetAt.Format(time.RFC3339)+`"}}]}}`),
+		"gemini-3.1-pro",
+		"/v1beta/models/gemini-3.1-pro-high:generateContent",
+	)
+
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
+	if !acc.RateLimitUntil.IsZero() {
+		t.Fatalf("expected seat-wide cooldown to stay clear, got %v", acc.RateLimitUntil)
+	}
+	if acc.Penalty != 1.0 {
+		t.Fatalf("penalty = %v", acc.Penalty)
+	}
+	if acc.GeminiOperationalState != geminiOperationalTruthStateCooldown {
+		t.Fatalf("operational_state = %q", acc.GeminiOperationalState)
+	}
+	if acc.GeminiOperationalSource != "proxy" {
+		t.Fatalf("operational_source = %q", acc.GeminiOperationalSource)
+	}
+	if got := acc.GeminiModelRateLimitResetTimes["gemini-3.1-pro-high"]; !got.Equal(resetAt) {
+		t.Fatalf("model reset time = %v", got)
+	}
+}
+
+func TestApplyPreCopyUpstreamStatusDispositionUsesManagedGeminiFallbackCooldownForBare429(t *testing.T) {
+	acc := &Account{
+		ID:                       "gemini-fallback-429",
+		Type:                     AccountTypeGemini,
+		PlanType:                 "gemini",
+		OAuthProfileID:           geminiOAuthAntigravityProfileID,
+		AntigravitySource:        "browser_oauth",
+		AntigravityProjectID:     "project-1",
+		GeminiProviderCheckedAt:  time.Now().UTC(),
+		GeminiProviderTruthReady: true,
+		GeminiProviderTruthState: geminiProviderTruthStateReady,
+	}
+	h := &proxyHandler{}
+	resp := &http.Response{
+		StatusCode: http.StatusTooManyRequests,
+		Status:     "429 Too Many Requests",
+		Header:     http.Header{},
+	}
+	before := time.Now().UTC()
+
+	err := h.applyPreCopyUpstreamStatusDisposition(
+		"req-test",
+		acc,
+		resp,
+		false,
+		nil,
+		"gemini-3.1-pro-high",
+		"/v1beta/models/gemini-3.1-pro-high:generateContent",
+	)
+
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
+	until := acc.GeminiModelRateLimitResetTimes["gemini-3.1-pro-high"]
+	if until.IsZero() {
+		t.Fatalf("GeminiModelRateLimitResetTimes = %#v", acc.GeminiModelRateLimitResetTimes)
+	}
+	wait := until.Sub(before)
+	if wait < managedGeminiRateLimitWait-2*time.Second || wait > managedGeminiRateLimitWait+2*time.Second {
+		t.Fatalf("wait = %v, want about %v", wait, managedGeminiRateLimitWait)
 	}
 }
 
@@ -1256,6 +1409,8 @@ func TestApplyPreCopyUpstreamStatusDispositionTransientCodexAuthAddsPenalty(t *t
 		resp,
 		false,
 		[]byte(`{"error":"temporary denied"}`),
+		"",
+		"",
 	)
 
 	if err != nil {
@@ -1309,6 +1464,8 @@ func TestApplyPreCopyUpstreamStatusDispositionGitLabQuotaExceededMarksDead(t *te
 		resp,
 		false,
 		[]byte(`{"error":"insufficient_credits","error_code":"USAGE_QUOTA_EXCEEDED"}`),
+		"",
+		"",
 	)
 
 	if err != nil {
@@ -1403,6 +1560,8 @@ func TestApplyPreCopyUpstreamStatusDispositionPreservesDeadGitLabAccount(t *test
 		resp,
 		true,
 		[]byte(`{"error":"temporary denied"}`),
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("err = %v", err)
