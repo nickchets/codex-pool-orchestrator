@@ -20,6 +20,7 @@ rsync -a \
   --exclude='docs/GEMINI_POOL_AUDIT_PLAN_20260325.ru.md' \
   --exclude='docs/OBSERVABILITY_PROVIDER_ALIGNMENT_20260325.ru.md' \
   --exclude='docs/STATUS_TRUTH_WAVE_20260325.ru.md' \
+  --exclude='docs/T57_FINAL_CLOSURE_SPEC_20260328.ru.md' \
   --exclude='__pycache__/' \
   --exclude='*.pyc' \
   --exclude='*.pyo' \
@@ -60,6 +61,7 @@ declare -a forbidden_paths=(
   docs/GEMINI_POOL_AUDIT_PLAN_20260325.ru.md
   docs/OBSERVABILITY_PROVIDER_ALIGNMENT_20260325.ru.md
   docs/STATUS_TRUTH_WAVE_20260325.ru.md
+  docs/T57_FINAL_CLOSURE_SPEC_20260328.ru.md
 )
 
 for rel in "${forbidden_paths[@]}"; do

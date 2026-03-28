@@ -9,6 +9,12 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.8.7] - 2026-03-28
+
+### Fixed
+- The canonical `/operator/gemini/oauth-start` route now dispatches to the browser-auth Gemini onboarding handler instead of the retired legacy Gemini OAuth path, so the published source matches the already-verified operator UI and running binary.
+- Public bundle export now excludes the repo-local `T57` closure spec alongside the other internal planning packets, keeping the extracted publish surface steriler.
+
 ## [0.8.6] - 2026-03-28
 
 ### Changed
@@ -18,6 +24,7 @@ The format is loosely based on Keep a Changelog. Versioning rules are defined in
 ### Fixed
 - Codex OAuth seats are no longer marked dead blindly on `invalid_grant` or `refresh_token_reused`; the pool now probes current `/backend-api/codex/models` access first and persists `health_status=refresh_invalid` for still-live seats.
 - Codex OAuth health/runtime state now survives save, reload, force-refresh, and status rendering more truthfully, including persisted `last_used`, `last_healthy_at`, and operator-visible health lines.
+- The canonical `POST /operator/gemini/oauth-start` route now actually launches the browser-auth Gemini flow promised by the operator UI instead of falling through to the older managed-OAuth handler.
 
 ## [0.8.5] - 2026-03-28
 

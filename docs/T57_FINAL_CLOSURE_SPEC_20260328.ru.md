@@ -8,7 +8,7 @@
 
 ## In Scope
 
-- подтвердить, что все repo-local изменения `T57` уже реализованы, проверены и опубликованы в `0.8.6`;
+- подтвердить, что все repo-local изменения `T57` уже реализованы, проверены и опубликованы в `0.8.7`;
 - перевести `T57` из `DOING` в `DONE` в [ACTION_PLAN.md](/home/lap/projects/codex-pool-orchestrator/ACTION_PLAN.md);
 - зафиксировать в evidence, что оставшийся live `missing_project_id` seat не является repo-local defect;
 - довести git до состояния `main...origin/main` без незакоммиченных хвостов.

@@ -2,6 +2,19 @@
 
 > Repo-local evidence for root harness proof execution.
 
+### 2026-03-28T17:08:00Z | REPO-CPO-REL-P2 follow-up publish fix for canonical Gemini browser-auth route
+- Commands
+  - `git diff -- router.go`
+  - `go test -count=1 -run 'TestLocalOperatorGeminiAntigravityOAuthStartAllowsLoopbackWithoutAdminHeader|TestServeStatusPageIncludesOperatorActionForLocalLoopback|TestServeStatusPageHidesOperatorActionOutsideLoopback|TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction' ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `curl -fsS -X POST http://127.0.0.1:8989/operator/gemini/oauth-start -H 'Content-Type: application/json' --data '{}' | jq '{status,result,result_mode,message,oauth_url}'`
+- Result
+  - PASS
+  - Post-push audit found one truthful source mismatch: `router.go` still pointed `/operator/gemini/oauth-start` at the retired legacy handler even though the tested working tree and running binary had already used the browser-auth Gemini handler.
+  - The fix is bounded to the published source route only. No runtime contract, storage, or operator copy changed again; this follow-up simply makes the committed tree match the already-verified browser-auth/OpenCode operator surface.
+  - The repaired route now returns the expected browser-auth Gemini start payload on the live service, so the follow-up can ship as a minimal patch release instead of rewriting the already-pushed `v0.8.6` tag.
+
 ### 2026-03-28T17:03:00Z | REPO-CPO-REL-P2 publish verify for 0.8.6 Codex health + canonical Gemini/OpenCode cleanup
 - Commands
   - `gofmt -w dead_cleanup.go frontend.go gemini_operator.go handlers.go main.go main_test.go opencode_contract.go opencode_contract_test.go pool.go pool_test.go provider_codex.go reload_accounts_test.go status.go status_dashboard_test.go storage.go usage_state.go usage_state_test.go usage_tracking.go frontend_setup_scripts_test.go handlers_force_refresh_test.go usage_tracking_test.go`

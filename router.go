@@ -227,7 +227,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		h.handleOperatorGeminiOAuthStart(w, r)
+		h.handleOperatorGeminiAntigravityOAuthStart(w, r)
 		return
 	case "/operator/gemini/antigravity/oauth-start":
 		if !h.checkLocalOperatorAuth(w, r) {

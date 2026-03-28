@@ -8,6 +8,12 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.8.7] - 2026-03-28
+
+### Исправлено
+- Канонический маршрут `/operator/gemini/oauth-start` теперь действительно ведет в browser-auth Gemini onboarding handler, а не в retired legacy Gemini OAuth path, так что опубликованный исходник снова совпадает с уже проверенными operator UI и живым бинарем.
+- Public bundle export теперь тоже исключает repo-local `T57` closure spec вместе с остальными внутренними planning packet'ами, чтобы публикуемая поверхность оставалась стерильнее.
+
 ## [0.8.6] - 2026-03-28
 
 ### Изменено
@@ -17,6 +23,7 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 ### Исправлено
 - Codex OAuth seat'ы больше не помечаются dead вслепую на `invalid_grant` или `refresh_token_reused`; теперь пул сначала пробует текущее `/backend-api/codex/models` access и сохраняет `health_status=refresh_invalid` для seat'ов, которые еще реально живы.
 - Codex OAuth health/runtime state теперь truthfully переживает save, reload, force-refresh и status rendering, включая сохранение `last_used`, `last_healthy_at` и operator-visible health lines.
+- Канонический маршрут `POST /operator/gemini/oauth-start` теперь действительно запускает обещанный operator UI browser-auth Gemini flow, а не проваливается в старый managed-OAuth handler.
 
 ## [0.8.5] - 2026-03-28
 
