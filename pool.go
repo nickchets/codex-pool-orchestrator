@@ -748,6 +748,9 @@ func successfulGeminiOperationalStateLocked(acc *Account) (string, string) {
 	if state == "" || state == geminiProviderTruthStateReady {
 		return geminiOperationalTruthStateCleanOK, ""
 	}
+	if state == geminiProviderTruthStateMissingProjectID && effectiveGeminiCodeAssistProjectID(acc) != "" {
+		return geminiOperationalTruthStateDegradedOK, "fallback project in use; provider truth missing project_id"
+	}
 	return geminiOperationalTruthStateDegradedOK, sanitizeStatusMessage(firstNonEmpty(
 		strings.TrimSpace(acc.GeminiProviderTruthReason),
 		geminiValidationReasonSummary(acc.GeminiValidationReasonCode, acc.GeminiValidationMessage, acc.GeminiValidationURL, state),

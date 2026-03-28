@@ -1579,3 +1579,55 @@
 - Notes
   - This is a publish-readiness checkpoint, not a claim that all broader `T57` cleanup policy is closed. The remaining residue stays the same narrower backlog item around historical/model-specific cooldown visibility and one `missing_project_id` seat.
   - The shared default `agcode`/OpenCode SQLite lock belongs in client-local ergonomics follow-up, not in the Gemini pool release blocker list.
+
+### 2026-03-28T10:30:24Z | REPO-CPO-ARCH-P2-T57 stale-truth refresh and missing-project export parity tightened
+- Commands
+  - `gofmt -w gemini_operator.go pool_test.go opencode_contract_test.go status.go status_dashboard_test.go pool.go provider_gemini.go`
+  - `go test -count=1 -run 'TestStaleAntigravityGeminiTruthRefreshEligibleLocked|TestBuildPoolDashboardDataMarksWarmedMissingProjectGeminiSeatDegradedEnabled|TestBuildPoolDashboardDataCompactsGeminiCooldownDegradedReason|TestBuildOpenCodeConfigBundleExportsGeminiModelRateLimitResetTimes|TestBuildOpenCodeConfigBundleExportsWarmedMissingProjectGeminiAsRoutable|TestNoteGeminiOperationalSuccessLockedMissingProjectUsesFallbackReason' ./...`
+  - `go build ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `timeout 40s systemctl --user restart codex-pool.service`
+  - `systemctl --user is-active codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="gemini")|{id,health_status,routing:{state:.routing.state,eligible:.routing.eligible,block_reason:.routing.block_reason,degraded_reason:.routing.degraded_reason},provider_truth:{state:.provider_truth.state,reason:.provider_truth.reason},operational_truth:{state:.operational_truth.state,reason:.operational_truth.reason}}]}'`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json | jq '.accounts[] | select(.id=="gemini_seat_2a37154c570e") | {id,health_status,routing,provider_truth:{state:.provider_truth.state,reason:.provider_truth.reason,quota_models:[.provider_truth.quota.models[]|select(.name=="gemini-3.1-pro-high" or .name=="gemini-3.1-pro-low")|{name,routable,compatibility_lane,compatibility_reason,percentage,reset_time}]},operational_truth}'`
+  - `python3 /home/lap/tools/codex_pool_manager.py status --strict`
+  - `env XDG_CONFIG_HOME="$(mktemp -d)" XDG_DATA_HOME="$(mktemp -d)" AGCODE_RECREATE_USER=1 timeout 180s agcode run 'Reply with exactly T57_STALE_REFRESH_OK.'`
+- Result
+  - PASS
+  - The stale-truth hole is closed on the running service. Before this slice, two ready Antigravity seats were aging past `fresh_until` between `10m` poll ticks and briefly disappearing as `stale_provider_truth`; after the proactive lead-window refresh, the live pool on `127.0.0.1:8989` now reports `gemini_pool.total_seats=5`, `eligible_seats=5`, `clean_eligible_seats=1`, `degraded_eligible_seats=4`, `cooldown_seats=2`, and `missing_project_seats=1`.
+  - Warmed `missing_project_id` export parity is now truthful instead of self-contradictory. Live `/status?format=json` for `gemini_seat_2a37154c570e` shows `routing.state=degraded_enabled`, `routing.degraded_reason='fallback project in use; provider truth missing project_id'`, and the `gemini-3.1-pro-high` / `gemini-3.1-pro-low` quota rows remain `routable=true` with `compatibility_lane=gemini_facade` and no compatibility error.
+  - Requested-model cooldown display is compact where it should be and raw where deep diagnostics still matter: for example `gemini_seat_1506839b3bf8` now renders `routing.degraded_reason='model cooldown active: gemini-3.1-pro-high until 2026-03-29T19:58:37Z'`, while the full upstream `429 RESOURCE_EXHAUSTED` payload remains available under `operational_truth.reason`.
+  - The restart hit one brief readiness race immediately after `systemctl --user restart codex-pool.service`: `systemd` reported `active` before `127.0.0.1:8989` was accepting connections. A delayed retry succeeded with `{"status":"ok","uptime":"47s"}`; no code change was needed for that transient.
+  - The canonical terminal client path stayed green on the same live binary. An isolated `agcode run` against the pool returned `T57_STALE_REFRESH_OK.` through `gemini-3.1-pro`, so the refresh/export fixes did not regress the no-prompt OpenCode flow.
+- Artifacts
+  - `/home/lap/.root_layer/shared/spikes/t57_stale_refresh_20260328/status_gemini_pool_after_restart.json`
+  - `/home/lap/.root_layer/shared/spikes/t57_stale_refresh_20260328/status_missing_project_seat.json`
+  - `/home/lap/.root_layer/shared/spikes/t57_stale_refresh_20260328/targeted_go_test.txt`
+  - `/home/lap/.root_layer/shared/spikes/t57_stale_refresh_20260328/agcode_run.txt`
+- Notes
+  - This slice still does not claim that the last `missing_project_id` seat is semantically healthy. The point is narrower: it is now routed/exported truthfully as a degraded fallback-project seat instead of being hidden behind stale refresh drift or false quota incompatibility.
+
+### 2026-03-28T10:30:24Z | REPO-CPO-REL-P2-T57 publish-ready verify and version sync for 0.8.5
+- Commands
+  - `gofmt -w status.go handlers.go status_dashboard_test.go`
+  - `go test -count=1 -run 'TestBuildPoolDashboardDataCountsEligibleGeminiCooldownSeats|TestBuildPoolDashboardDataCooldownOverridesPersistedGeminiRestrictedHealthStatus|TestBuildPoolDashboardDataCompactsGeminiCooldownDegradedReason|TestServeStatusPageIncludesLiveGeminiModelCooldownRows|TestBuildPoolDashboardDataMarksGeminiProviderTruthStaleFromQuotaAge|TestBuildPoolDashboardDataMarksWarmedMissingProjectGeminiSeatDegradedEnabled|TestBuildOpenCodeConfigBundleExportsWarmedMissingProjectGeminiAsRoutable|TestStaleAntigravityGeminiTruthRefreshEligibleLocked|TestNoteGeminiOperationalSuccessLockedMissingProjectUsesFallbackReason' ./...`
+  - `go build ./...`
+  - `go build -o /home/lap/.local/bin/codex-pool .`
+  - `timeout 40s systemctl --user restart codex-pool.service && sleep 2`
+  - `python3 /home/lap/tools/codex_pool_manager.py status --strict`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json | jq '{gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="gemini")|{id,health_status,routing:{state:.routing.state,eligible:.routing.eligible,block_reason:.routing.block_reason,degraded_reason:.routing.degraded_reason},provider_state:.provider_truth.state,operational_state:.operational_truth.state}]}'`
+  - `env XDG_CONFIG_HOME="$(mktemp -d)" XDG_DATA_HOME="$(mktemp -d)" AGCODE_RECREATE_USER=1 timeout 180s agcode run 'Reply with exactly T57_RELEASE_085_OK.'`
+- Result
+  - PASS
+  - The running pool stayed healthy after the final cleanup narrowing: `/healthz` returned `{"status":"ok","uptime":"6s"}`, `python3 /home/lap/tools/codex_pool_manager.py status --strict` passed, and live `/status?format=json` kept the same Gemini routing truth at `5 total / 5 eligible / 1 clean / 4 degraded / 2 cooling / 1 missing project`.
+  - The operator-facing cooldown cleanup is now visible on the live service instead of only in tests. `gemini_seat_1506839b3bf8` and `gemini_seat_4eeafc81d5e0` both publish `health_status="cooldown"` while staying `routing.state=degraded_enabled`, and the warmed fallback-project seat `gemini_seat_2a37154c570e` still publishes `health_status="missing_project_id"` with `routing.degraded_reason='fallback project in use; provider truth missing project_id'`.
+  - The final client smoke remained green on the same binary. An isolated `agcode run` returned `T57_RELEASE_085_OK.` through `gemini-3.1-pro`, so the stale-refresh/export/status cleanup wave did not regress the no-prompt OpenCode path.
+  - Release metadata is now aligned with the implemented behavior: `VERSION=0.8.5`, `CHANGELOG.md`, and `docs/CHANGELOG.ru.md` describe the stale-refresh fix, warmed `missing_project_id` export parity, and cooldown health-status cleanup.
+- Artifacts
+  - `/home/lap/.root_layer/shared/spikes/t57_health_cleanup_20260328/status_gemini_health_cleanup.json`
+  - `/home/lap/.root_layer/shared/spikes/t57_health_cleanup_20260328/agcode_run.txt`
+  - `/home/lap/.root_layer/shared/spikes/t57_release_085_20260328/agcode_run.txt`
+- Notes
+  - This publish closes the current bounded `T57` wave, not the entire long-tail Gemini policy backlog. Remaining future work is narrower and explicit: decide how much historical/model-specific cooldown residue to keep visible in the shared operator picture, and treat the still-real `missing_project_id` seat as provider/runtime follow-up rather than as a selector bug.

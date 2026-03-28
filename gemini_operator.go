@@ -540,7 +540,13 @@ func staleAntigravityGeminiTruthRefreshEligibleLocked(acc *Account, now time.Tim
 	}
 	syncGeminiProviderTruthStateLocked(acc)
 	freshness := geminiProviderTruthFreshnessStatus(acc.GeminiProviderTruthState, acc.GeminiProviderCheckedAt, acc.GeminiQuotaUpdatedAt, now)
-	return freshness.Stale
+	if freshness.Stale {
+		return true
+	}
+	if freshness.FreshUntil.IsZero() {
+		return false
+	}
+	return !freshness.FreshUntil.After(now.Add(staleAntigravityGeminiTruthRefreshInterval))
 }
 
 func (h *proxyHandler) refreshStaleAntigravityGeminiTruthForAccount(ctx context.Context, acc *Account) error {

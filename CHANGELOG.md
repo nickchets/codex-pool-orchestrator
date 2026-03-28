@@ -9,6 +9,16 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.8.5] - 2026-03-28
+
+### Changed
+- Antigravity Gemini truth refresh now becomes proactive one poll interval before `fresh_until`, so ready seats no longer age out into `stale_provider_truth` between scheduled refresh ticks.
+- `/status`, `/status?format=json`, and related status-style JSON surfaces now promote Gemini cooldown seats to top-level `health_status="cooldown"` instead of leaving them mislabeled as generic `healthy`.
+
+### Fixed
+- Warmed Antigravity Gemini seats that still converge to `provider_truth.state=missing_project_id` now stay export-truthful across status and OpenCode quota rows: they remain `degraded_enabled` with fallback-project reason while their Gemini quota models stay `routable=true`.
+- Operator-facing Gemini status no longer contradicts runtime truth by showing `health_status=healthy` for seats that are actually `operational_truth.state=cooldown` and `routing.state=degraded_enabled`.
+
 ## [0.8.4] - 2026-03-28
 
 ### Changed

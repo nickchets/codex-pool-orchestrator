@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -736,6 +737,30 @@ func TestRoutingStateAllowsWarmedMissingProjectAntigravityGeminiSeat(t *testing.
 	}
 }
 
+func TestNoteGeminiOperationalSuccessLockedMissingProjectUsesFallbackReason(t *testing.T) {
+	now := time.Now().UTC()
+	seat := &Account{
+		ID:                      "gemini-seat",
+		Type:                    AccountTypeGemini,
+		OperatorSource:          geminiOperatorSourceAntigravityImport,
+		OAuthProfileID:          geminiOAuthAntigravityProfileID,
+		GeminiProviderCheckedAt: now.Add(-time.Minute),
+	}
+
+	seat.mu.Lock()
+	noteGeminiOperationalSuccessLocked(seat, now, "operator_smoke")
+	gotState := seat.GeminiOperationalState
+	gotReason := seat.GeminiOperationalReason
+	seat.mu.Unlock()
+
+	if gotState != geminiOperationalTruthStateDegradedOK {
+		t.Fatalf("operational_state=%q", gotState)
+	}
+	if !strings.Contains(gotReason, "fallback project") {
+		t.Fatalf("operational_reason=%q", gotReason)
+	}
+}
+
 func TestRoutingStateBlocksGeminiOperationalHardFail(t *testing.T) {
 	now := time.Now()
 	seat := &Account{
@@ -982,6 +1007,29 @@ func TestStaleAntigravityGeminiTruthRefreshEligibleLocked(t *testing.T) {
 
 	if !eligible {
 		t.Fatal("expected stale antigravity Gemini seat to need truth refresh")
+	}
+}
+
+func TestStaleAntigravityGeminiTruthRefreshEligibleLockedPreemptiveNearStale(t *testing.T) {
+	now := time.Now()
+	freshUntil := now.Add(6 * time.Minute)
+	seat := &Account{
+		ID:                      "gemini-seat-near-stale",
+		Type:                    AccountTypeGemini,
+		OperatorSource:          geminiOperatorSourceAntigravityImport,
+		AntigravitySource:       "browser_auth",
+		AccessToken:             "ya29.test",
+		AntigravityProjectID:    "project-1",
+		GeminiProviderCheckedAt: freshUntil.Add(-geminiProviderTruthFreshnessWindow),
+		GeminiQuotaUpdatedAt:    freshUntil.Add(-geminiProviderTruthFreshnessWindow),
+	}
+
+	seat.mu.Lock()
+	eligible := staleAntigravityGeminiTruthRefreshEligibleLocked(seat, now)
+	seat.mu.Unlock()
+
+	if !eligible {
+		t.Fatal("expected near-stale antigravity Gemini seat to refresh before freshness expires")
 	}
 }
 

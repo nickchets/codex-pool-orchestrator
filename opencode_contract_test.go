@@ -473,6 +473,12 @@ func TestBuildOpenCodeConfigBundleExportsGeminiModelRateLimitResetTimes(t *testi
 	if account.CoolingDownUntil != 0 {
 		t.Fatalf("cooling_down_until = %d", account.CoolingDownUntil)
 	}
+	if account.LastSwitchReason != routingDisplayStateDegradedEnabled {
+		t.Fatalf("last_switch_reason = %q", account.LastSwitchReason)
+	}
+	if !strings.Contains(account.CooldownReason, "gemini-3.1-pro-high") {
+		t.Fatalf("cooldown_reason = %q", account.CooldownReason)
+	}
 	if account.RateLimitResetTimes["gemini-3.1-pro-high"] != resetAt.UnixMilli() {
 		t.Fatalf("rate_limit_reset_times = %#v", account.RateLimitResetTimes)
 	}
@@ -486,6 +492,86 @@ func TestBuildOpenCodeConfigBundleExportsGeminiModelRateLimitResetTimes(t *testi
 	}
 	if cachedModels[0]["name"] != "gemini-3.1-pro-high" || cachedModels[0]["percentage"] != 100 || cachedModels[0]["reset_time"] != resetAt.Format(time.RFC3339) {
 		t.Fatalf("cached model = %#v", cachedModels[0])
+	}
+	if account.CachedQuota["routing_state"] != routingDisplayStateDegradedEnabled {
+		t.Fatalf("cached_quota = %#v", account.CachedQuota)
+	}
+	if got := account.CachedQuota["routing_reason"]; got == nil || !strings.Contains(got.(string), "gemini-3.1-pro-high") {
+		t.Fatalf("routing_reason = %#v", got)
+	}
+}
+
+func TestBuildOpenCodeConfigBundleExportsWarmedMissingProjectGeminiAsRoutable(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	now := time.Now().UTC()
+	h := &proxyHandler{
+		pool: newPoolState([]*Account{
+			{
+				ID:                      "gemini-seat-missing-project",
+				Type:                    AccountTypeGemini,
+				RefreshToken:            "refresh-missing-project",
+				OperatorEmail:           "missing-project@example.com",
+				OperatorSource:          geminiOperatorSourceAntigravityImport,
+				OAuthProfileID:          geminiOAuthAntigravityProfileID,
+				GeminiProviderCheckedAt: now,
+				GeminiQuotaUpdatedAt:    now,
+				GeminiOperationalState:  geminiOperationalTruthStateDegradedOK,
+				GeminiOperationalReason: "operator smoke succeeded via fallback project",
+				GeminiQuotaModels: []GeminiModelQuotaSnapshot{{
+					Name:          "gemini-3.1-pro-high",
+					RouteProvider: "gemini",
+					Percentage:    81,
+				}},
+			},
+		}, false),
+	}
+	user := &PoolUser{
+		ID:       "pool-user-1234",
+		Token:    "download-token",
+		Email:    "pool@example.com",
+		PlanType: "pro",
+	}
+	req := httptest.NewRequest("GET", "http://pool.local/config/opencode/download-token", nil)
+
+	bundle, err := h.buildOpenCodeConfigBundle(req, user, getPoolJWTSecret())
+	if err != nil {
+		t.Fatalf("buildOpenCodeConfigBundle: %v", err)
+	}
+	account := bundle.AntigravityAccounts.Accounts[0]
+	if account.Enabled == nil || !*account.Enabled {
+		t.Fatalf("enabled = %#v", account.Enabled)
+	}
+	if account.ProjectID != "" || account.ManagedProjectID != "" {
+		t.Fatalf("project fields = %#v", account)
+	}
+	if _, ok := account.CachedQuota["project_id"]; ok {
+		t.Fatalf("cached_quota = %#v", account.CachedQuota)
+	}
+	if account.LastSwitchReason != routingDisplayStateDegradedEnabled {
+		t.Fatalf("last_switch_reason = %q", account.LastSwitchReason)
+	}
+	if !strings.Contains(account.CooldownReason, "fallback project") {
+		t.Fatalf("cooldown_reason = %q", account.CooldownReason)
+	}
+	cachedModels := account.CachedQuota["models"].([]map[string]any)
+	if len(cachedModels) != 1 {
+		t.Fatalf("cached_quota.models = %#v", cachedModels)
+	}
+	if cachedModels[0]["routable"] != true {
+		t.Fatalf("cached model = %#v", cachedModels[0])
+	}
+	if got := cachedModels[0]["compatibility_reason"]; got != nil && got != "" {
+		t.Fatalf("cached model = %#v", cachedModels[0])
+	}
+	if account.CachedQuota["provider_truth_state"] != geminiProviderTruthStateMissingProjectID {
+		t.Fatalf("cached_quota = %#v", account.CachedQuota)
+	}
+	if account.CachedQuota["routing_state"] != routingDisplayStateDegradedEnabled {
+		t.Fatalf("cached_quota = %#v", account.CachedQuota)
+	}
+	if got := account.CachedQuota["routing_reason"]; got == nil || !strings.Contains(got.(string), "fallback project") {
+		t.Fatalf("routing_reason = %#v", got)
 	}
 }
 

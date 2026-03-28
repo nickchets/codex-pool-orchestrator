@@ -203,6 +203,25 @@ func effectiveGeminiCodeAssistProjectID(acc *Account) string {
 	return antigravityGeminiFallbackProject
 }
 
+func effectiveGeminiCodeAssistProjectIDForSnapshot(snapshot accountSnapshot) string {
+	if snapshot.Type != AccountTypeGemini {
+		return ""
+	}
+	if projectID := strings.TrimSpace(snapshot.AntigravityProjectID); projectID != "" {
+		return projectID
+	}
+	if !isAntigravityGeminiSnapshot(snapshot) {
+		return ""
+	}
+	if snapshot.AntigravityProxyDisabled || snapshot.AntigravityQuotaForbidden {
+		return ""
+	}
+	if snapshot.AntigravityValidationBlocked && !canRouteValidationBlockedAntigravityGeminiSnapshot(snapshot) {
+		return ""
+	}
+	return antigravityGeminiFallbackProject
+}
+
 func (p *GeminiProvider) SupportsAccountPath(path string, acc *Account) bool {
 	if !strings.HasPrefix(path, geminiAPIModelPrefix) {
 		return true

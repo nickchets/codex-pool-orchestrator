@@ -821,6 +821,15 @@ func TestBuildPoolDashboardDataMarksWarmedMissingProjectGeminiSeatDegradedEnable
 	if data.Accounts[0].ProviderTruth.State != geminiProviderTruthStateMissingProjectID {
 		t.Fatalf("provider_truth.state=%q", data.Accounts[0].ProviderTruth.State)
 	}
+	if data.Accounts[0].ProviderTruth == nil || data.Accounts[0].ProviderTruth.Quota == nil || len(data.Accounts[0].ProviderTruth.Quota.Models) != 1 {
+		t.Fatalf("provider_truth=%#v", data.Accounts[0].ProviderTruth)
+	}
+	if !data.Accounts[0].ProviderTruth.Quota.Models[0].Routable {
+		t.Fatalf("quota_model=%#v", data.Accounts[0].ProviderTruth.Quota.Models[0])
+	}
+	if data.Accounts[0].ProviderTruth.Quota.Models[0].CompatibilityReason != "" {
+		t.Fatalf("compatibility_reason=%q", data.Accounts[0].ProviderTruth.Quota.Models[0].CompatibilityReason)
+	}
 }
 
 func TestBuildPoolDashboardDataSummarizesGeminiQuotaSnapshotWithoutModelRows(t *testing.T) {
@@ -997,6 +1006,47 @@ func TestBuildPoolDashboardDataCountsEligibleGeminiCooldownSeats(t *testing.T) {
 	}
 	if data.Accounts[0].Routing.State != routingDisplayStateDegradedEnabled {
 		t.Fatalf("routing.state=%q", data.Accounts[0].Routing.State)
+	}
+	if data.Accounts[0].HealthStatus != geminiOperationalTruthStateCooldown {
+		t.Fatalf("health_status=%q", data.Accounts[0].HealthStatus)
+	}
+}
+
+func TestBuildPoolDashboardDataCompactsGeminiCooldownDegradedReason(t *testing.T) {
+	now := time.Date(2026, 3, 28, 11, 40, 0, 0, time.UTC)
+	resetAt := now.Add(4 * time.Minute)
+	seat := &Account{
+		ID:                      "gemini_ready_cooldown_compact",
+		Type:                    AccountTypeGemini,
+		PlanType:                "gemini",
+		AuthMode:                accountAuthModeOAuth,
+		OperatorSource:          geminiOperatorSourceAntigravityImport,
+		AntigravityProjectID:    "project-1",
+		GeminiProviderCheckedAt: now.Add(-5 * time.Minute),
+		GeminiOperationalState:  geminiOperationalTruthStateCooldown,
+		GeminiOperationalReason: "gemini code assist request failed: 429 Too Many Requests: {\"error\":{\"status\":\"RESOURCE_EXHAUSTED\",\"details\":[{\"metadata\":{\"quotaResetTimeStamp\":\"2026-03-28T11:44:00Z\"}}]}}",
+		GeminiModelRateLimitResetTimes: map[string]time.Time{
+			"gemini-3.1-pro-high": resetAt,
+		},
+	}
+
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{seat}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	data := h.buildPoolDashboardData(now)
+	if data.Accounts[0].Routing.State != routingDisplayStateDegradedEnabled {
+		t.Fatalf("routing=%+v", data.Accounts[0].Routing)
+	}
+	if !strings.Contains(data.Accounts[0].Routing.DegradedReason, "gemini-3.1-pro-high") {
+		t.Fatalf("degraded_reason=%q", data.Accounts[0].Routing.DegradedReason)
+	}
+	if !strings.Contains(data.Accounts[0].Routing.DegradedReason, resetAt.Format(time.RFC3339)) {
+		t.Fatalf("degraded_reason=%q", data.Accounts[0].Routing.DegradedReason)
+	}
+	if strings.Contains(data.Accounts[0].Routing.DegradedReason, "RESOURCE_EXHAUSTED") {
+		t.Fatalf("degraded_reason=%q", data.Accounts[0].Routing.DegradedReason)
 	}
 }
 
@@ -1470,6 +1520,50 @@ func TestServeStatusPageIncludesLiveGeminiModelCooldownRows(t *testing.T) {
 	}
 	if payload.Accounts[0].ProviderTruth.RateLimitResetTimes["gemini-3.1-pro-high"] != resetAt.Format(time.RFC3339) {
 		t.Fatalf("provider_truth.rate_limit_reset_times = %#v", payload.Accounts[0].ProviderTruth.RateLimitResetTimes)
+	}
+	if payload.Accounts[0].HealthStatus != geminiOperationalTruthStateCooldown {
+		t.Fatalf("health_status=%q", payload.Accounts[0].HealthStatus)
+	}
+}
+
+func TestBuildPoolDashboardDataCooldownOverridesPersistedGeminiRestrictedHealthStatus(t *testing.T) {
+	now := time.Date(2026, 3, 24, 10, 40, 0, 0, time.UTC)
+	seat := &Account{
+		ID:                           "gemini_restricted_cooldown_health",
+		Type:                         AccountTypeGemini,
+		PlanType:                     "gemini",
+		AuthMode:                     accountAuthModeOAuth,
+		OperatorSource:               geminiOperatorSourceAntigravityImport,
+		OAuthProfileID:               geminiOAuthAntigravityProfileID,
+		AntigravityValidationBlocked: true,
+		GeminiValidationReasonCode:   "UNSUPPORTED_LOCATION",
+		GeminiProviderTruthState:     geminiProviderTruthStateRestricted,
+		GeminiProviderTruthReason:    "UNSUPPORTED_LOCATION",
+		HealthStatus:                 "restricted",
+		GeminiOperationalState:       geminiOperationalTruthStateCooldown,
+		GeminiOperationalReason:      "quota resets in 4s",
+	}
+
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{seat}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	data := h.buildPoolDashboardData(now)
+	if len(data.Accounts) != 1 {
+		t.Fatalf("accounts=%d", len(data.Accounts))
+	}
+	if data.Accounts[0].Routing.State != routingDisplayStateDegradedEnabled {
+		t.Fatalf("routing=%+v", data.Accounts[0].Routing)
+	}
+	if data.Accounts[0].ProviderTruth == nil || data.Accounts[0].ProviderTruth.State != geminiProviderTruthStateRestricted {
+		t.Fatalf("provider_truth=%+v", data.Accounts[0].ProviderTruth)
+	}
+	if data.Accounts[0].OperationalTruth == nil || data.Accounts[0].OperationalTruth.State != geminiOperationalTruthStateCooldown {
+		t.Fatalf("operational_truth=%+v", data.Accounts[0].OperationalTruth)
+	}
+	if data.Accounts[0].HealthStatus != geminiOperationalTruthStateCooldown {
+		t.Fatalf("health_status=%q", data.Accounts[0].HealthStatus)
 	}
 }
 

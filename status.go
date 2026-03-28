@@ -239,6 +239,18 @@ func managedOpenAIAPIProbeSummary(snapshot accountSnapshot, now time.Time) strin
 	}
 }
 
+func displayAccountHealthStatus(snapshot accountSnapshot, routing routingState) string {
+	healthStatus := strings.TrimSpace(snapshot.HealthStatus)
+	if snapshot.Type != AccountTypeGemini || snapshot.Dead || snapshot.Disabled {
+		return healthStatus
+	}
+	if strings.TrimSpace(snapshot.GeminiOperationalState) == geminiOperationalTruthStateCooldown ||
+		strings.TrimSpace(routing.BlockReason) == "rate_limited" {
+		return geminiOperationalTruthStateCooldown
+	}
+	return healthStatus
+}
+
 func managedOpenAIAPIPoolStatusNote(pool OpenAIAPIPoolStatus) string {
 	if pool.TotalKeys == 0 {
 		return ""
@@ -442,7 +454,8 @@ func geminiQuotaModelRuntimeSupportForSnapshot(snapshot accountSnapshot, routePr
 	switch routeProvider {
 	case "gemini":
 		if (!snapshot.AntigravityProxyDisabled && !snapshot.AntigravityQuotaForbidden && snapshot.GeminiProviderTruthReady && !snapshot.AntigravityValidationBlocked) ||
-			canRouteValidationBlockedAntigravityGeminiSnapshot(snapshot) {
+			canRouteValidationBlockedAntigravityGeminiSnapshot(snapshot) ||
+			(effectiveGeminiCodeAssistProjectIDForSnapshot(snapshot) != "" && geminiHasOperationalProof(snapshot.GeminiOperationalState)) {
 			return geminiQuotaModelRuntimeSupport{
 				Routable:          true,
 				CompatibilityLane: geminiQuotaCompatibilityLaneGeminiFacade,
@@ -657,6 +670,51 @@ func geminiOperationalTruthStatus(snapshot accountSnapshot) *GeminiOperationalTr
 	return status
 }
 
+func compactGeminiCooldownReason(snapshot accountSnapshot, now time.Time) string {
+	resetTimes := normalizeGeminiModelRateLimitResetTimes(snapshot.GeminiModelRateLimitResetTimes, now)
+	if len(resetTimes) == 0 {
+		return ""
+	}
+	type cooldownRow struct {
+		model string
+		at    time.Time
+	}
+	rows := make([]cooldownRow, 0, len(resetTimes))
+	for model, resetAt := range resetTimes {
+		if model == "" || resetAt.IsZero() || !resetAt.After(now) {
+			continue
+		}
+		rows = append(rows, cooldownRow{model: model, at: resetAt.UTC()})
+	}
+	if len(rows) == 0 {
+		return ""
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].at.Equal(rows[j].at) {
+			return rows[i].model < rows[j].model
+		}
+		return rows[i].at.Before(rows[j].at)
+	})
+	if len(rows) == 1 {
+		return fmt.Sprintf("model cooldown active: %s until %s", rows[0].model, rows[0].at.Format(time.RFC3339))
+	}
+	return fmt.Sprintf("%d model cooldowns active; next reset %s for %s", len(rows), rows[0].at.Format(time.RFC3339), rows[0].model)
+}
+
+func compactGeminiEligibleDegradedReason(snapshot accountSnapshot, now time.Time) string {
+	if strings.TrimSpace(snapshot.GeminiOperationalState) == geminiOperationalTruthStateCooldown {
+		if reason := compactGeminiCooldownReason(snapshot, now); reason != "" {
+			return reason
+		}
+	}
+	if strings.TrimSpace(snapshot.GeminiProviderTruthState) == geminiProviderTruthStateMissingProjectID &&
+		effectiveGeminiCodeAssistProjectIDForSnapshot(snapshot) != "" &&
+		geminiHasOperationalProof(snapshot.GeminiOperationalState) {
+		return "fallback project in use; provider truth missing project_id"
+	}
+	return ""
+}
+
 func geminiRoutingDisplay(snapshot accountSnapshot, routing routingState, now time.Time) (string, string) {
 	if snapshot.Type != AccountTypeGemini {
 		if routing.Eligible {
@@ -673,15 +731,23 @@ func geminiRoutingDisplay(snapshot accountSnapshot, routing routingState, now ti
 		case geminiOperationalTruthStateHardFail:
 			return routingDisplayStateDegradedEnabled, sanitizeStatusMessage(firstNonEmpty(snapshot.GeminiOperationalReason, "last Gemini smoke failed"))
 		case geminiOperationalTruthStateCooldown:
-			return routingDisplayStateDegradedEnabled, sanitizeStatusMessage(firstNonEmpty(snapshot.GeminiOperationalReason, "last Gemini proof is still cooling down"))
+			return routingDisplayStateDegradedEnabled, sanitizeStatusMessage(firstNonEmpty(
+				compactGeminiEligibleDegradedReason(snapshot, now),
+				snapshot.GeminiOperationalReason,
+				"last Gemini proof is still cooling down",
+			))
 		case geminiOperationalTruthStateDegradedOK:
-			return routingDisplayStateDegradedEnabled, sanitizeStatusMessage(snapshot.GeminiOperationalReason)
+			return routingDisplayStateDegradedEnabled, sanitizeStatusMessage(firstNonEmpty(
+				compactGeminiEligibleDegradedReason(snapshot, now),
+				snapshot.GeminiOperationalReason,
+			))
 		}
 		switch strings.TrimSpace(snapshot.GeminiProviderTruthState) {
 		case "", geminiProviderTruthStateReady:
 			return routingDisplayStateEnabled, ""
 		default:
 			return routingDisplayStateDegradedEnabled, sanitizeStatusMessage(firstNonEmpty(
+				compactGeminiEligibleDegradedReason(snapshot, now),
 				snapshot.GeminiOperationalReason,
 				snapshot.GeminiProviderTruthReason,
 				geminiValidationReasonSummary(snapshot.GeminiValidationReasonCode, snapshot.GeminiValidationMessage, snapshot.GeminiValidationURL, snapshot.GeminiProviderTruthState),
@@ -1066,7 +1132,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		if !snapshot.DeadSince.IsZero() {
 			status.DeadSince = snapshot.DeadSince.UTC().Format(time.RFC3339)
 		}
-		status.HealthStatus = strings.TrimSpace(snapshot.HealthStatus)
+		status.HealthStatus = displayAccountHealthStatus(snapshot, routing)
 		status.HealthError = sanitizeStatusMessage(snapshot.HealthError)
 		status.Penalty = snapshot.Penalty
 		if snapshot.FallbackOnly {

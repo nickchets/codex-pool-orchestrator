@@ -8,6 +8,16 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.8.5] - 2026-03-28
+
+### Изменено
+- Refresh truth для Antigravity Gemini теперь становится proactive за один poll interval до `fresh_until`, поэтому ready seat’ы больше не выпадают в `stale_provider_truth` между плановыми refresh-циклами.
+- `/status`, `/status?format=json` и родственные status-style JSON surface теперь поднимают Gemini cooldown seat’ы в top-level `health_status="cooldown"` вместо misleading generic `healthy`.
+
+### Исправлено
+- Warmed Antigravity Gemini seat’ы, которые всё ещё сходятся в `provider_truth.state=missing_project_id`, теперь truthfully экспортируются и в status, и в OpenCode quota rows: они остаются `degraded_enabled` с fallback-project reason, а их Gemini quota models сохраняют `routable=true`.
+- Operator-facing Gemini status больше не противоречит runtime truth, показывая `health_status=healthy` для seat’ов, которые реально находятся в `operational_truth.state=cooldown` и `routing.state=degraded_enabled`.
+
 ## [0.8.4] - 2026-03-28
 
 ### Изменено

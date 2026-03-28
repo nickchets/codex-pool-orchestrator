@@ -68,7 +68,7 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 			PlanType:                  snapshot.PlanType,
 			AccountID:                 snapshot.AccountID,
 			IDTokenChatGPTAccountID:   snapshot.IDTokenChatGPTAccountID,
-			HealthStatus:              snapshot.HealthStatus,
+			HealthStatus:              displayAccountHealthStatus(snapshot, snapshot.Routing),
 			HealthError:               snapshot.HealthError,
 			GitLabQuotaExceededCount:  snapshot.GitLabQuotaExceededCount,
 			GitLabLastQuotaExceededAt: timePtrUTC(snapshot.GitLabLastQuotaExceededAt),
