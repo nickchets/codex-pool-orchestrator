@@ -238,6 +238,122 @@ func TestPinnedConversationKeepsRefreshableExpiredCodexSeat(t *testing.T) {
 	}
 }
 
+func TestGitLabClaudeCandidatePrefersLeastRecentlyUsedSeat(t *testing.T) {
+	now := time.Now()
+	hot := &Account{
+		ID:          "gitlab-hot",
+		Type:        AccountTypeClaude,
+		AuthMode:    accountAuthModeGitLab,
+		PlanType:    "max",
+		LastUsed:    now.Add(-10 * time.Second),
+		AccessToken: "access-hot",
+		ExtraHeaders: map[string]string{
+			"X-Test": "hot",
+		},
+	}
+	cold := &Account{
+		ID:          "gitlab-cold",
+		Type:        AccountTypeClaude,
+		AuthMode:    accountAuthModeGitLab,
+		PlanType:    "max",
+		LastUsed:    now.Add(-2 * time.Minute),
+		AccessToken: "access-cold",
+		ExtraHeaders: map[string]string{
+			"X-Test": "cold",
+		},
+	}
+
+	p := newPoolState([]*Account{hot, cold}, false)
+	got := p.candidate("", nil, AccountTypeClaude, "")
+	if got == nil || got.ID != cold.ID {
+		t.Fatalf("expected least recently used gitlab seat, got %+v", got)
+	}
+}
+
+func TestGitLabClaudeCandidateRotatesAcrossNeverUsedSeats(t *testing.T) {
+	a := &Account{
+		ID:          "gitlab-a",
+		Type:        AccountTypeClaude,
+		AuthMode:    accountAuthModeGitLab,
+		AccessToken: "access-a",
+		ExtraHeaders: map[string]string{
+			"X-Test": "a",
+		},
+	}
+	b := &Account{
+		ID:          "gitlab-b",
+		Type:        AccountTypeClaude,
+		AuthMode:    accountAuthModeGitLab,
+		AccessToken: "access-b",
+		ExtraHeaders: map[string]string{
+			"X-Test": "b",
+		},
+	}
+	p := newPoolState([]*Account{a, b}, false)
+
+	first := p.candidate("", nil, AccountTypeClaude, "")
+	second := p.candidate("", nil, AccountTypeClaude, "")
+	if first == nil || second == nil {
+		t.Fatalf("expected gitlab seats, got first=%+v second=%+v", first, second)
+	}
+	if first.ID == second.ID {
+		t.Fatalf("expected round-robin across equal never-used gitlab seats, got %s twice", first.ID)
+	}
+}
+
+func TestGitLabClaudeCandidatePrefersLowerInflightBeforeRecency(t *testing.T) {
+	now := time.Now()
+	idle := &Account{
+		ID:          "gitlab-idle",
+		Type:        AccountTypeClaude,
+		AuthMode:    accountAuthModeGitLab,
+		AccessToken: "access-idle",
+		LastUsed:    now.Add(-20 * time.Second),
+		ExtraHeaders: map[string]string{
+			"X-Test": "idle",
+		},
+	}
+	busy := &Account{
+		ID:          "gitlab-busy",
+		Type:        AccountTypeClaude,
+		AuthMode:    accountAuthModeGitLab,
+		AccessToken: "access-busy",
+		LastUsed:    now.Add(-2 * time.Minute),
+		ExtraHeaders: map[string]string{
+			"X-Test": "busy",
+		},
+		Inflight: 2,
+	}
+	p := newPoolState([]*Account{busy, idle}, false)
+
+	got := p.candidate("", nil, AccountTypeClaude, "")
+	if got == nil || got.ID != idle.ID {
+		t.Fatalf("expected lower inflight gitlab seat, got %+v", got)
+	}
+}
+
+func TestRoutingStateDoesNotBlockGitLabHeaderSnapshotAlone(t *testing.T) {
+	now := time.Now()
+	acc := &Account{
+		ID:                       "gitlab-header-only",
+		Type:                     AccountTypeClaude,
+		AuthMode:                 accountAuthModeGitLab,
+		AccessToken:              "access-header-only",
+		ExtraHeaders:             map[string]string{"X-Test": "header-only"},
+		GitLabRateLimitLimit:     2000,
+		GitLabRateLimitRemaining: 0,
+		GitLabRateLimitResetAt:   now.Add(15 * time.Minute),
+	}
+
+	acc.mu.Lock()
+	routing := routingStateLocked(acc, now, AccountTypeClaude, "")
+	acc.mu.Unlock()
+
+	if !routing.Eligible {
+		t.Fatalf("expected gitlab direct-access header snapshot alone to stay routable, got %q", routing.BlockReason)
+	}
+}
+
 func TestCandidateReusesMostRecentlyUsedEligibleSeat(t *testing.T) {
 	now := time.Now()
 	sticky := &Account{

@@ -265,6 +265,36 @@ func TestGitLabClaudeQuotaExceededCooldownExpandsExponentially(t *testing.T) {
 	}
 }
 
+func TestApplyManagedGitLabClaudeDispositionParsesRetryAfterHTTPDate(t *testing.T) {
+	acc := &Account{
+		ID:           "claude_gitlab_retry_after",
+		Type:         AccountTypeClaude,
+		AuthMode:     accountAuthModeGitLab,
+		AccessToken:  "gateway-token",
+		ExtraHeaders: map[string]string{"X-Test": "retry-after"},
+	}
+	now := time.Now().UTC()
+	headers := http.Header{
+		"Retry-After": []string{now.Add(90 * time.Second).Format(http.TimeFormat)},
+	}
+	disposition := managedGitLabClaudeErrorDisposition{
+		RateLimit:    true,
+		HealthStatus: "rate_limited",
+		Cooldown:     managedGitLabClaudeRateLimitWait,
+		Reason:       "rate limit",
+	}
+
+	applyManagedGitLabClaudeDisposition(acc, disposition, headers, now)
+
+	if acc.RateLimitUntil.IsZero() {
+		t.Fatal("expected rate limit until")
+	}
+	wait := acc.RateLimitUntil.Sub(now)
+	if wait < 89*time.Second || wait > 91*time.Second {
+		t.Fatalf("rate_limit_until=%v wait=%v", acc.RateLimitUntil, wait)
+	}
+}
+
 func TestClaudeProviderLoadsLegacyQuotaExceededAccountWithDefaultBackoffCount(t *testing.T) {
 	baseURL, _ := url.Parse("https://claude.example.com")
 	provider := NewClaudeProvider(baseURL)

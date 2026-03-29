@@ -1612,6 +1612,11 @@ func (p *poolState) stickyEligibleCandidateLocked(now time.Time, exclude map[str
 			return acc
 		}
 	}
+	if accountType == AccountTypeClaude {
+		return p.stickyEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, func(a *Account) bool {
+			return !isGitLabClaudeAccount(a)
+		})
+	}
 	return p.stickyEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, nil)
 }
 
@@ -1760,6 +1765,9 @@ func (p *poolState) selectEligibleCandidateMatchingLocked(now time.Time, exclude
 		tier         int
 		secondaryPct float64
 		score        float64
+		inflight     int64
+		lastUsed     time.Time
+		gitLabClaude bool
 	}
 	var eligible []scoredAccount
 	stableCodexTieBreak := accountType == AccountTypeCodex
@@ -1769,6 +1777,17 @@ func (p *poolState) selectEligibleCandidateMatchingLocked(now time.Time, exclude
 		}
 		if incumbent == nil {
 			return true
+		}
+		if accountType == AccountTypeClaude && candidate.gitLabClaude && incumbent.gitLabClaude {
+			if candidate.inflight != incumbent.inflight {
+				return candidate.inflight < incumbent.inflight
+			}
+			if candidate.lastUsed.IsZero() != incumbent.lastUsed.IsZero() {
+				return candidate.lastUsed.IsZero()
+			}
+			if !candidate.lastUsed.Equal(incumbent.lastUsed) {
+				return candidate.lastUsed.Before(incumbent.lastUsed)
+			}
 		}
 		if candidate.score != incumbent.score {
 			return candidate.score > incumbent.score
@@ -1810,10 +1829,21 @@ func (p *poolState) selectEligibleCandidateMatchingLocked(now time.Time, exclude
 			log.Printf("ignoring rate limit for codex account %s (until %s)", a.ID, a.RateLimitUntil.Format(time.RFC3339))
 		}
 		tier := accountTier(a.Type, a.PlanType)
+		lastUsed := a.LastUsed
+		gitLabClaude := isGitLabClaudeAccount(a)
 		score := scoreAccountLocked(a, now)
 		a.mu.Unlock()
-		score -= float64(atomic.LoadInt64(&a.Inflight)) * 0.02
-		eligible = append(eligible, scoredAccount{acc: a, tier: tier, secondaryPct: routing.SecondaryUsed, score: score})
+		inflight := atomic.LoadInt64(&a.Inflight)
+		score -= float64(inflight) * 0.02
+		eligible = append(eligible, scoredAccount{
+			acc:          a,
+			tier:         tier,
+			secondaryPct: routing.SecondaryUsed,
+			score:        score,
+			inflight:     inflight,
+			lastUsed:     lastUsed,
+			gitLabClaude: gitLabClaude,
+		})
 	}
 
 	if len(eligible) == 0 {

@@ -20,6 +20,7 @@
 - Live proxy smoke: `AUTH=$(jq -r '.tokens.access_token' /home/lap/.codex/auth.json) && curl -sS -N http://127.0.0.1:8989/responses -H "Authorization: Bearer $AUTH" -H 'Content-Type: application/json' --data '{"model":"gpt-5.4","instructions":"Reply with exactly OK.","store":false,"stream":true,"input":[{"role":"user","content":[{"type":"input_text","text":"ping"}]}]}'`
 - GitLab Claude direct token truth check: `python3 - <<'PY' ... direct_access -> /v1/messages ... PY`
 - GitLab Claude pool fallback smoke: `POOL_USER_TOKEN=$(jq -r '.[] | select(.disabled==false and .email=="lap+agcode@local.pool") | .token' /home/lap/.root_layer/codex_pool/data/pool_users.json | head -n1) && CLAUDE_POOL_TOKEN=$(curl -fsS --max-time 15 "http://127.0.0.1:8989/config/claude/${POOL_USER_TOKEN}" | jq -r '.access_token') && curl -sS --max-time 90 -D - -X POST http://127.0.0.1:8989/v1/messages -H "Authorization: Bearer ${CLAUDE_POOL_TOKEN}" -H 'Content-Type: application/json' -H 'anthropic-version: 2023-06-01' --data '{"model":"claude-sonnet-4-20250514","max_tokens":64,"messages":[{"role":"user","content":"Reply with exactly OK"}]}'`
+- GitLab Claude cooldown truth check: `curl -fsS http://127.0.0.1:8989/status?format=json | jq '[.accounts[] | select(.type=="claude") | {id,health_status,health_error,routing:.routing,recovery_at:(.routing.recovery_at // empty)}]'`
 - Claude CLI wrapper smoke: `timeout 120s fish -lc 'claude --model sonnet -p "Reply with exactly OK."'`
 
 ## Notes
@@ -27,6 +28,7 @@
 - Do not store secrets or exported auth payloads in repo-local evidence or docs.
 - The current user service reads `/home/lap/.root_layer/codex_pool/codex-pool.env`; do not assume the runtime env lives under `%h/.local/share/codex-pool/runtime/` during local operator checks.
 - For pooled Gemini API-key mode, `POOL_KEY` means the synthetic Gemini pool API key (`AIzaSy-pool-...`), not the raw pool-user download token used by `/config/gemini/<token>`.
+- For GitLab Claude, `GitLabRateLimitRemaining/ResetAt` are observability fields from the direct-access/token-mint layer, not a trustworthy `/v1/messages` serving-quota balancer input. Use `RateLimitUntil`, `Inflight`, and `LastUsed` as runtime routing truth.
 - Pooled Gemini `/v1beta/models/*:generateContent` for imported browser-auth Gemini seats currently succeeds through the internal Code Assist facade path and requires a persisted provider project id; seats without `token.project_id` are not usable for this live-smoke lane.
 - For restricted browser-auth Gemini seats, `/operator/gemini/seat-smoke` is the canonical live proof: it can succeed through the fallback project even when `provider_truth.state=restricted` or `provider_truth.state=missing_project_id`, and it persists `gemini_operational_state=degraded_ok` separately from provider truth.
 - Ready browser-auth Gemini seats now auto-refresh stale provider truth on startup and on the 10-minute stale poller; after a restart, give the local service a few seconds before treating `stale_provider_truth` as final runtime truth.

@@ -1803,3 +1803,26 @@
   - `/tmp/claude_ping_tail.sse`
 - Notes
   - GitLab Claude smoke в `DEBUG.md` переписан на truthy enabled-user выбор; прежний `.[0].token` мог попадать в disabled pool user и давать ложный `403/401`.
+
+### 2026-03-29T07:27:00Z | REPO-CPO GitLab Claude token balancing hardening
+- Commands
+  - `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestGitLabClaudeCandidatePrefersLeastRecentlyUsedSeat|TestGitLabClaudeCandidateRotatesAcrossNeverUsedSeats|TestGitLabClaudeCandidatePrefersLowerInflightBeforeRecency|TestRoutingStateDoesNotBlockGitLabHeaderSnapshotAlone|TestApplyManagedGitLabClaudeDispositionParsesRetryAfterHTTPDate' ./...`
+  - `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 300s ./...`
+  - `cd /home/lap/projects/codex-pool-orchestrator && go build ./...`
+  - `cd /home/lap/projects/codex-pool-orchestrator && go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json | jq '[.accounts[] | select(.type=="claude") | {id,health_status,routing:.routing,gitlab_rate_limit_remaining,gitlab_rate_limit_limit}]'`
+  - `journalctl --user -u codex-pool.service -b --since '30 minutes ago' --no-pager | rg 'trace route mode=buffered attempt=.* provider=claude account=|retry_disposition provider=claude account='`
+- Result
+  - PASS
+  - GitLab Claude selector больше не липнет к generic sticky `LastUsed` path. Для unpinned `gitlab_duo` seat'ов routing теперь использует безопасную fairness policy: меньший `Inflight`, затем более старый `LastUsed`, затем обычный score/RR tie behavior.
+  - Параллельный аудит подтвердил архитектурное ограничение: `GitLabRateLimitRemaining/ResetAt` у нас относятся к direct-access/token-mint слою и не должны использоваться как primary balancing truth для `/v1/messages`. В итоговой реализации эти поля оставлены только для observability/status.
+  - Дополнительно GitLab cooldown path теперь использует общий `Retry-After` parser, поэтому корректно понимает и seconds-only, и HTTP-date формат.
+  - Focused tests, full `go test ./...`, `go build ./...`, итоговый бинарник и service restart прошли.
+  - Live runtime truth на момент rollout: все три GitLab Claude seat'а находятся в настоящем `rate_limited` cooldown после org-level `429`, поэтому прямой pooled smoke возвращает `503 no live claude accounts`. Это отдельный operational blocker, а не дефект нового selector-а.
+  - Исторические journal traces в том же окне показывают, что при реальном retry path пул уже проходил по всем трем GitLab seat'ам последовательно (`attempt=1/3`, `2/3`, `3/3`), что согласуется с новой целью равномерного token distribution вместо залипания в одном seat.
+- Artifacts
+  - `/home/lap/projects/codex-pool-orchestrator/docs/CLAUDE_GITLAB_TOKEN_BALANCING_TZ_20260329.ru.md`
+- Notes
+  - Эта волна намеренно не меняет политику `402/USAGE_QUOTA_EXCEEDED -> dead` и не лечит сам org-level `429`; она исправляет selector fairness и cooldown parsing.

@@ -579,10 +579,8 @@ func applyManagedGitLabClaudeDisposition(acc *Account, disposition managedGitLab
 		if wait <= 0 {
 			wait = managedGitLabClaudeRateLimitWait
 		}
-		if retryAfter := strings.TrimSpace(headers.Get("Retry-After")); retryAfter != "" {
-			if seconds, err := time.ParseDuration(retryAfter + "s"); err == nil && seconds > 0 {
-				wait = seconds
-			}
+		if retryAfter, ok := parseRetryAfter(headers); ok && retryAfter > 0 {
+			wait = retryAfter
 		}
 		until := now.Add(wait)
 		if acc.RateLimitUntil.Before(until) {
