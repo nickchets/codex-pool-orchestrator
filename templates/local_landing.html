@@ -164,6 +164,12 @@
             color: var(--text);
         }
 
+        .sync-note {
+            color: var(--muted);
+            font-size: 0.82rem;
+            text-align: right;
+        }
+
         .overview-grid,
         .summary-grid,
         .card-grid {
@@ -181,8 +187,16 @@
             margin-bottom: 18px;
         }
 
+        .summary-grid.summary-grid-secondary {
+            margin-bottom: 0;
+        }
+
         .card-grid {
             grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .routing-card-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
         }
 
         .stat-card,
@@ -220,6 +234,7 @@
             font-size: clamp(1.4rem, 2vw, 2rem);
             font-weight: 700;
             letter-spacing: -0.03em;
+            min-width: 0;
         }
 
         .stat-detail,
@@ -240,6 +255,35 @@
 
         .metric-card.tone-danger {
             border-color: rgba(239, 111, 108, 0.28);
+        }
+
+        .metric-card.metric-card-featured {
+            grid-column: span 2;
+        }
+
+        .metric-card.metric-card-identity {
+            min-width: 0;
+        }
+
+        .metric-card.metric-card-identity .metric-value {
+            font-size: clamp(1.02rem, 1.2vw, 1.28rem);
+            line-height: 1.28;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            letter-spacing: -0.02em;
+        }
+
+        .metric-meta {
+            margin-top: 8px;
+            color: var(--muted);
+            font-size: 0.78rem;
+            line-height: 1.45;
+        }
+
+        .metric-card.metric-card-identity .metric-detail {
+            margin-top: 12px;
+            padding-top: 10px;
+            border-top: 1px solid rgba(255, 255, 255, 0.07);
         }
 
         .provider-pills {
@@ -331,6 +375,60 @@
             grid-template-columns: minmax(0, 1.35fr) minmax(340px, 0.95fr);
             gap: 18px;
             margin-bottom: 18px;
+        }
+
+        .provider-alerts {
+            display: grid;
+            gap: 12px;
+            margin-bottom: 18px;
+        }
+
+        .provider-alerts:empty {
+            display: none;
+        }
+
+        .provider-alert {
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            padding: 16px 18px;
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.012));
+            box-shadow: var(--shadow);
+        }
+
+        .provider-alert.tone-warning {
+            border-color: rgba(231, 185, 90, 0.28);
+            background: linear-gradient(180deg, rgba(231, 185, 90, 0.14), rgba(231, 185, 90, 0.05));
+        }
+
+        .provider-alert.tone-danger {
+            border-color: rgba(239, 111, 108, 0.28);
+            background: linear-gradient(180deg, rgba(239, 111, 108, 0.14), rgba(239, 111, 108, 0.05));
+        }
+
+        .provider-alert.tone-success {
+            border-color: rgba(53, 195, 143, 0.28);
+            background: linear-gradient(180deg, rgba(53, 195, 143, 0.14), rgba(53, 195, 143, 0.05));
+        }
+
+        .provider-alert-kicker {
+            color: var(--muted);
+            font-size: 0.74rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        .provider-alert-title {
+            margin-top: 8px;
+            font-size: 1rem;
+            font-weight: 700;
+            line-height: 1.35;
+        }
+
+        .provider-alert-copy {
+            margin-top: 8px;
+            color: var(--muted);
+            line-height: 1.6;
         }
 
         .surface {
@@ -522,6 +620,10 @@
             background: rgba(8, 10, 14, 0.6);
         }
 
+        .table-shell.table-shell-wide table {
+            min-width: 1040px;
+        }
+
         table {
             width: 100%;
             border-collapse: collapse;
@@ -564,6 +666,10 @@
             line-height: 1.45;
         }
 
+        .mobile-only {
+            display: none;
+        }
+
         .quota-panel {
             margin-top: 10px;
             border: 1px solid rgba(255, 255, 255, 0.08);
@@ -590,14 +696,17 @@
         }
 
         .quota-panel summary::after {
-            content: '+';
-            color: var(--accent);
-            font-size: 1rem;
-            line-height: 1;
+            content: '';
+            width: 0.65rem;
+            height: 0.65rem;
+            border-right: 2px solid var(--accent);
+            border-bottom: 2px solid var(--accent);
+            transform: rotate(45deg);
+            flex: 0 0 auto;
         }
 
         .quota-panel[open] summary::after {
-            content: '−';
+            transform: rotate(225deg);
         }
 
         .quota-model-list {
@@ -718,14 +827,17 @@
         }
 
         .details-card summary::after {
-            content: '+';
-            color: var(--accent);
-            font-size: 1.2rem;
-            line-height: 1;
+            content: '';
+            width: 0.7rem;
+            height: 0.7rem;
+            border-right: 2px solid var(--accent);
+            border-bottom: 2px solid var(--accent);
+            transform: rotate(45deg);
+            flex: 0 0 auto;
         }
 
         .details-card[open] summary::after {
-            content: '−';
+            transform: rotate(225deg);
         }
 
         .details-body {
@@ -754,6 +866,24 @@
             line-height: 1.6;
         }
 
+        .section-details {
+            margin-bottom: 18px;
+        }
+
+        .section-details:last-of-type {
+            margin-bottom: 0;
+        }
+
+        .details-summary-note {
+            color: var(--muted);
+            font-size: 0.82rem;
+            font-weight: 500;
+            text-transform: none;
+            letter-spacing: 0;
+            margin-left: auto;
+            text-align: right;
+        }
+
         .footer {
             margin-top: 22px;
             text-align: center;
@@ -780,6 +910,10 @@
             .details-grid,
             .content-grid {
                 grid-template-columns: 1fr;
+            }
+
+            .metric-card.metric-card-featured {
+                grid-column: auto;
             }
         }
 
@@ -818,6 +952,42 @@
             .tab-btn {
                 flex: 1 1 calc(50% - 10px);
             }
+
+            .sync-note {
+                text-align: left;
+            }
+
+            .table-shell {
+                overflow-x: hidden;
+            }
+
+            table {
+                min-width: 0;
+            }
+
+            th,
+            td {
+                padding: 11px 12px;
+            }
+
+            .desktop-only {
+                display: none;
+            }
+
+            .mobile-only {
+                display: block;
+            }
+
+            .details-card summary {
+                align-items: flex-start;
+                flex-wrap: wrap;
+            }
+
+            .details-summary-note {
+                width: 100%;
+                margin-left: 0;
+                text-align: left;
+            }
         }
 
         @media (prefers-reduced-motion: reduce) {
@@ -842,8 +1012,9 @@
             </div>
             <div class="head-meta">
                 <div class="status-badge" id="status-badge">Connecting...</div>
+                <div class="sync-note" id="last-sync-note">Waiting for first live sync...</div>
                 <div class="head-links">
-                    <a href="/status">Full Status</a>
+                    <a href="/status">Raw Diagnostics</a>
                     <a href="/status?format=json">Status JSON</a>
                 </div>
             </div>
@@ -895,6 +1066,7 @@
             </div>
 
             <div id="codex-summary-cards" class="summary-grid"></div>
+            <div id="codex-alerts" class="provider-alerts"></div>
 
             <div class="content-grid">
                 <section class="surface">
@@ -904,7 +1076,7 @@
                             <p>Current seat, last used seat, and fallback readiness from the live selector state.</p>
                         </div>
                     </div>
-                    <div id="codex-routing-cards" class="card-grid"></div>
+                    <div id="codex-routing-cards" class="card-grid routing-card-grid"></div>
                 </section>
 
                 <section class="surface">
@@ -946,56 +1118,59 @@
                 </section>
             </div>
 
-            <section class="surface">
-                <div class="surface-header">
-                    <div>
-                        <h3>Workspace Groups</h3>
-                        <p>Seat grouping by workspace, mirroring the pool dashboard view.</p>
+            <details class="details-card section-details" data-mobile-collapse="true">
+                <summary>
+                    <span>Workspace Groups</span>
+                    <span class="details-summary-note" id="codex-workspace-summary">Waiting for live data...</span>
+                </summary>
+                <div class="details-body">
+                    <p class="summary-note">Seat grouping by workspace, mirroring the live pool dashboard view.</p>
+                    <div class="table-shell">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Workspace</th>
+                                    <th class="desktop-only">Seats</th>
+                                    <th class="desktop-only">Eligible</th>
+                                    <th class="desktop-only">Blocked</th>
+                                    <th class="desktop-only">Next Recovery</th>
+                                </tr>
+                            </thead>
+                            <tbody id="codex-workspace-body"></tbody>
+                        </table>
                     </div>
+                    <div id="codex-workspace-empty" class="empty-state"></div>
                 </div>
-                <div class="table-shell">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Workspace</th>
-                                <th>Seats</th>
-                                <th>Eligible</th>
-                                <th>Blocked</th>
-                                <th>Next Recovery</th>
-                            </tr>
-                        </thead>
-                        <tbody id="codex-workspace-body"></tbody>
-                    </table>
-                </div>
-                <div id="codex-workspace-empty" class="empty-state"></div>
-            </section>
+            </details>
 
-            <section class="surface">
-                <div class="surface-header">
-                    <div>
-                        <h3>Accounts</h3>
-                        <p>IDs are clipped for readability. Full values stay in row tooltips.</p>
+            <details class="details-card section-details" data-mobile-collapse="true">
+                <summary>
+                    <span>Accounts</span>
+                    <span class="details-summary-note" id="codex-account-summary">Waiting for live data...</span>
+                </summary>
+                <div class="details-body">
+                    <p class="summary-note">IDs stay clipped for readability here; quota freshness and reset timing stay visible on this landing table.</p>
+                    <div class="table-shell table-shell-wide">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Account</th>
+                                    <th class="desktop-only">Plan</th>
+                                    <th>Routing</th>
+                                    <th class="desktop-only">Headroom</th>
+                                    <th>Health</th>
+                                    <th class="desktop-only">Quota Snapshot</th>
+                                    <th class="desktop-only">Last Used</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="codex-accounts-body"></tbody>
+                        </table>
                     </div>
+                    <div id="codex-accounts-empty" class="empty-state"></div>
+                    <div id="codex-account-action-status" class="status-line"></div>
                 </div>
-                <div class="table-shell">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Account</th>
-                                <th>Plan</th>
-                                <th>Routing</th>
-                                <th>Headroom</th>
-                                <th>Health</th>
-                                <th>Last Used</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody id="codex-accounts-body"></tbody>
-                    </table>
-                </div>
-                <div id="codex-accounts-empty" class="empty-state"></div>
-                <div id="codex-account-action-status" class="status-line"></div>
-            </section>
+            </details>
 
             <details class="details-card">
                 <summary>Codex CLI Setup</summary>
@@ -1053,6 +1228,7 @@ cp pool/ACCOUNT_NAME.json ~/.codex/auth.json</pre>
             </div>
 
             <div id="claude-summary-cards" class="summary-grid"></div>
+            <div id="claude-alerts" class="provider-alerts"></div>
 
             <div class="content-grid">
                 <section class="surface">
@@ -1062,7 +1238,7 @@ cp pool/ACCOUNT_NAME.json ~/.codex/auth.json</pre>
                             <p>Live Claude seat visibility plus the current GitLab Claude Pool rotation target.</p>
                         </div>
                     </div>
-                    <div id="claude-routing-cards" class="card-grid"></div>
+                    <div id="claude-routing-cards" class="card-grid routing-card-grid"></div>
                 </section>
 
                 <section class="surface">
@@ -1091,56 +1267,58 @@ cp pool/ACCOUNT_NAME.json ~/.codex/auth.json</pre>
                 </section>
             </div>
 
-            <section class="surface">
-                <div class="surface-header">
-                    <div>
-                        <h3>Workspace Groups</h3>
-                        <p>GitLab-backed Claude tokens are grouped here exactly as exposed by the live dashboard payload.</p>
+            <details class="details-card section-details" data-mobile-collapse="true">
+                <summary>
+                    <span>Workspace Groups</span>
+                    <span class="details-summary-note" id="claude-workspace-summary">Waiting for live data...</span>
+                </summary>
+                <div class="details-body">
+                    <p class="summary-note">GitLab-backed Claude tokens grouped exactly as exposed by the live dashboard payload.</p>
+                    <div class="table-shell">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Workspace</th>
+                                    <th class="desktop-only">Seats</th>
+                                    <th class="desktop-only">Eligible</th>
+                                    <th class="desktop-only">Blocked</th>
+                                    <th class="desktop-only">Next Recovery</th>
+                                </tr>
+                            </thead>
+                            <tbody id="claude-workspace-body"></tbody>
+                        </table>
                     </div>
+                    <div id="claude-workspace-empty" class="empty-state"></div>
                 </div>
-                <div class="table-shell">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Workspace</th>
-                                <th>Seats</th>
-                                <th>Eligible</th>
-                                <th>Blocked</th>
-                                <th>Next Recovery</th>
-                            </tr>
-                        </thead>
-                        <tbody id="claude-workspace-body"></tbody>
-                    </table>
-                </div>
-                <div id="claude-workspace-empty" class="empty-state"></div>
-            </section>
+            </details>
 
-            <section class="surface">
-                <div class="surface-header">
-                    <div>
-                        <h3>Accounts</h3>
-                        <p>Quota-exceeded and rate-limited GitLab tokens stay visible here with clipped identifiers.</p>
+            <details class="details-card section-details" data-mobile-collapse="true">
+                <summary>
+                    <span>Accounts</span>
+                    <span class="details-summary-note" id="claude-account-summary">Waiting for live data...</span>
+                </summary>
+                <div class="details-body">
+                    <p class="summary-note">Quota-exceeded and rate-limited GitLab tokens stay visible here with clipped identifiers.</p>
+                    <div class="table-shell">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Account</th>
+                                    <th class="desktop-only">Plan</th>
+                                    <th>Routing</th>
+                                    <th class="desktop-only">Headroom</th>
+                                    <th>Health</th>
+                                    <th class="desktop-only">Last Used</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="claude-accounts-body"></tbody>
+                        </table>
                     </div>
+                    <div id="claude-accounts-empty" class="empty-state"></div>
+                    <div id="claude-account-action-status" class="status-line"></div>
                 </div>
-                <div class="table-shell">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Account</th>
-                                <th>Plan</th>
-                                <th>Routing</th>
-                                <th>Headroom</th>
-                                <th>Health</th>
-                                <th>Last Used</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody id="claude-accounts-body"></tbody>
-                    </table>
-                </div>
-                <div id="claude-accounts-empty" class="empty-state"></div>
-                <div id="claude-account-action-status" class="status-line"></div>
-            </section>
+            </details>
 
             <details class="details-card">
                 <summary>Claude Code Setup</summary>
@@ -1190,6 +1368,7 @@ brew install claude-code</pre>
             </div>
 
             <div id="gemini-summary-cards" class="summary-grid"></div>
+            <div id="gemini-alerts" class="provider-alerts"></div>
 
             <div class="content-grid">
                 <section class="surface">
@@ -1199,7 +1378,7 @@ brew install claude-code</pre>
                             <p>Current and recent Gemini routing state. Best eligible is derived from the live Gemini rows below, not from the currently active non-Gemini seat.</p>
                         </div>
                     </div>
-                    <div id="gemini-routing-cards" class="card-grid"></div>
+                    <div id="gemini-routing-cards" class="card-grid routing-card-grid"></div>
                 </section>
 
                 <section class="surface">
@@ -1231,56 +1410,69 @@ brew install claude-code</pre>
                 </section>
             </div>
 
-            <section class="surface">
-                <div class="surface-header">
-                    <div>
-                        <h3>Workspace Groups</h3>
-                        <p>Grouped Gemini seats and workspaces from the shared dashboard payload.</p>
-                    </div>
+            <details class="details-card section-details">
+                <summary>
+                    <span>Advanced Metrics</span>
+                    <span class="details-summary-note" id="gemini-advanced-summary-note">Waiting for live data...</span>
+                </summary>
+                <div class="details-body">
+                    <p class="summary-note">Secondary compatibility and maintenance-only signals stay here so Gemini opens on routing and operator actions first.</p>
+                    <div id="gemini-advanced-summary-cards" class="summary-grid summary-grid-secondary"></div>
                 </div>
-                <div class="table-shell">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Workspace</th>
-                                <th>Seats</th>
-                                <th>Eligible</th>
-                                <th>Blocked</th>
-                                <th>Next Recovery</th>
-                            </tr>
-                        </thead>
-                        <tbody id="gemini-workspace-body"></tbody>
-                    </table>
-                </div>
-                <div id="gemini-workspace-empty" class="empty-state"></div>
-            </section>
+            </details>
 
-            <section class="surface">
-                <div class="surface-header">
-                    <div>
-                        <h3>Accounts</h3>
-                        <p>Account visibility stays aligned with the same live payload used everywhere else.</p>
+            <details class="details-card section-details" data-mobile-collapse="true">
+                <summary>
+                    <span>Workspace Groups</span>
+                    <span class="details-summary-note" id="gemini-workspace-summary">Waiting for live data...</span>
+                </summary>
+                <div class="details-body">
+                    <p class="summary-note">Grouped Gemini seats and workspaces from the shared dashboard payload.</p>
+                    <div class="table-shell">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Workspace</th>
+                                    <th class="desktop-only">Seats</th>
+                                    <th class="desktop-only">Eligible</th>
+                                    <th class="desktop-only">Blocked</th>
+                                    <th class="desktop-only">Next Recovery</th>
+                                </tr>
+                            </thead>
+                            <tbody id="gemini-workspace-body"></tbody>
+                        </table>
                     </div>
+                    <div id="gemini-workspace-empty" class="empty-state"></div>
                 </div>
-                <div class="table-shell">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Account</th>
-                                <th>Plan</th>
-                                <th>Routing</th>
-                                <th>Headroom</th>
-                                <th>Health</th>
-                                <th>Last Used</th>
-                                <th>Action</th>
-                            </tr>
-                        </thead>
-                        <tbody id="gemini-accounts-body"></tbody>
-                    </table>
+            </details>
+
+            <details class="details-card section-details" data-mobile-collapse="true">
+                <summary>
+                    <span>Accounts</span>
+                    <span class="details-summary-note" id="gemini-account-summary">Waiting for live data...</span>
+                </summary>
+                <div class="details-body">
+                    <p class="summary-note">Account visibility stays aligned with the same live payload used everywhere else.</p>
+                    <div class="table-shell">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Account</th>
+                                    <th class="desktop-only">Plan</th>
+                                    <th>Routing</th>
+                                    <th class="desktop-only">Headroom</th>
+                                    <th>Health</th>
+                                    <th class="desktop-only">Last Used</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="gemini-accounts-body"></tbody>
+                        </table>
+                    </div>
+                    <div id="gemini-accounts-empty" class="empty-state"></div>
+                    <div id="gemini-account-action-status" class="status-line"></div>
                 </div>
-                <div id="gemini-accounts-empty" class="empty-state"></div>
-                <div id="gemini-account-action-status" class="status-line"></div>
-            </section>
+            </details>
 
             <details class="details-card">
                 <summary>Gemini Setup via OpenCode</summary>
@@ -1297,7 +1489,7 @@ npm install -g opencode</pre>
 
                         <div class="detail-block">
                             <h4>Compatibility Setup (Advanced)</h4>
-                            <p>Optional <code>.gemini/settings.json</code> compatibility bundle. OpenCode below is the canonical Gemini path for this pool.</p>
+                            <p>Optional <code>.gemini/settings.json</code> compatibility bundle. OpenCode below is the canonical Gemini path for this pool. The exported provider keeps <code>codex-pool/gemini-3.1-pro-high</code> as the default and also surfaces <code>gemini-3.1-pro-low</code> plus other live quota-backed Gemini models when they are available.</p>
                             <div class="code-shell">
                                 <button class="copy-btn" onclick="copyToClipboard('gemini-one-liner', this)">Copy</button>
                                 <pre id="gemini-one-liner"></pre>
@@ -1318,8 +1510,6 @@ npm install -g opencode</pre>
                                 <button class="copy-btn" onclick="copyToClipboard('gemini-auth', this)">Copy</button>
                                 <pre id="gemini-auth"># Preferred: open the dashboard
 python3 -m webbrowser '{{.BaseURL}}/'
-# Or the raw status dashboard
-python3 -m webbrowser '{{.BaseURL}}/status'
 # Then click: Start Gemini Browser Auth</pre>
                             </div>
                         </div>
@@ -1346,7 +1536,7 @@ python3 -m webbrowser '{{.BaseURL}}/status'
         </section>
 
         <div class="footer">
-            <a href="/status">Full Status</a>
+            <a href="/status">View Raw Diagnostics</a>
             <a href="/status?format=json">Status JSON</a>
         </div>
     </div>
@@ -1355,6 +1545,11 @@ python3 -m webbrowser '{{.BaseURL}}/status'
         const BASE_URL = '{{.BaseURL}}';
         const codexOAuthStatusKey = 'codex-oauth-status-snapshot';
         const geminiOAuthStatusKey = 'gemini-oauth-status-snapshot';
+        const providerTabStorageKey = 'pool-dashboard-active-provider';
+        const dashboardPollIntervalMs = 30000;
+        const dashboardFetchTimeoutMs = 10000;
+        const dashboardFetchRetryDelayMs = 1200;
+        const dashboardFetchAttempts = 2;
         let codexOAuthPopup = null;
         let codexOAuthWatcher = null;
         let geminiOAuthPopup = null;
@@ -1362,6 +1557,9 @@ python3 -m webbrowser '{{.BaseURL}}/status'
         let geminiOAuthDone = false;
         let geminiOAuthMessageBound = false;
         let latestDashboardData = null;
+        let dashboardPollTimer = null;
+        let dashboardLoadPromise = null;
+        let activeProvider = 'codex';
 
         function clipMiddle(value, head = 8, tail = 6) {
             const text = String(value || '').trim();
@@ -1409,7 +1607,40 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             if (Number.isNaN(date.getTime())) {
                 return String(value);
             }
-            return date.toLocaleString();
+            return date.toLocaleString([], {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: 'numeric',
+                minute: '2-digit',
+                timeZoneName: 'short',
+            });
+        }
+
+        function formatRelativeTime(value) {
+            const ts = safeTimestamp(value);
+            if (!ts) {
+                return '';
+            }
+            const deltaMs = Date.now() - ts;
+            const future = deltaMs < 0;
+            const absMs = Math.abs(deltaMs);
+            if (absMs < 45 * 1000) {
+                return future ? 'in <1m' : 'just now';
+            }
+            if (absMs < 90 * 1000) {
+                return future ? 'in 1m' : '1m ago';
+            }
+            if (absMs < 60 * 60 * 1000) {
+                const minutes = Math.max(1, Math.round(absMs / (60 * 1000)));
+                return future ? ('in ' + minutes + 'm') : (minutes + 'm ago');
+            }
+            if (absMs < 48 * 60 * 60 * 1000) {
+                const hours = Math.max(1, Math.round(absMs / (60 * 60 * 1000)));
+                return future ? ('in ' + hours + 'h') : (hours + 'h ago');
+            }
+            const days = Math.max(1, Math.round((absMs / (24 * 60 * 60 * 1000)) * 10) / 10);
+            return future ? ('in ' + days + 'd') : (days + 'd ago');
         }
 
         function providerNextRecovery(provider, data) {
@@ -1857,11 +2088,29 @@ python3 -m webbrowser '{{.BaseURL}}/status'
         }
 
         function metricCardHTML(card) {
+            const classes = ['metric-card', 'tone-' + escapeHTML(card.tone || 'neutral')];
+            if (card && card.featured) {
+                classes.push('metric-card-featured');
+            }
+            if (card && card.identity) {
+                classes.push('metric-card-identity');
+            }
             return `
-                <div class="metric-card tone-${escapeHTML(card.tone || 'neutral')}">
+                <div class="${classes.join(' ')}">
                     <div class="metric-label">${escapeHTML(card.label || '')}</div>
-                    <div class="metric-value">${escapeHTML(card.value || '-')}</div>
+                    <div class="metric-value"${card && card.value_title ? ` title="${escapeHTML(card.value_title)}"` : ''}>${escapeHTML(card.value || '-')}</div>
+                    ${card && card.meta ? `<div class="metric-meta"${card.meta_title ? ` title="${escapeHTML(card.meta_title)}"` : ''}>${escapeHTML(card.meta)}</div>` : ''}
                     <div class="metric-detail">${escapeHTML(card.detail || '')}</div>
+                </div>
+            `;
+        }
+
+        function providerAlertHTML(card) {
+            return `
+                <div class="provider-alert tone-${escapeHTML(card.tone || 'neutral')}">
+                    <div class="provider-alert-kicker">${escapeHTML(card.kicker || 'Operator alert')}</div>
+                    <div class="provider-alert-title">${escapeHTML(card.title || '')}</div>
+                    <div class="provider-alert-copy">${escapeHTML(card.detail || '')}</div>
                 </div>
             `;
         }
@@ -1879,18 +2128,77 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             const statusTone = (!routingStatus || routingStatus === 'eligible' || routingStatus === 'enabled') ? 'success' : 'warning';
             const headroom = formatHeadroom(seat.primary_headroom_pct, seat.primary_headroom_known) + ' 5h | ' + formatHeadroom(seat.secondary_headroom_pct, seat.secondary_headroom_known) + ' 7d';
             const label = String(seat.email || '').trim() || clipOpaque(seat.id);
-            const detailParts = [headroom];
-            if (seat.local_last_used) {
-                detailParts.push(String(seat.local_last_used));
+            const metaParts = [];
+            if (seat.workspace_id) {
+                metaParts.push('workspace ' + clipMiddle(seat.workspace_id, 12, 8));
             }
+            if (seat.seat_key && seat.seat_key !== seat.id) {
+                metaParts.push('seat ' + clipMiddle(seat.seat_key, 12, 8));
+            }
+            if (seat.id && seat.id !== seat.seat_key) {
+                metaParts.push(clipOpaque(seat.id));
+            }
+            if (seat.local_last_used) {
+                metaParts.push('last ' + String(seat.local_last_used));
+            }
+            const detailParts = [headroom];
             if (seat.basis) {
                 detailParts.push(String(seat.basis));
             }
             return {
                 label: title,
                 value: label,
+                value_title: label,
+                meta: metaParts.join(' | '),
                 detail: detailParts.join(' | '),
                 tone: statusTone,
+                identity: true,
+                featured: title === 'Current Seat',
+            };
+        }
+
+        function accountQuotaSnapshotSummary(acc) {
+            if (!acc) {
+                return { title: '', detail: '', mobile: '' };
+            }
+            const refreshedAt = String(acc.last_refresh_at || '').trim();
+            const refreshedAgo = formatRelativeTime(refreshedAt);
+            const title = refreshedAgo
+                ? ('updated ' + refreshedAgo)
+                : (refreshedAt ? formatDateTime(refreshedAt) : 'no refresh yet');
+            const detailParts = [];
+            if (refreshedAt) {
+                detailParts.push('seen ' + formatDateTime(refreshedAt));
+            }
+            if (acc.primary_reset_in) {
+                detailParts.push('5h reset ' + String(acc.primary_reset_in));
+            }
+            if (acc.secondary_reset_in) {
+                detailParts.push('7d reset ' + String(acc.secondary_reset_in));
+            }
+            if (acc.recovery_at) {
+                detailParts.push('recovery ' + formatDateTime(acc.recovery_at));
+            }
+            if (acc.auth_expires_in) {
+                detailParts.push('auth ' + String(acc.auth_expires_in));
+            }
+            const detail = detailParts.length > 0 ? detailParts.join(' · ') : 'No quota refresh timestamp exposed yet.';
+            const mobileParts = [];
+            if (refreshedAgo) {
+                mobileParts.push('quota ' + refreshedAgo);
+            } else if (refreshedAt) {
+                mobileParts.push('quota ' + formatDateTime(refreshedAt));
+            }
+            if (acc.primary_reset_in) {
+                mobileParts.push('5h ' + String(acc.primary_reset_in));
+            }
+            if (acc.secondary_reset_in) {
+                mobileParts.push('7d ' + String(acc.secondary_reset_in));
+            }
+            return {
+                title: title,
+                detail: detail,
+                mobile: mobileParts.join(' · '),
             };
         }
 
@@ -1900,6 +2208,94 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 return;
             }
             target.innerHTML = cards.map(metricCardHTML).join('');
+        }
+
+        function renderProviderAlerts(targetID, alerts) {
+            const target = document.getElementById(targetID);
+            if (!target) {
+                return;
+            }
+            target.innerHTML = alerts.map(providerAlertHTML).join('');
+        }
+
+        function normalizeProvider(provider) {
+            const value = String(provider || '').trim().toLowerCase();
+            if (value === 'claude' || value === 'gemini') {
+                return value;
+            }
+            return 'codex';
+        }
+
+        function readActiveProvider() {
+            try {
+                const stored = sessionStorage.getItem(providerTabStorageKey);
+                if (stored) {
+                    return normalizeProvider(stored);
+                }
+            } catch (error) {
+                // Ignore storage failures.
+            }
+            return 'codex';
+        }
+
+        function persistActiveProvider(provider) {
+            activeProvider = normalizeProvider(provider);
+            try {
+                sessionStorage.setItem(providerTabStorageKey, activeProvider);
+            } catch (error) {
+                // Ignore storage failures.
+            }
+        }
+
+        function setLastSyncText(text, tone) {
+            const node = document.getElementById('last-sync-note');
+            if (!node) {
+                return;
+            }
+            node.textContent = text;
+            node.style.color = tone || 'var(--muted)';
+        }
+
+        function nextRecoverySortValue(value) {
+            const parsed = Date.parse(String(value || ''));
+            return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+        }
+
+        function formatNextRecoveryText(value) {
+            return value ? formatDateTime(value) : 'none';
+        }
+
+        function delay(ms) {
+            return new Promise((resolve) => window.setTimeout(resolve, ms));
+        }
+
+        function setDetailsSummary(summaryID, text) {
+            const node = document.getElementById(summaryID);
+            if (node) {
+                node.textContent = text;
+            }
+        }
+
+        function setMobileSectionDefaults() {
+            if (window.innerWidth > 760) {
+                return;
+            }
+            document.querySelectorAll('details[data-mobile-collapse="true"]').forEach((section) => {
+                section.open = false;
+            });
+        }
+
+        function scheduleDashboardRefresh(delayMs = dashboardPollIntervalMs) {
+            if (dashboardPollTimer !== null) {
+                window.clearTimeout(dashboardPollTimer);
+            }
+            dashboardPollTimer = window.setTimeout(() => {
+                if (document.visibilityState === 'hidden') {
+                    scheduleDashboardRefresh(delayMs);
+                    return;
+                }
+                void loadDashboard();
+            }, delayMs);
         }
 
         function renderProviderPills(data) {
@@ -1919,6 +2315,111 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                     </div>
                 `;
             }).join('');
+        }
+
+        function providerAlertCards(provider, data) {
+            const alerts = [];
+            const summary = providerSummary(provider, data);
+
+            if (provider === 'codex') {
+                const apiPool = data && data.openai_api_pool ? data.openai_api_pool : {};
+                const seatEligible = providerAccounts('codex', data)
+                    .filter((acc) => acc && !acc.fallback_only && acc.routing && acc.routing.eligible)
+                    .length;
+                if (seatEligible === 0 && Number(apiPool.eligible_keys || 0) > 0) {
+                    alerts.push({
+                        tone: 'warning',
+                        kicker: 'Routing alert',
+                        title: 'Seat pool is blocked, so fallback API keys are carrying Codex.',
+                        detail: formatNumber(apiPool.eligible_keys || 0) + ' selector-eligible fallback key(s) remain available while seat-capable Codex accounts recover.',
+                    });
+                } else if (Number(summary.total_accounts || 0) > 0 && Number(summary.eligible_accounts || 0) === 0 && Number(apiPool.eligible_keys || 0) === 0) {
+                    alerts.push({
+                        tone: 'danger',
+                        kicker: 'Routing alert',
+                        title: 'No live Codex route is currently eligible.',
+                        detail: 'Both seat-capable Codex accounts and fallback API keys are blocked. Check account headroom and fallback probe health below.',
+                    });
+                }
+                return alerts;
+            }
+
+            if (provider === 'claude') {
+                const claudePool = data && data.gitlab_claude_pool ? data.gitlab_claude_pool : {};
+                const nextRecovery = providerNextRecovery('claude', data);
+                if (Number(claudePool.eligible_tokens || 0) === 0 && Number(claudePool.total_tokens || 0) > 0) {
+                    alerts.push({
+                        tone: 'danger',
+                        kicker: 'Token alert',
+                        title: 'No GitLab-backed Claude token is currently eligible.',
+                        detail: nextRecovery
+                            ? ('Earliest observed Claude recovery is ' + formatDateTime(nextRecovery) + '.')
+                            : 'Current Claude tokens are blocked or dead until a new token is added or an existing one recovers.',
+                    });
+                }
+                if (Number(claudePool.dead_tokens || 0) > 0) {
+                    alerts.push({
+                        tone: 'warning',
+                        kicker: 'Token hygiene',
+                        title: formatNumber(claudePool.dead_tokens || 0) + ' dead Claude token(s) remain visible in diagnostics.',
+                        detail: 'They are kept out of fresh rotation, but the pool still shows them so token health regressions stay obvious.',
+                    });
+                }
+                return alerts;
+            }
+
+            const geminiPool = geminiPoolSummary(data);
+            const eligibleGemini = Number(summary.eligible_accounts || geminiPool.eligible_seats || 0);
+            const clean = Number(geminiPool.clean_eligible_seats || 0);
+            const degraded = Number(geminiPool.degraded_eligible_seats || 0);
+            const restricted = Number(geminiPool.restricted_seats || 0);
+            const missingProject = Number(geminiPool.missing_project_seats || 0);
+            const validationFlagged = Number(geminiPool.validation_flagged_seats || 0);
+            const readySeats = Number(geminiPool.ready_seats || 0);
+            const warmSeats = Number(geminiPool.warm_seats || 0);
+
+            if (eligibleGemini > 0 && clean === 0 && degraded > 0) {
+                alerts.push({
+                    tone: 'warning',
+                    kicker: 'Routing alert',
+                    title: 'Fresh Gemini routing is degraded-only right now.',
+                    detail: formatNumber(degraded) + ' eligible Gemini seat(s) remain degraded-enabled. They still route, but only under provider or operational caveats.',
+                });
+            } else if (degraded > 0) {
+                alerts.push({
+                    tone: 'warning',
+                    kicker: 'Routing alert',
+                    title: formatNumber(degraded) + ' Gemini seat(s) still route in degraded-enabled mode.',
+                    detail: formatNumber(clean) + ' clean eligible seat(s) remain, so degraded seats are visible but not the only fresh-routing path.',
+                });
+            } else if (eligibleGemini === 0 && (readySeats > 0 || warmSeats > 0)) {
+                alerts.push({
+                    tone: 'warning',
+                    kicker: 'Routing alert',
+                    title: 'Gemini has recent proof, but no seat is currently eligible for fresh routing.',
+                    detail: formatNumber(readySeats) + ' provider-ready seat(s) and ' + formatNumber(warmSeats) + ' warmed seat(s) are tracked, but the selector still has no eligible Gemini route.',
+                });
+            }
+
+            if (restricted > 0 || missingProject > 0 || validationFlagged > 0) {
+                const parts = [];
+                if (restricted > 0) {
+                    parts.push(formatNumber(restricted) + ' restricted');
+                }
+                if (missingProject > 0) {
+                    parts.push(formatNumber(missingProject) + ' missing project');
+                }
+                if (validationFlagged > 0) {
+                    parts.push(formatNumber(validationFlagged) + ' validation-flagged');
+                }
+                alerts.push({
+                    tone: eligibleGemini > 0 ? 'warning' : 'danger',
+                    kicker: 'Provider blockers',
+                    title: 'Gemini seats still carry provider-side blockers.',
+                    detail: parts.join(' · ') + '. Use Accounts and Advanced Metrics for exact seat-level truth.',
+                });
+            }
+            return alerts;
         }
 
         function renderOverview(data) {
@@ -1972,6 +2473,8 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             }
 
             renderProviderPills(data);
+            const generatedAt = String(data && data.generated_at || '').trim();
+            setLastSyncText(generatedAt ? ('Last sync ' + formatDateTime(generatedAt) + ' · auto-refresh every 30s') : 'Live sync active · auto-refresh every 30s');
         }
 
         function renderSummary(provider, data) {
@@ -2068,16 +2571,30 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                     tone: (geminiPool.quota_tracked_seats || 0) > 0 ? 'neutral' : 'warning',
                 },
                 {
-                    label: 'Restricted / Missing',
-                    value: formatNumber(geminiPool.restricted_seats || 0) + ' / ' + formatNumber(geminiPool.missing_project_seats || 0),
-                    detail: 'Provider restrictions and missing project IDs that keep seats out of the clean ready path.',
-                    tone: (geminiPool.restricted_seats || 0) > 0 || (geminiPool.missing_project_seats || 0) > 0 ? 'warning' : 'neutral',
-                },
-                {
                     label: 'Gemini Browser Auth Seats',
                     value: formatNumber(geminiOperator.antigravity_seat_count || 0),
                     detail: 'Gemini seats in the shared pool added through Gemini Browser Auth.',
                     tone: (geminiOperator.antigravity_seat_count || 0) > 0 ? 'success' : 'neutral',
+                },
+            ]);
+        }
+
+        function renderGeminiAdvancedSummary(data) {
+            const note = document.getElementById('gemini-advanced-summary-note');
+            const target = document.getElementById('gemini-advanced-summary-cards');
+            if (!note || !target) {
+                return;
+            }
+            const geminiOperator = data && data.gemini_operator ? data.gemini_operator : {};
+            const geminiPool = geminiPoolSummary(data);
+            const legacySeats = Number(geminiOperator.legacy_seat_count || 0) + Number(geminiOperator.managed_seat_count || 0);
+            const validationFlagged = Number(geminiPool.validation_flagged_seats || 0);
+            renderMetricCards('gemini-advanced-summary-cards', [
+                {
+                    label: 'Restricted / Missing',
+                    value: formatNumber(geminiPool.restricted_seats || 0) + ' / ' + formatNumber(geminiPool.missing_project_seats || 0),
+                    detail: 'Provider restrictions, validation flags, and missing project IDs that keep seats out of the clean ready path. Validation-flagged: ' + formatNumber(validationFlagged) + '.',
+                    tone: (geminiPool.restricted_seats || 0) > 0 || (geminiPool.missing_project_seats || 0) > 0 || validationFlagged > 0 ? 'warning' : 'neutral',
                 },
                 {
                     label: 'Legacy / Service OAuth',
@@ -2090,6 +2607,20 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                     tone: legacySeats > 0 ? 'warning' : 'neutral',
                 },
             ]);
+            const noteParts = [];
+            if (Number(geminiPool.restricted_seats || 0) > 0) {
+                noteParts.push(formatNumber(geminiPool.restricted_seats || 0) + ' restricted');
+            }
+            if (Number(geminiPool.missing_project_seats || 0) > 0) {
+                noteParts.push(formatNumber(geminiPool.missing_project_seats || 0) + ' missing project');
+            }
+            if (validationFlagged > 0) {
+                noteParts.push(formatNumber(validationFlagged) + ' validation-flagged');
+            }
+            if (legacySeats > 0) {
+                noteParts.push(formatNumber(legacySeats) + ' legacy seat(s)');
+            }
+            note.textContent = noteParts.length > 0 ? noteParts.join(' · ') : 'Compatibility and maintenance-only state';
         }
 
         function renderRouting(provider, data) {
@@ -2166,10 +2697,26 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             if (!body || !empty) {
                 return;
             }
-            const groups = providerWorkspaces(provider, data);
+            const groups = providerWorkspaces(provider, data).slice().sort((left, right) => {
+                const blockedDelta = Number(right && right.blocked_seat_count || 0) - Number(left && left.blocked_seat_count || 0);
+                if (blockedDelta !== 0) {
+                    return blockedDelta;
+                }
+                const recoveryDelta = nextRecoverySortValue(left && left.next_recovery_at) - nextRecoverySortValue(right && right.next_recovery_at);
+                if (recoveryDelta !== 0) {
+                    return recoveryDelta;
+                }
+                return Number(right && right.seat_count || 0) - Number(left && left.seat_count || 0);
+            });
+            const blockedTotal = groups.reduce((sum, group) => sum + Number(group && group.blocked_seat_count || 0), 0);
+            const nextRecovery = groups
+                .map((group) => String(group && group.next_recovery_at || '').trim())
+                .find((value) => value);
+            setDetailsSummary(provider + '-workspace-summary', formatNumber(groups.length) + ' groups · ' + formatNumber(blockedTotal) + ' blocked · next ' + formatNextRecoveryText(nextRecovery));
             if (groups.length === 0) {
                 body.innerHTML = '';
                 empty.textContent = 'No ' + provider + ' workspace groups are currently exposed by /status?format=json.';
+                setDetailsSummary(provider + '-workspace-summary', 'No workspace groups yet');
                 return;
             }
             empty.textContent = '';
@@ -2178,11 +2725,12 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                     <td>
                         <div class="table-title">${escapeHTML(group.workspace_id || (provider === 'claude' ? 'shared' : 'unassigned'))}</div>
                         <div class="table-meta mono">${escapeHTML(clipMiddle((group.seat_keys || []).join(', '), 16, 8))}</div>
+                        <div class="table-meta mobile-only">${escapeHTML(formatNumber(group.seat_count || 0))} seats · ${escapeHTML(formatNumber(group.eligible_seat_count || 0))} eligible · ${escapeHTML(formatNumber(group.blocked_seat_count || 0))} blocked · next ${escapeHTML(group.next_recovery_at ? formatDateTime(group.next_recovery_at) : 'none')}</div>
                     </td>
-                    <td>${escapeHTML(formatNumber(group.seat_count || 0))}</td>
-                    <td>${escapeHTML(formatNumber(group.eligible_seat_count || 0))}</td>
-                    <td>${escapeHTML(formatNumber(group.blocked_seat_count || 0))}</td>
-                    <td>${escapeHTML(group.next_recovery_at ? formatDateTime(group.next_recovery_at) : 'none')}</td>
+                    <td class="desktop-only">${escapeHTML(formatNumber(group.seat_count || 0))}</td>
+                    <td class="desktop-only">${escapeHTML(formatNumber(group.eligible_seat_count || 0))}</td>
+                    <td class="desktop-only">${escapeHTML(formatNumber(group.blocked_seat_count || 0))}</td>
+                    <td class="desktop-only">${escapeHTML(group.next_recovery_at ? formatDateTime(group.next_recovery_at) : 'none')}</td>
                 </tr>
             `).join('');
         }
@@ -2241,9 +2789,13 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 return;
             }
             const accounts = providerAccounts(provider, data);
+            const summary = providerSummary(provider, data);
+            const nextRecovery = providerNextRecovery(provider, data);
+            setDetailsSummary(provider + '-account-summary', formatNumber(accounts.length) + ' accounts · ' + formatNumber(summary.eligible_accounts || 0) + ' eligible · next ' + formatNextRecoveryText(nextRecovery));
             if (accounts.length === 0) {
                 body.innerHTML = '';
-                empty.textContent = 'No ' + provider + ' accounts are currently present in the pool.';
+                empty.textContent = 'No ' + provider + ' accounts are currently present in the pool. Use the operator actions above to add one.';
+                setDetailsSummary(provider + '-account-summary', 'No accounts in pool');
                 return;
             }
             empty.textContent = '';
@@ -2259,6 +2811,9 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 const geminiQuotaRows = geminiQuotaRowsHTML(acc);
                 const routingDetail = compactDetail(routing.detail || '', 120);
                 const healthDetail = compactDetail(health.detail || '', 120);
+                const quotaSnapshot = accountQuotaSnapshotSummary(acc);
+                const primaryHeadroom = formatHeadroom(acc.routing && acc.routing.primary_headroom_pct, acc.routing && acc.routing.primary_headroom_known);
+                const secondaryHeadroom = formatHeadroom(acc.routing && acc.routing.secondary_headroom_pct, acc.routing && acc.routing.secondary_headroom_known);
                 const meta = [];
                 if (acc.id) {
                     meta.push(clipOpaque(acc.id));
@@ -2272,13 +2827,25 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                 if (acc.type === 'gemini' && acc.operator_source) {
                     meta.push(String(acc.operator_source));
                 }
+                const mobileMeta = [];
+                if (plan && plan !== '-') {
+                    mobileMeta.push(plan);
+                }
+                if (acc.local_last_used) {
+                    mobileMeta.push('last ' + String(acc.local_last_used));
+                }
+                if (provider === 'codex' && quotaSnapshot.mobile) {
+                    mobileMeta.push(quotaSnapshot.mobile);
+                }
                 return `
                     <tr>
                         <td title="${escapeHTML(acc.id || '')}">
                             <div class="table-title">${escapeHTML(accountLabel)}</div>
                             <div class="table-meta mono">${escapeHTML(meta.join(' | '))}</div>
+                            ${mobileMeta.length > 0 ? `<div class="table-meta mobile-only">${escapeHTML(mobileMeta.join(' | '))}</div>` : ''}
+                            <div class="table-meta mobile-only mono">${escapeHTML(primaryHeadroom)} 5h | ${escapeHTML(secondaryHeadroom)} 7d</div>
                         </td>
-                        <td>
+                        <td class="desktop-only">
                             <div class="table-title">${escapeHTML(plan)}</div>
                             <div class="table-meta">${escapeHTML(String(acc.type || '').toUpperCase())}</div>
                         </td>
@@ -2287,18 +2854,25 @@ python3 -m webbrowser '{{.BaseURL}}/status'
                             <div class="table-meta">${escapeHTML(routingDetail)}</div>
                             ${geminiProject ? `<div class="table-meta">${escapeHTML(geminiProject)}</div>` : ''}
                         </td>
-                        <td>
-                            <div class="table-title mono">${escapeHTML(formatHeadroom(acc.routing && acc.routing.primary_headroom_pct, acc.routing && acc.routing.primary_headroom_known))} | ${escapeHTML(formatHeadroom(acc.routing && acc.routing.secondary_headroom_pct, acc.routing && acc.routing.secondary_headroom_known))}</div>
+                        <td class="desktop-only">
+                            <div class="table-title mono">${escapeHTML(primaryHeadroom)} | ${escapeHTML(secondaryHeadroom)}</div>
                             <div class="table-meta">5h | 7d</div>
                         </td>
                         <td title="${escapeHTML(health.detail || '')}">
                             <div class="table-title">${escapeHTML(health.main)}</div>
                             <div class="table-meta">${escapeHTML(healthDetail)}</div>
+                            ${provider === 'codex' && quotaSnapshot.mobile ? `<div class="table-meta mobile-only">${escapeHTML(quotaSnapshot.mobile)}</div>` : ''}
                             ${geminiQuota ? `<div class="table-meta">${escapeHTML(geminiQuota)}</div>` : ''}
                             ${geminiCompatibility ? `<div class="table-meta">${escapeHTML(geminiCompatibility)}</div>` : ''}
                             ${geminiQuotaRows}
                         </td>
-                        <td>
+                        ${provider === 'codex' ? `
+                        <td class="desktop-only" title="${escapeHTML(quotaSnapshot.detail)}">
+                            <div class="table-title">${escapeHTML(quotaSnapshot.title)}</div>
+                            <div class="table-meta">${escapeHTML(quotaSnapshot.detail)}</div>
+                        </td>
+                        ` : ''}
+                        <td class="desktop-only">
                             <div class="table-title">${escapeHTML(String(acc.local_last_used || 'never'))}</div>
                             <div class="table-meta">${escapeHTML(String(acc.usage_observed || ''))}</div>
                         </td>
@@ -2339,50 +2913,96 @@ python3 -m webbrowser '{{.BaseURL}}/status'
             renderOverview(data);
             ['codex', 'claude', 'gemini'].forEach((provider) => {
                 renderSummary(provider, data);
+                renderProviderAlerts(provider + '-alerts', providerAlertCards(provider, data));
                 renderRouting(provider, data);
                 renderWorkspaceTable(provider, data);
                 renderAccountsTable(provider, data);
             });
+            renderGeminiAdvancedSummary(data);
             syncGeminiOperatorActions(data);
         }
 
-        async function loadDashboard() {
-            try {
-                const res = await fetch('/status?format=json', {
-                    headers: { 'Accept': 'application/json' }
-                });
-                if (!res.ok) {
-                    throw new Error(await res.text());
+        async function fetchDashboardJSON() {
+            let lastError = null;
+            for (let attempt = 0; attempt < dashboardFetchAttempts; attempt += 1) {
+                const controller = new AbortController();
+                const timer = window.setTimeout(() => controller.abort(), dashboardFetchTimeoutMs);
+                try {
+                    const res = await fetch('/status?format=json', {
+                        headers: { 'Accept': 'application/json' },
+                        signal: controller.signal,
+                    });
+                    if (!res.ok) {
+                        throw new Error(await res.text());
+                    }
+                    return await res.json();
+                } catch (error) {
+                    lastError = error;
+                    if (attempt + 1 < dashboardFetchAttempts) {
+                        setLastSyncText('Live sync timed out, retrying once…', 'var(--warning)');
+                        await delay(dashboardFetchRetryDelayMs);
+                    }
+                } finally {
+                    window.clearTimeout(timer);
                 }
-                const data = await res.json();
-                renderDashboard(data);
-                const eligible = Number(data && data.pool_summary && data.pool_summary.eligible_accounts || 0);
-                const total = Number(data && data.pool_summary && data.pool_summary.total_accounts || 0);
-                const quarantineTotal = Number(data && data.quarantine && data.quarantine.total || 0);
-                setStatusBadge(eligible > 0 ? 'Online' : 'No Eligible', eligible > 0 ? 'ok' : 'warn');
-                if (eligible === 0 && total > 0) {
-                    setStatusBadge('All Blocked', 'warn');
-                } else if (quarantineTotal > 0) {
-                    setStatusBadge('Warnings', 'warn');
-                }
-            } catch (error) {
-                setStatusBadge('Error', 'error');
-                document.getElementById('provider-pills').innerHTML = '<div class="provider-pill"><strong>status</strong><span>failed to load /status?format=json</span></div>';
             }
+            throw lastError || new Error('failed to load dashboard');
+        }
+
+        async function loadDashboard() {
+            if (dashboardLoadPromise) {
+                return dashboardLoadPromise;
+            }
+            dashboardLoadPromise = (async () => {
+                try {
+                    const data = await fetchDashboardJSON();
+                    renderDashboard(data);
+                    const eligible = Number(data && data.pool_summary && data.pool_summary.eligible_accounts || 0);
+                    const total = Number(data && data.pool_summary && data.pool_summary.total_accounts || 0);
+                    const quarantineTotal = Number(data && data.quarantine && data.quarantine.total || 0);
+                    setStatusBadge(eligible > 0 ? 'Online' : 'No Eligible', eligible > 0 ? 'ok' : 'warn');
+                    if (eligible === 0 && total > 0) {
+                        setStatusBadge('All Blocked', 'warn');
+                    } else if (quarantineTotal > 0) {
+                        setStatusBadge('Warnings', 'warn');
+                    }
+                } catch (error) {
+                    setStatusBadge('Error', 'error');
+                    setLastSyncText('Live sync failed. Retry on focus or via the diagnostics page.', 'var(--danger)');
+                    document.getElementById('provider-pills').innerHTML = '<div class="provider-pill"><strong>status</strong><span>failed to load /status?format=json</span></div>';
+                } finally {
+                    dashboardLoadPromise = null;
+                    scheduleDashboardRefresh();
+                }
+            })();
+            return dashboardLoadPromise;
         }
 
         function switchProvider(provider) {
+            const normalized = normalizeProvider(provider);
+            persistActiveProvider(normalized);
             document.querySelectorAll('.tab-btn').forEach((button) => {
-                button.setAttribute('aria-selected', String(button.dataset.provider === provider));
+                button.setAttribute('aria-selected', String(button.dataset.provider === normalized));
             });
             document.querySelectorAll('.provider-panel').forEach((panel) => {
-                panel.classList.toggle('active', panel.id === 'panel-' + provider);
+                panel.classList.toggle('active', panel.id === 'panel-' + normalized);
             });
         }
 
         function bindTabs() {
             document.querySelectorAll('.tab-btn').forEach((button) => {
                 button.addEventListener('click', () => switchProvider(button.dataset.provider));
+            });
+        }
+
+        function bindDashboardRefresh() {
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'visible') {
+                    void loadDashboard();
+                }
+            });
+            window.addEventListener('focus', () => {
+                void loadDashboard();
             });
         }
 
@@ -2449,7 +3069,6 @@ export ANTHROPIC_API_KEY="local-pool"`;
 `mkdir -p ~/.gemini && echo '{"codeAssistEndpoint": "${BASE_URL}"}' > ~/.gemini/settings.json
 echo "Config written. Add or refresh a Gemini seat from:"
 echo "  ${BASE_URL}/"
-echo "  ${BASE_URL}/status"
 echo 'Then click: Start Gemini Browser Auth'`;
 
             document.getElementById('gemini-config').textContent =
@@ -2581,7 +3200,7 @@ opencode run -m codex-pool/gemini-3.1-pro-high "Reply with exactly OK."
                     if (result) {
                         result.style.display = 'block';
                     }
-                    window.location.reload();
+                    void loadDashboard();
                 }, 850);
             } catch (error) {
                 if (button) {
@@ -2795,7 +3414,9 @@ opencode run -m codex-pool/gemini-3.1-pro-high "Reply with exactly OK."
                     status.style.color = 'var(--success)';
                     status.textContent = 'Stored ' + accountID + '. Health: ' + healthStatus + (healthError ? ' (' + healthError + ')' : '') + '. Reloading status...';
                 }
-                window.setTimeout(() => window.location.reload(), 900);
+                window.setTimeout(() => {
+                    void loadDashboard();
+                }, 900);
             } catch (error) {
                 status.style.color = 'var(--danger)';
                 status.textContent = 'Failed to add API key: ' + (error && error.message ? error.message : error);
@@ -2853,7 +3474,9 @@ opencode run -m codex-pool/gemini-3.1-pro-high "Reply with exactly OK."
                     status.style.color = 'var(--success)';
                     status.textContent = 'Stored ' + accountID + '. Health: ' + healthStatus + (healthError ? ' (' + healthError + ')' : '') + '. Reloading status...';
                 }
-                window.setTimeout(() => window.location.reload(), 900);
+                window.setTimeout(() => {
+                    void loadDashboard();
+                }, 900);
             } catch (error) {
                 status.style.color = 'var(--danger)';
                 status.textContent = 'Failed to add GitLab token: ' + (error && error.message ? error.message : error);
@@ -3010,7 +3633,7 @@ opencode run -m codex-pool/gemini-3.1-pro-high "Reply with exactly OK."
                     if (result) {
                         result.style.display = 'block';
                     }
-                    window.location.reload();
+                    void loadDashboard();
                 }, 850);
             } catch (error) {
                 if (button) {
@@ -3243,7 +3866,9 @@ opencode run -m codex-pool/gemini-3.1-pro-high "Reply with exactly OK."
                         ? kind + ' ' + label + ' was already gone. Reloading status...'
                         : 'Deleted ' + kind + ' ' + label + '. Reloading status...';
                 }
-                window.setTimeout(() => window.location.reload(), 700);
+                window.setTimeout(() => {
+                    void loadDashboard();
+                }, 700);
             } catch (error) {
                 if (status) {
                     status.style.color = 'var(--danger)';
@@ -3292,8 +3917,11 @@ opencode run -m codex-pool/gemini-3.1-pro-high "Reply with exactly OK."
         window.addEventListener('message', codexOAuthHandleMessage);
         document.addEventListener('DOMContentLoaded', () => {
             bindTabs();
+            bindDashboardRefresh();
+            switchProvider(readActiveProvider());
+            setMobileSectionDefaults();
             populateSetupSnippets();
-            loadDashboard();
+            void loadDashboard();
         });
     </script>
 </body>

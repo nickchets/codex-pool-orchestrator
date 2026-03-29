@@ -1736,3 +1736,47 @@
   - `/home/lap/.root_layer/codex_pool/backups/manual_dead_probe_20260328T151446Z/current_access_recheck_20260328T160819Z.json`
 - Notes
   - `workspac_5` and the other archived dead files were no longer present under the active `pool/codex` directory at rollout time, so this wave did not silently resurrect archived material back into the live intake set. The code path is fixed; restoring any archived seat is now an explicit operator decision instead of an accidental side effect.
+
+### 2026-03-28T18:01:17Z | REPO-CPO-UX-P3-T59 screenshot-first UI audit handoff
+- Commands
+  - `cd /home/lap/projects/codex-pool-orchestrator && rg -n 'REPO-CPO-UX-P3-T59|DIR-20260328-040|STATUS_UI_AUDIT_TZ_20260328|dashboard-first|/status' ACTION_PLAN.md PROJECT_MANIFEST.md docs/STATUS_UI_AUDIT_TZ_20260328.ru.md`
+  - `sed -n '1,200p' /home/lap/projects/codex-pool-orchestrator/docs/STATUS_UI_AUDIT_HANDOFF_20260328.ru.md`
+- Result
+  - PASS
+  - Repo-local SSOT now exposes one bounded next wave for the `/` + `/status` UX discussion: `REPO-CPO-UX-P3-T59` owns the screenshot-first audit/spec and points at a concrete handoff packet instead of an implied follow-up.
+  - The handoff keeps the semantic contract intact: landing tabs and summary blocks belong on `/`, dense deep-ops detail stays on `/status`, and `/status?format=json` remains the runtime truth surface.
+  - This is successor-hydration evidence, not UI implementation proof. The next wave still needs the screenshot bundle, IA matrix, mismatch list, target IA sketch, and phased implementation slices.
+- Artifacts
+  - `/home/lap/projects/codex-pool-orchestrator/ACTION_PLAN.md`
+  - `/home/lap/projects/codex-pool-orchestrator/PROJECT_MANIFEST.md`
+  - `/home/lap/projects/codex-pool-orchestrator/docs/STATUS_UI_AUDIT_TZ_20260328.ru.md`
+  - `/home/lap/projects/codex-pool-orchestrator/docs/STATUS_UI_AUDIT_HANDOFF_20260328.ru.md`
+- Notes
+  - Root handoff stays on `ROOT-E30-S1-T6`; this pass did not implement the UI, it only made the next repo-local slice explicit and readable.
+
+### 2026-03-29T07:12:44Z | REPO-CPO-UX-P3-T59 closure wave (`0.9.0`)
+- Commands
+  - `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 300s ./...`
+  - `cd /home/lap/projects/codex-pool-orchestrator && go build ./...`
+  - `systemctl --user restart codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `curl -fsS http://127.0.0.1:8989/status?format=json | jq '{pool_summary:.pool_summary,gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="codex" or .type=="gemini")|{id,type,routing:.routing,last_refresh_at,primary_reset_in,secondary_reset_in}]}'`
+  - `chromium --headless --disable-gpu --hide-scrollbars --window-size=1440,2200 --virtual-time-budget=6000 --screenshot=/home/lap/projects/codex-pool-orchestrator/screenshots/status-ui-audit-20260329/landing-desktop.png http://127.0.0.1:8989/`
+  - `chromium --headless --disable-gpu --hide-scrollbars --window-size=430,2200 --virtual-time-budget=6000 --screenshot=/home/lap/projects/codex-pool-orchestrator/screenshots/status-ui-audit-20260329/landing-mobile.png http://127.0.0.1:8989/`
+  - `chromium --headless --disable-gpu --dump-dom --virtual-time-budget=6000 http://127.0.0.1:8989/ > /tmp/cpo_landing_dom_20260329.html`
+  - `rg -n 'Quota Snapshot|updated [0-9]|5h reset|7d reset|metric-card-identity' /tmp/cpo_landing_dom_20260329.html`
+- Result
+  - PASS
+  - Full repo-local `go test ./...` and `go build ./...` passed on the dirty closure tree before publish cleanup.
+  - The restarted local service came back healthy on `127.0.0.1:8989`, and `/status?format=json` kept exposing the runtime fields needed for the landing quota snapshot (`last_refresh_at`, `primary_reset_in`, `secondary_reset_in`).
+  - Live landing proof after restart showed the intended operator-facing changes: Codex `Routing Focus` cards render long seat identities without overflow, and the Codex accounts table now exposes explicit `Quota Snapshot` freshness/reset timing.
+  - The same closure wave also shipped broader Gemini model exposure for OpenCode while preserving `codex-pool/gemini-3.1-pro-high` as default, and Codex selector tests now cover refreshable expired sticky seats plus highest-tier fallback behavior.
+- Artifacts
+  - `/home/lap/projects/codex-pool-orchestrator/docs/STATUS_UI_AUDIT_REPORT_20260329.ru.md`
+  - `/home/lap/projects/codex-pool-orchestrator/screenshots/status-ui-audit-20260329/landing-desktop.png`
+  - `/home/lap/projects/codex-pool-orchestrator/screenshots/status-ui-audit-20260329/landing-mobile.png`
+  - `/home/lap/projects/codex-pool-orchestrator/CHANGELOG.md`
+  - `/home/lap/projects/codex-pool-orchestrator/docs/CHANGELOG.ru.md`
+  - `/home/lap/projects/codex-pool-orchestrator/VERSION`
+- Notes
+  - The raw DOM dump was used only as a smoke verifier for the rendered client-side table and was not kept as a tracked repo artifact.

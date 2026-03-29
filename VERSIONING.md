@@ -81,3 +81,4 @@ Optional git metadata may be attached in release automation only, for example:
 - `0.8.5`: proactive Gemini provider-truth refresh and truthful cooldown health projection
 - `0.8.6`: Codex refresh-invalid health truth, deterministic sticky Codex seat selection, and canonical browser-auth Gemini/OpenCode operator cleanup
 - `0.8.7`: source-level follow-up that restores the canonical `/operator/gemini/oauth-start` browser-auth route in the published tree
+- `0.9.0`: screenshot-first operator-surface cleanup, diagnostics-only `/status`, broader exported Gemini model catalog, and Codex sticky/fallback follow-through for refreshable seats

@@ -9,6 +9,16 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.9.0] - 2026-03-29
+
+### Changed
+- The local operator contract now treats `/` as the canonical onboarding/dashboard surface, while `/status` is explicitly the read-only diagnostics page backed by the same `/status?format=json` truth.
+- The landing page now keeps long Codex seat identities readable, exposes a dedicated `Quota Snapshot` view with freshness and reset timing, and keeps OpenCode on `codex-pool/gemini-3.1-pro-high` while exporting the broader live Gemini model catalog.
+
+### Fixed
+- Refreshable expired Codex seats no longer fall out of sticky reuse or best-seat fallback solely because the current access token is expired; fallback now preserves the highest eligible tier instead of draining lower-headroom seats first.
+- The screenshot-first closure wave is now publishable as repo-local SSOT instead of temp-only proof: release docs/evidence point at permanent `screenshots/status-ui-audit-20260329/` artifacts rather than `.tmp` leftovers.
+
 ## [0.8.7] - 2026-03-28
 
 ### Fixed

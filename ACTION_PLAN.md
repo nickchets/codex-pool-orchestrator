@@ -27,6 +27,20 @@ _None._
 
 ### DONE
 
+#### REPO-CPO-UX-P3-T59: Close the screenshot-first `/` + `/status` tail and publish the follow-through
+1. The screenshot-first IA follow-up is no longer just a handoff note. The repo now carries the original audit brief, the handoff packet, and a concrete closure report that maps landing summary vs diagnostics detail without inventing a second truth model outside `/status?format=json`.
+2. The first implementation slice from that audit is live on the running pool: long Codex seat identities no longer blow up `Routing Focus`, the landing exposes explicit Codex `Quota Snapshot` freshness/reset timing, and `/status` is framed as a read-only diagnostics surface rather than a second onboarding/dashboard hybrid.
+3. The same closure wave also tightened the adjacent client/runtime tail that was still visible in the operator surfaces: OpenCode keeps `codex-pool/gemini-3.1-pro-high` as the canonical default while exporting a broader Gemini model catalog, and Codex sticky selection now keeps refreshable expired seats and highest-tier fallback behavior instead of ejecting them prematurely.
+
+Completion note (2026-03-29):
+- Done: the screenshot-first docs are now repo-local SSOT artifacts instead of loose notes. `docs/STATUS_UI_AUDIT_TZ_20260328.ru.md`, `docs/STATUS_UI_AUDIT_HANDOFF_20260328.ru.md`, and `docs/STATUS_UI_AUDIT_REPORT_20260329.ru.md` describe the audit inputs, mismatch list, target IA split, and the bounded implementation slice that actually landed.
+- Done: the landing/status implementation wave is live and regression-covered. `templates/local_landing.html` now renders identity-safe Codex routing cards plus a `Quota Snapshot` column, while `status.go` / `status_dashboard_test.go` keep `/status` explicitly diagnostics-only and read-only.
+- Done: OpenCode/Gemini contract cleanup is part of the same published repo-local slice. The exported provider model set now includes the broader Gemini catalog, but low/direct Gemini requests no longer inherit the `gemini-3.1-pro-high` forced Anthropic thinking/stream behavior.
+- Done: Codex selector follow-through is closed in the same tree. Sticky/active Codex seats with refreshable expired access tokens stay eligible, and Codex fallback keeps the highest available tier instead of the older threshold-bucket drain.
+- Done: release metadata is synchronized for minor publish `0.9.0`; `VERSION`, `CHANGELOG.md`, `docs/CHANGELOG.ru.md`, `README.md`, and repo-local board/evidence all describe the same wave.
+
+**Verify hook:** `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 300s ./... && go build ./... && systemctl --user restart codex-pool.service && curl -fsS http://127.0.0.1:8989/healthz && curl -fsS http://127.0.0.1:8989/status?format=json | jq '{pool_summary:.pool_summary,gemini_pool:.gemini_pool,accounts:[.accounts[]|select(.type=="codex" or .type=="gemini")|{id,type,routing:.routing,last_refresh_at,primary_reset_in,secondary_reset_in}]}' && rg -n 'Quota Snapshot|gemini-3.1-pro-low|Pool Diagnostics|REPO-CPO-UX-P3-T59|0.9.0' ACTION_PLAN.md PROJECT_MANIFEST.md README.md CHANGELOG.md docs/CHANGELOG.ru.md docs/STATUS_UI_AUDIT_REPORT_20260329.ru.md templates/local_landing.html status.go`
+
 #### REPO-CPO-ARCH-P2-T57: Stabilize Gemini admission taxonomy and quarantine dead-source residue
 1. The biggest post-release technical risk is now model-state brittleness, not missing features: `provider_truth`, `operational_truth`, and `routing.state` are correct but spread across a large admission surface that still depends on upstream error-shape heuristics and historical dead seats remaining visible in the same operator picture.
 2. Split degraded-but-live seats, short quota-reset cooldown windows, stale-quota-but-live seats, truly dead/hard-fail seats, and historical source residue into explicit runtime categories with separate quarantine/reporting rules so GitLab/Gemini graveyard entries stop polluting primary operator expectations and client exports.

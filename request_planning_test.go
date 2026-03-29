@@ -127,6 +127,30 @@ func TestPlanRouteOverridesOpenCodeChatCompletionsToGemini(t *testing.T) {
 	}
 }
 
+func TestPlanRouteKeepsOpenCodeChatCompletionsGeminiLowDirect(t *testing.T) {
+	h := newPlanningTestHandler(t)
+	req := httptest.NewRequest("POST", "http://example.com/v1/chat/completions", nil)
+	body := []byte(`{"model":"gemini-3.1-pro-low","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	shape := buildBufferedRequestShape(req, body, nil)
+
+	plan, rewrittenBody, err := h.planRoute(AdmissionResult{Kind: AdmissionKindPoolUser, UserID: "u1"}, req, shape, body)
+	if err != nil {
+		t.Fatalf("plan route: %v", err)
+	}
+	if plan.AccountType != AccountTypeGemini {
+		t.Fatalf("account_type = %q", plan.AccountType)
+	}
+	if plan.UpstreamPath != "/v1beta/models/gemini-3.1-pro-low:streamGenerateContent" {
+		t.Fatalf("upstream_path = %q", plan.UpstreamPath)
+	}
+	if plan.ResponseAdapter != responseAdapterOpenAIChatCompletionsGemini {
+		t.Fatalf("response_adapter = %q", plan.ResponseAdapter)
+	}
+	if !strings.Contains(string(rewrittenBody), `"contents"`) {
+		t.Fatalf("rewritten body = %s", string(rewrittenBody))
+	}
+}
+
 func TestPlanRouteOverridesAnthropicMessagesToGemini(t *testing.T) {
 	h := newPlanningTestHandler(t)
 	req := httptest.NewRequest("POST", "http://example.com/v1/messages", nil)
@@ -149,6 +173,34 @@ func TestPlanRouteOverridesAnthropicMessagesToGemini(t *testing.T) {
 	}
 	if !strings.Contains(string(rewrittenBody), `"contents"`) {
 		t.Fatalf("rewritten body = %s", string(rewrittenBody))
+	}
+}
+
+func TestPlanRouteKeepsAnthropicMessagesGeminiLowDirect(t *testing.T) {
+	h := newPlanningTestHandler(t)
+	req := httptest.NewRequest("POST", "http://example.com/v1/messages", nil)
+	req.Header.Set("X-Api-Key", "pool-token-placeholder")
+	body := []byte(`{"model":"gemini-3.1-pro-low","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	shape := buildBufferedRequestShape(req, body, nil)
+
+	plan, rewrittenBody, err := h.planRoute(AdmissionResult{Kind: AdmissionKindPoolUser, UserID: "u1"}, req, shape, body)
+	if err != nil {
+		t.Fatalf("plan route: %v", err)
+	}
+	if plan.AccountType != AccountTypeGemini {
+		t.Fatalf("account_type = %q", plan.AccountType)
+	}
+	if plan.UpstreamPath != "/v1beta/models/gemini-3.1-pro-low:generateContent" {
+		t.Fatalf("upstream_path = %q", plan.UpstreamPath)
+	}
+	if plan.ResponseAdapter != responseAdapterAnthropicMessagesGeminiStream {
+		t.Fatalf("response_adapter = %q", plan.ResponseAdapter)
+	}
+	if !strings.Contains(string(rewrittenBody), `"contents"`) {
+		t.Fatalf("rewritten body = %s", string(rewrittenBody))
+	}
+	if strings.Contains(string(rewrittenBody), "thinkingConfig") {
+		t.Fatalf("rewritten body should not force thinkingConfig = %s", string(rewrittenBody))
 	}
 }
 

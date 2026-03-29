@@ -203,6 +203,41 @@ func TestPinnedConversationUnpinsAbovePreemptiveThreshold(t *testing.T) {
 	}
 }
 
+func TestPinnedConversationKeepsRefreshableExpiredCodexSeat(t *testing.T) {
+	now := time.Now()
+	sticky := &Account{
+		ID:           "sticky",
+		Type:         AccountTypeCodex,
+		PlanType:     "team",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    now.Add(-time.Minute),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.20,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	healthy := &Account{
+		ID:       "healthy",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.10,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{sticky, healthy}, false)
+	p.pin("conv", sticky.ID)
+
+	got := p.candidate("conv", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != sticky.ID {
+		t.Fatalf("expected pinned refreshable expired codex seat to stay selected, got %+v", got)
+	}
+}
+
 func TestCandidateReusesMostRecentlyUsedEligibleSeat(t *testing.T) {
 	now := time.Now()
 	sticky := &Account{
@@ -234,6 +269,42 @@ func TestCandidateReusesMostRecentlyUsedEligibleSeat(t *testing.T) {
 	got := p.candidate("", nil, AccountTypeCodex, "")
 	if got == nil || got.ID != "sticky" {
 		t.Fatalf("expected most recently used eligible seat, got %+v", got)
+	}
+}
+
+func TestCandidateReusesMostRecentlyUsedRefreshableExpiredCodexSeat(t *testing.T) {
+	now := time.Now()
+	sticky := &Account{
+		ID:           "sticky",
+		Type:         AccountTypeCodex,
+		PlanType:     "team",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    now.Add(-time.Minute),
+		LastUsed:     now.Add(-15 * time.Second),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.20,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	healthy := &Account{
+		ID:       "healthier",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		LastUsed: now.Add(-2 * time.Minute),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.05,
+			SecondaryUsedPercent: 0.05,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{sticky, healthy}, false)
+
+	got := p.candidate("", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != sticky.ID {
+		t.Fatalf("expected refreshable expired codex seat to stay sticky, got %+v", got)
 	}
 }
 
@@ -333,6 +404,44 @@ func TestCandidateKeepsActiveCodexSeatWhileEligible(t *testing.T) {
 	got := p.candidate("", nil, AccountTypeCodex, "")
 	if got == nil || got.ID != "active" {
 		t.Fatalf("expected active codex seat to be reused before LastUsed is populated, got %+v", got)
+	}
+}
+
+func TestCandidateKeepsRefreshableExpiredActiveCodexSeat(t *testing.T) {
+	now := time.Now()
+	active := &Account{
+		ID:           "active",
+		Type:         AccountTypeCodex,
+		PlanType:     "team",
+		RefreshToken: "refresh-token",
+		ExpiresAt:    now.Add(-time.Minute),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.25,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	betterScore := &Account{
+		ID:       "better-score",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.05,
+			SecondaryUsedPercent: 0.05,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{active, betterScore}, false)
+	p.activeCodexID = active.ID
+
+	got := p.candidate("", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != active.ID {
+		t.Fatalf("expected refreshable expired active codex seat to stay selected, got %+v", got)
+	}
+	if p.activeCodexID != active.ID {
+		t.Fatalf("expected active codex seat to stay on refreshable expired seat, got %q", p.activeCodexID)
 	}
 }
 
@@ -1301,6 +1410,78 @@ func TestCandidateRetryPathDoesNotMoveActiveCodexSeat(t *testing.T) {
 	}
 	if activeID != "active" {
 		t.Fatalf("expected retry path to keep prior active seat, got %q", activeID)
+	}
+}
+
+func TestCodexFallbackIgnoresTierThresholdBuckets(t *testing.T) {
+	now := time.Now()
+	underThreshold := &Account{
+		ID:       "under-threshold",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Penalty:  0.90,
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.05,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	betterOverall := &Account{
+		ID:       "better-overall",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.25,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{underThreshold, betterOverall}, false)
+
+	p.mu.Lock()
+	got := p.selectEligibleCandidateMatchingLocked(now, nil, AccountTypeCodex, "", true, true, nil)
+	p.mu.Unlock()
+
+	if got == nil || got.ID != betterOverall.ID {
+		t.Fatalf("expected codex fallback to prefer best overall seat, got %+v", got)
+	}
+}
+
+func TestCodexFallbackKeepsHighestAvailableTier(t *testing.T) {
+	now := time.Now()
+	proSeat := &Account{
+		ID:       "pro-seat",
+		Type:     AccountTypeCodex,
+		PlanType: "pro",
+		Penalty:  0.40,
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.30,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	teamSeat := &Account{
+		ID:       "team-seat",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.05,
+			SecondaryUsedPercent: 0.05,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{proSeat, teamSeat}, false)
+
+	p.mu.Lock()
+	got := p.selectEligibleCandidateMatchingLocked(now, nil, AccountTypeCodex, "", true, true, nil)
+	p.mu.Unlock()
+
+	if got == nil || got.ID != proSeat.ID {
+		t.Fatalf("expected codex fallback to keep highest available tier, got %+v", got)
 	}
 }
 

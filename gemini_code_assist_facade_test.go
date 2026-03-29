@@ -94,13 +94,23 @@ func TestMaybeBuildGeminiCodeAssistFacadeRequestRewritesAntigravityModels(t *tes
 			wantModel: "gemini-3.1-pro-high",
 		},
 		{
-			name:      "gemini 3.1 preview",
-			reqPath:   "/v1beta/models/gemini-3.1-pro-preview:generateContent",
+			name:      "gemini 3.1 high",
+			reqPath:   "/v1beta/models/gemini-3.1-pro-high:generateContent",
 			wantModel: "gemini-3.1-pro-high",
 		},
 		{
-			name:      "gemini 3.1 alias",
-			reqPath:   "/v1beta/models/gemini-3.1-pro:generateContent",
+			name:      "gemini 3.1 low",
+			reqPath:   "/v1beta/models/gemini-3.1-pro-low:generateContent",
+			wantModel: "gemini-3.1-pro-low",
+		},
+		{
+			name:      "gemini 2.5 pro stays direct",
+			reqPath:   "/v1beta/models/gemini-2.5-pro:generateContent",
+			wantModel: "gemini-2.5-pro",
+		},
+		{
+			name:      "gemini 3.1 preview",
+			reqPath:   "/v1beta/models/gemini-3.1-pro-preview:generateContent",
 			wantModel: "gemini-3.1-pro-high",
 		},
 		{

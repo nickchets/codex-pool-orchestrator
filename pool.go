@@ -1507,9 +1507,9 @@ func accountTier(accType AccountType, planType string) int {
 // Selection strategy:
 //  1. Conversation pinning (stickiness) — only unpin at hard limits
 //  2. Reuse the most recently used eligible account for new unpinned work
-//  3. Split remaining eligible accounts into Tier 1 and Tier 2
-//  4. If any Tier 1 account has secondary < tierThreshold → pick from Tier 1
-//  5. Else if any Tier 2 account has secondary < tierThreshold → pick from Tier 2
+//  3. For Codex fallback, pick the best eligible seat from the highest available tier
+//  4. For other providers, split remaining eligible accounts into Tier 1 and Tier 2
+//  5. Prefer accounts under tierThreshold within the best tier
 //  6. Else → pick from all accounts with most headroom
 //  7. Within a tier, use score as tiebreaker (headroom, drain urgency, recency, inflight)
 func (p *poolState) candidate(conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string) *Account {
@@ -1571,7 +1571,7 @@ func (p *poolState) pinnedEligibleCandidateLocked(now time.Time, conversationID 
 		log.Printf("ignoring rate limit for codex account %s (until %s)",
 			id, a.RateLimitUntil.Format(time.RFC3339))
 	}
-	if ok && !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now) {
+	if ok && authExpiryBlocksStickySelectionLocked(a, now) {
 		ok = false
 		if p.debug {
 			log.Printf("unpinning conversation %s from expired account %s",
@@ -1657,6 +1657,18 @@ func (p *poolState) activeGeminiCandidateLocked(now time.Time, exclude map[strin
 	return a
 }
 
+func authExpiryBlocksStickySelectionLocked(a *Account, now time.Time) bool {
+	if a == nil || a.ExpiresAt.IsZero() || !a.ExpiresAt.Before(now) {
+		return false
+	}
+	// Local Codex seats refresh on demand when access tokens are expired, so expiry
+	// alone should not eject the active/sticky seat ahead of the hard 10% routing gate.
+	if a.Type == AccountTypeCodex && strings.TrimSpace(a.RefreshToken) != "" {
+		return false
+	}
+	return true
+}
+
 func (p *poolState) activeCodexCandidateLocked(now time.Time, exclude map[string]bool, requiredPlan string, managed bool) *Account {
 	activeID := p.activeCodexID
 	if managed {
@@ -1676,9 +1688,8 @@ func (p *poolState) activeCodexCandidateLocked(now time.Time, exclude map[string
 	}
 
 	a.mu.Lock()
-	expired := !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now)
 	routing := routingStateLocked(a, now, AccountTypeCodex, requiredPlan)
-	ok := routing.Eligible && !expired && (isManagedCodexAPIKeyAccount(a) == managed)
+	ok := routing.Eligible && !authExpiryBlocksStickySelectionLocked(a, now) && (isManagedCodexAPIKeyAccount(a) == managed)
 	a.mu.Unlock()
 	if !ok {
 		p.clearActiveCodexSeatLocked(managed)
@@ -1709,9 +1720,8 @@ func (p *poolState) stickyEligibleCandidateMatchingLocked(now time.Time, exclude
 
 		a.mu.Lock()
 		lastUsed := a.LastUsed
-		expired := !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now)
 		routing := routingStateLocked(a, now, accountType, requiredPlan)
-		ok := routing.Eligible && !expired && !lastUsed.IsZero()
+		ok := routing.Eligible && !authExpiryBlocksStickySelectionLocked(a, now) && !lastUsed.IsZero()
 		if ok && (sticky == nil || lastUsed.After(stickyLastUsed)) {
 			sticky = a
 			stickyLastUsed = lastUsed
@@ -1807,6 +1817,33 @@ func (p *poolState) selectEligibleCandidateMatchingLocked(now time.Time, exclude
 	}
 
 	if len(eligible) == 0 {
+		return nil
+	}
+
+	if accountType == AccountTypeCodex {
+		bestTier := 0
+		for i := range eligible {
+			sa := &eligible[i]
+			if bestTier == 0 || sa.tier < bestTier {
+				bestTier = sa.tier
+			}
+		}
+		var bestTierSeat *scoredAccount
+		for i := range eligible {
+			sa := &eligible[i]
+			if sa.tier != bestTier {
+				continue
+			}
+			if bestTierSeat == nil || betterScoredAccount(sa, bestTierSeat) {
+				bestTierSeat = sa
+			}
+		}
+		if bestTierSeat != nil {
+			if advanceRR && !stableOrder {
+				p.rr++
+			}
+			return bestTierSeat.acc
+		}
 		return nil
 	}
 

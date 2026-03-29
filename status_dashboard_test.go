@@ -1339,8 +1339,8 @@ func TestServeStatusPageClarifiesQuotaVsLocalFields(t *testing.T) {
 	}
 	body := rr.Body.String()
 	for _, fragment := range []string{
-		"Current Active Seat",
-		"No live request is active right now.",
+		"Diagnostics Surface",
+		"Return to Dashboard",
 		"Remaining (5h)",
 		"Remaining (7d)",
 		"healthy seats routable",
@@ -1499,7 +1499,7 @@ func TestServeStatusPageIncludesGeminiQuotaModelRows(t *testing.T) {
 		"protected",
 		"recommended",
 		"Gemini 2.5 Flash",
-		"seat not ready: ACCOUNT_NEEDS_WORKSPACE",
+		"workspace validation required",
 		"quota catalog only; Anthropic-compatible adapter is not implemented",
 		"max 1048576",
 		"max out 65535",
@@ -3691,7 +3691,7 @@ func TestServeStatusPageIncludesQuarantineStatus(t *testing.T) {
 	}
 }
 
-func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
+func TestServeStatusPageUsesDiagnosticsSurfaceForLocalLoopback(t *testing.T) {
 	setGeminiOAuthTestProfiles(t)
 
 	now := time.Date(2026, 3, 19, 13, 0, 0, 0, time.UTC)
@@ -3723,6 +3723,20 @@ func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 	}
 	body := rr.Body.String()
 	for _, fragment := range []string{
+		"Pool Diagnostics",
+		"Diagnostics Surface",
+		"read-only and diagnostic-heavy",
+		"Return to Dashboard",
+		"Status JSON",
+		"Health check",
+		"🪑 Seats",
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("missing fragment %q in body", fragment)
+		}
+	}
+	for _, forbidden := range []string{
+		"Import oauth_creds.json",
 		"Start Codex OAuth",
 		"Fallback API Pool",
 		"Gemini Browser Auth",
@@ -3746,17 +3760,6 @@ func TestServeStatusPageIncludesOperatorActionForLocalLoopback(t *testing.T) {
 		"Timed out waiting for the Gemini Browser Auth seat state to change.",
 		"codex-oauth-result",
 		"gemini_oauth_result",
-		"auth_expires_at",
-		"last_refresh_at",
-	} {
-		if !strings.Contains(body, fragment) {
-			t.Fatalf("missing fragment %q in body", fragment)
-		}
-	}
-	for _, forbidden := range []string{
-		"Manual Gemini Import",
-		"Import oauth_creds.json",
-		"gemini-seat-json-input",
 		"/operator/gemini/import-oauth-creds",
 		"noopener noreferrer",
 		"auth_expires_in || ''",
@@ -3798,6 +3801,15 @@ func TestServeStatusPageHidesOperatorActionOutsideLoopback(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	body := rr.Body.String()
+	for _, fragment := range []string{
+		"Pool Diagnostics",
+		"Diagnostics Surface",
+		"Return to Dashboard",
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("missing fragment %q in body", fragment)
+		}
+	}
 	for _, forbidden := range []string{
 		"Import Gemini",
 		"Start Codex OAuth",

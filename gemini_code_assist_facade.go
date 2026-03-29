@@ -87,7 +87,12 @@ func rewriteGeminiCodeAssistFacadeModel(model string) string {
 }
 
 func shouldUseAntigravityGeminiCodeAssistBaseFallback(model string) bool {
-	return strings.HasPrefix(strings.TrimSpace(model), "gemini-3.1-pro")
+	switch strings.TrimSpace(model) {
+	case "gemini-3.1-pro", "gemini-3.1-pro-high", "gemini-3.1-pro-preview":
+		return true
+	default:
+		return false
+	}
 }
 
 func maybeBuildGeminiCodeAssistFacadeRequest(ctx context.Context, provider Provider, reqPath string, bodyBytes []byte, acc *Account, reqID string) (*geminiCodeAssistFacadeRequest, error) {

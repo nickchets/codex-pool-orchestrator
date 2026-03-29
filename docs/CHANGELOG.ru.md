@@ -8,6 +8,16 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.9.0] - 2026-03-29
+
+### Изменено
+- Локальный operator contract теперь считает `/` канонической onboarding/dashboard surface, а `/status` закреплен как read-only diagnostics page, работающая от того же `/status?format=json` truth.
+- Landing теперь корректно держит длинные Codex seat identity, показывает отдельный `Quota Snapshot` с freshness/reset timing и оставляет OpenCode на `codex-pool/gemini-3.1-pro-high`, одновременно экспортируя более полный live Gemini model catalog.
+
+### Исправлено
+- Refreshable expired Codex seat'ы больше не выпадают из sticky reuse и best-seat fallback только из-за expired access token; fallback теперь сохраняет highest eligible tier вместо прежнего более равномерного drain по слабым seat'ам.
+- Screenshot-first closure wave больше не висит на temp-only proof: release docs/evidence теперь ссылаются на постоянные артефакты `screenshots/status-ui-audit-20260329/`, а не на `.tmp`-хвосты.
+
 ## [0.8.7] - 2026-03-28
 
 ### Исправлено

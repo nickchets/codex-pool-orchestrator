@@ -21,7 +21,7 @@ Or maybe you want to pool accounts with friends - everyone throws their accounts
 - Auto-refreshes tokens before they expire
 - Proxies WebSocket upgrades (including Codex Responses WS and realtime `/ws` flows)
 - Tracks usage so you can see who's burning through quota
-- Exposes a dashboard-first operator surface on `/` and `/status`
+- Exposes a dashboard-first operator surface on `/` plus read-only diagnostics on `/status`
 
 ---
 
@@ -30,11 +30,11 @@ Or maybe you want to pool accounts with friends - everyone throws their accounts
 The operator UI is dashboard-first:
 
 - `/` shows live `Codex`, `Claude`, and `Gemini` dashboards
-- `/status` exposes the raw operator dashboard and JSON status contract
+- `/status` exposes the read-only diagnostics surface and JSON status contract
 - account onboarding and delete actions are available from the web surface
 - fallback API keys and GitLab Claude tokens are managed from the same operator surface
-- Gemini seat onboarding on `/` and `/status` is browser-first via the shared pool auth flow
-- OpenCode via `codex-pool/gemini-3.1-pro-high` is the canonical Gemini client path after seat onboarding
+- Gemini seat onboarding starts from `/` via the shared pool auth flow; `/status` stays diagnostics-only
+- OpenCode via `codex-pool/gemini-3.1-pro-high` is the canonical Gemini client path after seat onboarding; the exported provider also surfaces `gemini-3.1-pro-low` and other live quota-backed Gemini models when available
 - older local/manual Gemini import paths are intentionally not exposed on the operator surface anymore
 
 Friends mode still exists, but the local documentation and operator flow are intentionally text-first and dashboard-first instead of screenshot-driven.
@@ -68,7 +68,7 @@ pool/
 
 For Gemini seats, use the operator dashboard:
 
-1. Open `http://<pool-host>/` or `http://<pool-host>/status`
+1. Open `http://<pool-host>/`
 2. In the Gemini operator panel, click `Start Gemini Browser Auth`
 3. Complete Google sign-in; the dashboard resolves the Code Assist project and stores the seat through the shared Gemini pool
 
@@ -112,6 +112,8 @@ opencode run -m codex-pool/gemini-3.1-pro-high "Reply with exactly OK."
 ```
 
 The setup URL writes `~/.config/opencode/opencode.json` plus `~/.config/opencode/pool-gemini-accounts.json`, keeps the proxy base URL normalized to `/v1`, and exports `model = codex-pool/gemini-3.1-pro-high`. This is still Gemini through the pool, not a Claude provider switch.
+
+The default stays on `codex-pool/gemini-3.1-pro-high`, but the exported provider model catalog also includes `gemini-3.1-pro-low` and the broader live Gemini quota surface from the pool so OpenCode can stay aligned with what the runtime actually exposes.
 
 The tokenized `/setup/opencode/...` URL returns an installer script. If you want the raw JSON bundle instead, use the matching tokenized `/config/opencode/...` URL.
 
@@ -201,7 +203,7 @@ curl -fsS http://<pool-host>/status?format=json | jq .
 systemctl --user status codex-pool.service --no-pager
 ```
 
-The preferred add-account path is the `/` or `/status` web button. The `/` page is intended to be an operator dashboard, not a decorative landing page.
+The preferred add-account path is the `/` web surface. `/status` is intentionally diagnostics-only, while `/` stays the operator dashboard rather than a decorative landing page.
 
 Current tracked version is stored in `VERSION`. Fork-specific release history lives in
 `CHANGELOG.md`, and version bump rules live in `VERSIONING.md`.

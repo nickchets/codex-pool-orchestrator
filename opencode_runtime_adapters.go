@@ -258,11 +258,11 @@ func buildGeminiGenerationConfigCompat(maxTokens int, temperature, topP *float64
 }
 
 func shouldForceAnthropicGeminiStreamTransport(model string) bool {
-	return strings.HasPrefix(strings.TrimSpace(model), "gemini-3.1-pro")
+	return strings.TrimSpace(model) == "gemini-3.1-pro-high"
 }
 
 func defaultAnthropicGeminiThinkingBudget(model string) int {
-	if strings.HasPrefix(strings.TrimSpace(model), "gemini-3.1-pro") {
+	if strings.TrimSpace(model) == "gemini-3.1-pro-high" {
 		return geminiAnthropicThinkingBudgetHigh
 	}
 	return 0

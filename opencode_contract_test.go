@@ -89,6 +89,27 @@ func TestBuildOpenCodeConfigBundle(t *testing.T) {
 		t.Fatalf("apiKey mismatch")
 	}
 	models := provider["models"].(map[string]any)
+	for _, want := range []string{
+		"gemini-2.5-flash",
+		"gemini-2.5-flash-lite",
+		"gemini-2.5-flash-thinking",
+		"gemini-2.5-pro",
+		"gemini-3-flash",
+		"gemini-3-flash-agent",
+		"gemini-3-pro-high",
+		"gemini-3-pro-low",
+		"gemini-3-pro-preview",
+		"gemini-3.1-flash-image",
+		"gemini-3.1-flash-lite",
+		"gemini-3.1-pro",
+		"gemini-3.1-pro-high",
+		"gemini-3.1-pro-low",
+		"gemini-3.1-pro-preview",
+	} {
+		if _, ok := models[want]; !ok {
+			t.Fatalf("models missing %q: %#v", want, models)
+		}
+	}
 	model := models["claude-3-7-sonnet"].(map[string]any)
 	if model["name"] != "Claude via Gemini" {
 		t.Fatalf("model.name = %#v", model["name"])

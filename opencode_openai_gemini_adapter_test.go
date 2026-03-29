@@ -31,6 +31,27 @@ func TestMaybeBuildOpenAIChatCompletionsGeminiRequest(t *testing.T) {
 	}
 }
 
+func TestMaybeBuildOpenAIChatCompletionsGeminiRequestKeepsGemini31LowDirect(t *testing.T) {
+	body := []byte(`{"model":"gemini-3.1-pro-low","messages":[{"role":"user","content":"hello"}],"max_tokens":96,"stream":true}`)
+	path, rewritten, adapter, isStream, err := maybeBuildOpenAIChatCompletionsGeminiRequest("/v1/chat/completions", "gemini-3.1-pro-low", body)
+	if err != nil {
+		t.Fatalf("adapter request: %v", err)
+	}
+	if path != "/v1beta/models/gemini-3.1-pro-low:streamGenerateContent" {
+		t.Fatalf("path = %q", path)
+	}
+	if adapter != responseAdapterOpenAIChatCompletionsGemini {
+		t.Fatalf("adapter = %q", adapter)
+	}
+	if !isStream {
+		t.Fatal("expected stream")
+	}
+	text := string(rewritten)
+	if !strings.Contains(text, `"maxOutputTokens":96`) {
+		t.Fatalf("rewritten body missing maxOutputTokens: %s", text)
+	}
+}
+
 func TestMaybeBuildAnthropicMessagesGeminiRequest(t *testing.T) {
 	body := []byte(`{"model":"gemini-3.1-pro","system":"sys","messages":[{"role":"user","content":[{"type":"text","text":"hello"}]}],"max_tokens":123,"top_p":0.7,"stream":true}`)
 	path, rewritten, adapter, isStream, err := maybeBuildAnthropicMessagesGeminiRequest("/v1/messages", "gemini-3.1-pro", body)
@@ -81,6 +102,30 @@ func TestMaybeBuildAnthropicMessagesGeminiRequestForcesStreamTransportForGemini3
 		if !strings.Contains(text, want) {
 			t.Fatalf("rewritten body missing %q: %s", want, text)
 		}
+	}
+}
+
+func TestMaybeBuildAnthropicMessagesGeminiRequestKeepsGemini31LowDirect(t *testing.T) {
+	body := []byte(`{"model":"gemini-3.1-pro-low","messages":[{"role":"user","content":"hello"}],"max_tokens":64}`)
+	path, rewritten, adapter, isStream, err := maybeBuildAnthropicMessagesGeminiRequest("/v1/messages", "gemini-3.1-pro-low", body)
+	if err != nil {
+		t.Fatalf("adapter request: %v", err)
+	}
+	if path != "/v1beta/models/gemini-3.1-pro-low:generateContent" {
+		t.Fatalf("path = %q", path)
+	}
+	if adapter != responseAdapterAnthropicMessagesGemini {
+		t.Fatalf("adapter = %q", adapter)
+	}
+	if isStream {
+		t.Fatal("expected non-stream client mode")
+	}
+	text := string(rewritten)
+	if strings.Contains(text, "thinkingConfig") {
+		t.Fatalf("rewritten body should not force thinkingConfig: %s", text)
+	}
+	if !strings.Contains(text, `"maxOutputTokens":64`) {
+		t.Fatalf("rewritten body missing maxOutputTokens: %s", text)
 	}
 }
 

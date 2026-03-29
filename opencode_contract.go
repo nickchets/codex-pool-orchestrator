@@ -62,8 +62,35 @@ func defaultOpenCodeProviderModels() map[string]any {
 		"gemini-2.5-flash": map[string]any{
 			"name": "Gemini 2.5 Flash",
 		},
+		"gemini-2.5-flash-lite": map[string]any{
+			"name": "Gemini 2.5 Flash Lite",
+		},
+		"gemini-2.5-flash-thinking": map[string]any{
+			"name": "Gemini 2.5 Flash Thinking",
+		},
+		"gemini-2.5-pro": map[string]any{
+			"name": "Gemini 2.5 Pro",
+		},
 		"gemini-3-flash": map[string]any{
 			"name": "Gemini 3 Flash",
+		},
+		"gemini-3-flash-agent": map[string]any{
+			"name": "Gemini 3 Flash Agent",
+		},
+		"gemini-3-pro-high": map[string]any{
+			"name": "Gemini 3 Pro High",
+		},
+		"gemini-3-pro-low": map[string]any{
+			"name": "Gemini 3 Pro Low",
+		},
+		"gemini-3-pro-preview": map[string]any{
+			"name": "Gemini 3 Pro Preview",
+		},
+		"gemini-3.1-flash-image": map[string]any{
+			"name": "Gemini 3.1 Flash Image",
+		},
+		"gemini-3.1-flash-lite": map[string]any{
+			"name": "Gemini 3.1 Flash Lite",
 		},
 		"gemini-3.1-pro": map[string]any{
 			"name": "Gemini 3.1 Pro",
