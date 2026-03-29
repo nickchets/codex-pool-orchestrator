@@ -228,3 +228,67 @@ func TestRequestTraceKeepsUsageSSEPayloadSamples(t *testing.T) {
 		t.Fatalf("missing usage payload sample: %s", logs)
 	}
 }
+
+func TestFinalizeCopiedProxyResponseTreatsClaudePingTailCutoffAsSuccess(t *testing.T) {
+	h := &proxyHandler{cfg: config{}}
+	acc := &Account{ID: "claude_gitlab_test", Type: AccountTypeClaude, AuthMode: accountAuthModeGitLab}
+
+	ok := h.finalizeCopiedProxyResponse(
+		"req-claude-tail",
+		nil,
+		NewClaudeProvider(mustParse("https://api.anthropic.com")),
+		acc,
+		"user-1",
+		http.StatusOK,
+		true,
+		false,
+		"",
+		0,
+		0,
+		nil,
+		&claudePingTailCutoffError{
+			accountID:       acc.ID,
+			stalledFor:      21 * time.Second,
+			timeout:         18 * time.Second,
+			lastNonPingType: "content_block_delta",
+		},
+		true,
+		time.Now(),
+		"done",
+	)
+	if !ok {
+		t.Fatal("expected ping tail cutoff to be treated as success")
+	}
+}
+
+func TestFinalizeCopiedProxyResponseDoesNotTreatClaudePingTailCutoffAsSuccessForNonGitLab(t *testing.T) {
+	h := &proxyHandler{cfg: config{}}
+	acc := &Account{ID: "claude_oauth_test", Type: AccountTypeClaude, AuthMode: accountAuthModeOAuth}
+
+	ok := h.finalizeCopiedProxyResponse(
+		"req-claude-tail",
+		nil,
+		NewClaudeProvider(mustParse("https://api.anthropic.com")),
+		acc,
+		"user-1",
+		http.StatusOK,
+		true,
+		false,
+		"",
+		0,
+		0,
+		nil,
+		&claudePingTailCutoffError{
+			accountID:       acc.ID,
+			stalledFor:      21 * time.Second,
+			timeout:         18 * time.Second,
+			lastNonPingType: "content_block_delta",
+		},
+		true,
+		time.Now(),
+		"done",
+	)
+	if ok {
+		t.Fatal("expected non-GitLab Claude cutoff to remain an error")
+	}
+}

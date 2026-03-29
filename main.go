@@ -41,26 +41,27 @@ type config struct {
 	disableRefresh  bool
 	refreshProxyURL string // HTTP proxy URL for refresh operations
 
-	debug                bool
-	logBodies            bool
-	bodyLogLimit         int64
-	traceRequests        bool
-	tracePackets         bool
-	tracePayloads        bool
-	tracePayloadLimit    int
-	traceStallGap        time.Duration
-	maxInMemoryBodyBytes int64
-	flushInterval        time.Duration
-	usageRefresh         time.Duration
-	maxAttempts          int
-	storePath            string
-	retentionDays        int
-	friendCode           string
-	adminToken           string
-	requestTimeout       time.Duration // Timeout for non-streaming requests (0 = no timeout)
-	streamTimeout        time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
-	streamIdleTimeout    time.Duration // Kill SSE streams idle for this long (0 = no idle timeout)
-	tierThreshold        float64       // Secondary usage % at which we stop preferring a tier (default 0.15)
+	debug                 bool
+	logBodies             bool
+	bodyLogLimit          int64
+	traceRequests         bool
+	tracePackets          bool
+	tracePayloads         bool
+	tracePayloadLimit     int
+	traceStallGap         time.Duration
+	maxInMemoryBodyBytes  int64
+	flushInterval         time.Duration
+	usageRefresh          time.Duration
+	maxAttempts           int
+	storePath             string
+	retentionDays         int
+	friendCode            string
+	adminToken            string
+	requestTimeout        time.Duration // Timeout for non-streaming requests (0 = no timeout)
+	streamTimeout         time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
+	streamIdleTimeout     time.Duration // Kill SSE streams idle for this long (0 = no idle timeout)
+	claudePingTailTimeout time.Duration // Cut GitLab Claude SSE tails that degrade into ping-only keepalives after useful output
+	tierThreshold         float64       // Secondary usage % at which we stop preferring a tier (default 0.15)
 }
 
 func getenv(key, def string) string {
@@ -186,6 +187,12 @@ func buildConfig() config {
 	if v := getenv("STREAM_IDLE_TIMEOUT_SECONDS", ""); v != "" {
 		if n, err := parseInt64(v); err == nil && n >= 0 {
 			cfg.streamIdleTimeout = time.Duration(n) * time.Second
+		}
+	}
+	cfg.claudePingTailTimeout = 18 * time.Second
+	if v := getenv("CLAUDE_PING_TAIL_TIMEOUT_SECONDS", ""); v != "" {
+		if n, err := parseInt64(v); err == nil && n >= 0 {
+			cfg.claudePingTailTimeout = time.Duration(n) * time.Second
 		}
 	}
 
@@ -342,8 +349,8 @@ func main() {
 	} else {
 		log.Printf("WARNING: no admin token configured")
 	}
-	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, trace_requests=%v, trace_packets=%v, trace_payloads=%v, trace_stall_gap=%v)",
-		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.traceRequests, cfg.tracePackets, cfg.tracePayloads, cfg.traceStallGap)
+	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, claude_ping_tail_timeout=%v, trace_requests=%v, trace_packets=%v, trace_payloads=%v, trace_stall_gap=%v)",
+		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.claudePingTailTimeout, cfg.traceRequests, cfg.tracePackets, cfg.tracePayloads, cfg.traceStallGap)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
@@ -2281,6 +2288,27 @@ func (h *proxyHandler) finalizeCopiedProxyResponse(reqID string, trace *requestT
 		return false
 	}
 	if copyErr != nil {
+		if cutoff, ok := matchClaudePingTailCutoff(copyErr, acc); ok {
+			h.finalizeProxyResponse(reqID, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample)
+			if h.metrics != nil {
+				h.metrics.inc(strconv.Itoa(statusCode), acc.ID)
+			}
+			if trace != nil {
+				trace.noteFinish(statusCode, isSSE, managedStreamFailed, nil)
+			}
+			log.Printf(
+				"[%s] claude gitlab ping-only tail cut off early (account=%s stalled_ms=%d timeout_ms=%d last_non_ping_type=%q)",
+				reqID,
+				acc.ID,
+				cutoff.stalledFor.Milliseconds(),
+				cutoff.timeout.Milliseconds(),
+				cutoff.lastNonPingType,
+			)
+			if h.cfg.debug {
+				log.Printf("[%s] %s status=%d account=%s duration_ms=%d", reqID, debugLabel, statusCode, acc.ID, time.Since(start).Milliseconds())
+			}
+			return true
+		}
 		if h.recent != nil {
 			h.recent.add(copyErr.Error())
 		}

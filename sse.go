@@ -132,22 +132,28 @@ type sseInterceptWriter struct {
 	buf           []byte
 	callback      func(eventData []byte)
 	eventCallback func(eventData []byte)
+	eventHook     func(eventType string, eventData []byte) error
 }
 
 func (sw *sseInterceptWriter) Write(p []byte) (int, error) {
 	// Always write to underlying writer first
 	n, err := sw.w.Write(p)
+	if err != nil || n <= 0 {
+		return n, err
+	}
 
 	// Append to our buffer for scanning
 	sw.buf = append(sw.buf, p[:n]...)
 
 	// Look for complete SSE events (separated by \n\n)
-	sw.scanForEvents()
+	if scanErr := sw.scanForEvents(); scanErr != nil {
+		return n, scanErr
+	}
 
 	return n, err
 }
 
-func (sw *sseInterceptWriter) scanForEvents() {
+func (sw *sseInterceptWriter) scanForEvents() error {
 	for {
 		// Find double newline which marks end of SSE event
 		idx := bytes.Index(sw.buf, []byte("\n\n"))
@@ -164,23 +170,27 @@ func (sw *sseInterceptWriter) scanForEvents() {
 					}
 					sw.buf = sw.buf[cutPoint:]
 				}
-				return
+				return nil
 			}
 			// Extract and consume the event
 			event := sw.buf[:idx]
 			sw.buf = sw.buf[idx+4:] // Skip \r\n\r\n
-			sw.processEvent(event)
+			if err := sw.processEvent(event); err != nil {
+				return err
+			}
 			continue
 		}
 
 		// Extract and consume the event
 		event := sw.buf[:idx]
 		sw.buf = sw.buf[idx+2:] // Skip \n\n
-		sw.processEvent(event)
+		if err := sw.processEvent(event); err != nil {
+			return err
+		}
 	}
 }
 
-func (sw *sseInterceptWriter) processEvent(event []byte) {
+func (sw *sseInterceptWriter) processEvent(event []byte) error {
 	// Find the data: prefix and extract JSON from there
 	dataIdx := bytes.Index(event, []byte("data: "))
 	if dataIdx < 0 {
@@ -203,12 +213,18 @@ func (sw *sseInterceptWriter) processEvent(event []byte) {
 		if len(trimmed) > 0 && (trimmed[0] == '[' || trimmed[0] == '{') {
 			data = trimmed
 		} else {
-			return
+			return nil
 		}
 	}
 	data = bytes.TrimSpace(data)
+	eventType := traceEventType(data)
 	if len(data) > 0 && sw.eventCallback != nil {
 		sw.eventCallback(data)
+	}
+	if len(data) > 0 && sw.eventHook != nil {
+		if err := sw.eventHook(eventType, data); err != nil {
+			return err
+		}
 	}
 
 	// Look for usage in the response
@@ -221,10 +237,11 @@ func (sw *sseInterceptWriter) processEvent(event []byte) {
 	hasClaudeUsage := (bytes.Contains(event, []byte(`"type":"message_start"`)) || bytes.Contains(event, []byte(`"type":"message_delta"`))) && bytes.Contains(event, []byte(`"usage":`))
 	hasGeminiUsage := bytes.Contains(event, []byte(`"usageMetadata":{"`)) && bytes.Contains(event, []byte(`"promptTokenCount":`))
 	if !hasCodexUsage && !hasCodexTokenCount && !hasClaudeUsage && !hasGeminiUsage {
-		return
+		return nil
 	}
 
 	if len(data) > 0 && sw.callback != nil {
 		sw.callback(data)
 	}
+	return nil
 }

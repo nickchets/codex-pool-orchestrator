@@ -1780,3 +1780,26 @@
   - `/home/lap/projects/codex-pool-orchestrator/VERSION`
 - Notes
   - The raw DOM dump was used only as a smoke verifier for the rendered client-side table and was not kept as a tracked repo artifact.
+
+### 2026-03-29T07:11:00Z | REPO-CPO Claude GitLab ping-tail guard hardening
+- Commands
+  - `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -run 'TestClaudePingTailWatcherCutsOffGitLabPingOnlyTail|TestClaudePingTailWatcherDoesNotCutBeforeContentStop|TestClaudePingTailWatcherDoesNotCutAfterMessageStop|TestClaudePingTailWatcherResetsTimerAfterNonPingEvent|TestFinalizeCopiedProxyResponseTreatsClaudePingTailCutoffAsSuccess|TestFinalizeCopiedProxyResponseDoesNotTreatClaudePingTailCutoffAsSuccessForNonGitLab|TestWrapUsageInterceptWriterRecordsTraceEvents|TestIdleTimeoutReaderReturnsHelpfulIdleTimeout' ./...`
+  - `cd /home/lap/projects/codex-pool-orchestrator && go test -count=1 -timeout 300s ./...`
+  - `cd /home/lap/projects/codex-pool-orchestrator && go build ./...`
+  - `cd /home/lap/projects/codex-pool-orchestrator && go build -o /home/lap/.local/bin/codex-pool .`
+  - `systemctl --user restart codex-pool.service`
+  - `curl -fsS http://127.0.0.1:8989/healthz`
+  - `POOL_USER_TOKEN=$(jq -r '.[] | select(.disabled==false and .email=="lap+agcode@local.pool") | .token' /home/lap/.root_layer/codex_pool/data/pool_users.json | head -n1) && CLAUDE_POOL_TOKEN=$(curl -fsS "http://127.0.0.1:8989/config/claude/${POOL_USER_TOKEN}" | jq -r '.access_token') && timeout 90s curl -sS -N -o /tmp/claude_ping_tail.sse -w '%{http_code}' http://127.0.0.1:8989/v1/messages -H "Authorization: Bearer ${CLAUDE_POOL_TOKEN}" -H 'Content-Type: application/json' -H 'anthropic-version: 2023-06-01' --data '{"model":"claude-sonnet-4-20250514","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"Reply with exactly OK."}]}'`
+  - `journalctl --user -u codex-pool.service --since '<smoke-start>' --no-pager | rg 'trace start method=POST path=/v1/messages|claude_tail_guard_enabled|claude_tail_cutoff|ping-only tail|trace finish'`
+- Result
+  - PASS
+  - Живые логи подтвердили исходный дефект: часть GitLab Claude запросов завершалась `status=200`, но без `message_stop`, с `last_sse_type="ping"` и длинным ping-only tail примерно до `93-94s`. Это semantic stream degradation, а не обычный `401/403/5xx`.
+  - Реализация стала уже и прозрачнее: вместо глобального success-override по sentinel-ошибке теперь используется typed GitLab-Claude-only cutoff с полями `account`, `stalled_for`, `timeout`, `last_non_ping_type`.
+  - Focused tests, full `go test ./...`, `go build ./...`, и сборка итогового бинарника прошли.
+  - После рестарта `codex-pool.service` сервис вернулся в healthy state; live Claude smoke вернул `200`, SSE закончилось `message_stop`, а request trace показал `claude_tail_guard_enabled ... auth_mode="gitlab_duo" timeout_ms=18000` и корректный `trace finish ... last_sse_type="message_stop"`.
+  - Одновременно аудит журналов сохранил отдельный residual class: в истории есть GitLab Claude `502/504` retry exhaustion и сервисные рестарты, которые тоже могут выглядеть как зависание, но это отдельный инцидент, не этот tail path.
+- Artifacts
+  - `/home/lap/projects/codex-pool-orchestrator/docs/CLAUDE_GITLAB_STREAM_GUARD_TZ_20260329.ru.md`
+  - `/tmp/claude_ping_tail.sse`
+- Notes
+  - GitLab Claude smoke в `DEBUG.md` переписан на truthy enabled-user выбор; прежний `.[0].token` мог попадать в disabled pool user и давать ложный `403/401`.

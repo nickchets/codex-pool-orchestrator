@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"net/url"
 	"path/filepath"
 	"sync"
@@ -116,5 +117,78 @@ func TestWrapUsageInterceptWriterRecordsTraceEvents(t *testing.T) {
 	}
 	if trace.usageEvents != 1 {
 		t.Fatalf("usage_events=%d", trace.usageEvents)
+	}
+}
+
+func TestClaudePingTailWatcherCutsOffGitLabPingOnlyTail(t *testing.T) {
+	trace := &requestTrace{
+		cfg:       requestTraceConfig{requests: true},
+		reqID:     "req-claude-tail",
+		startedAt: time.Now(),
+	}
+	watcher := newClaudePingTailWatcher("claude_gitlab_test", trace, 18*time.Second)
+	if watcher == nil {
+		t.Fatal("expected watcher")
+	}
+	watcher.sawContentDelta = true
+	watcher.sawContentBlockStop = true
+	watcher.lastNonPingAt = time.Now().Add(-21 * time.Second)
+	watcher.lastNonPingType = "content_block_delta"
+
+	err := watcher.noteEvent("ping")
+	var cutoff *claudePingTailCutoffError
+	if !errors.As(err, &cutoff) {
+		t.Fatalf("expected ping tail cutoff, got %v", err)
+	}
+	if cutoff.accountID != "claude_gitlab_test" {
+		t.Fatalf("cutoff=%+v", cutoff)
+	}
+}
+
+func TestClaudePingTailWatcherDoesNotCutBeforeContentStop(t *testing.T) {
+	watcher := newClaudePingTailWatcher("claude_gitlab_test", nil, 18*time.Second)
+	if watcher == nil {
+		t.Fatal("expected watcher")
+	}
+	watcher.sawContentDelta = true
+	watcher.lastNonPingAt = time.Now().Add(-30 * time.Second)
+	watcher.lastNonPingType = "content_block_delta"
+
+	if err := watcher.noteEvent("ping"); err != nil {
+		t.Fatalf("unexpected cutoff without content_block_stop: %v", err)
+	}
+}
+
+func TestClaudePingTailWatcherDoesNotCutAfterMessageStop(t *testing.T) {
+	watcher := newClaudePingTailWatcher("claude_gitlab_test", nil, 18*time.Second)
+	if watcher == nil {
+		t.Fatal("expected watcher")
+	}
+	watcher.sawContentDelta = true
+	watcher.sawContentBlockStop = true
+	watcher.sawMessageStop = true
+	watcher.lastNonPingAt = time.Now().Add(-30 * time.Second)
+	watcher.lastNonPingType = "message_delta"
+
+	if err := watcher.noteEvent("ping"); err != nil {
+		t.Fatalf("unexpected cutoff after message_stop: %v", err)
+	}
+}
+
+func TestClaudePingTailWatcherResetsTimerAfterNonPingEvent(t *testing.T) {
+	watcher := newClaudePingTailWatcher("claude_gitlab_test", nil, 18*time.Second)
+	if watcher == nil {
+		t.Fatal("expected watcher")
+	}
+	watcher.sawContentDelta = true
+	watcher.sawContentBlockStop = true
+	watcher.lastNonPingAt = time.Now().Add(-30 * time.Second)
+	watcher.lastNonPingType = "content_block_delta"
+
+	if err := watcher.noteEvent("message_delta"); err != nil {
+		t.Fatalf("unexpected non-ping event error: %v", err)
+	}
+	if err := watcher.noteEvent("ping"); err != nil {
+		t.Fatalf("unexpected cutoff immediately after non-ping event: %v", err)
 	}
 }
