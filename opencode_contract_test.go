@@ -68,7 +68,7 @@ func TestBuildOpenCodeConfigBundle(t *testing.T) {
 	if bundle.ProviderID != openCodeAntigravityProviderID {
 		t.Fatalf("provider_id = %q", bundle.ProviderID)
 	}
-	if got, _ := bundle.OpenCodeConfig["model"].(string); got != "codex-pool/gemini-3.1-pro-high" {
+	if got, _ := bundle.OpenCodeConfig["model"].(string); got != "codex-pool/gemini-3.1-flash-lite" {
 		t.Fatalf("model = %q", got)
 	}
 	if bundle.BaseURL != "http://pool.local/v1" {
@@ -166,6 +166,54 @@ func TestBuildOpenCodeConfigBundle(t *testing.T) {
 	}
 	if got := account.CachedQuota["provider_checked_at"]; got != now.Unix() {
 		t.Fatalf("cached_quota.provider_checked_at = %#v", got)
+	}
+}
+
+func TestBuildOpenCodeConfigBundleKeepsCanonicalNamesForKnownGeminiModels(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	now := time.Date(2026, time.March, 29, 12, 0, 0, 0, time.UTC)
+	h := &proxyHandler{
+		pool: newPoolState([]*Account{
+			{
+				ID:                      "gemini-seat-1",
+				Type:                    AccountTypeGemini,
+				RefreshToken:            "refresh-1",
+				OperatorEmail:           "seat@example.com",
+				AntigravityProjectID:    "project-1",
+				GeminiProviderCheckedAt: now,
+				GeminiQuotaModels: []GeminiModelQuotaSnapshot{
+					{
+						Name:        "gemini-2.5-flash",
+						DisplayName: "Gemini 3.1 Flash Lite",
+					},
+					{
+						Name:        "gemini-3-flash-agent",
+						DisplayName: "Gemini 3 Flash",
+					},
+				},
+			},
+		}, false),
+	}
+	user := &PoolUser{
+		ID:       "pool-user-1234",
+		Token:    "download-token",
+		Email:    "pool@example.com",
+		PlanType: "pro",
+	}
+	req := httptest.NewRequest("GET", "http://pool.local/config/opencode/download-token", nil)
+
+	bundle, err := h.buildOpenCodeConfigBundle(req, user, getPoolJWTSecret())
+	if err != nil {
+		t.Fatalf("buildOpenCodeConfigBundle: %v", err)
+	}
+	provider := bundle.OpenCodeConfig["provider"].(map[string]any)[openCodeAntigravityProviderID].(map[string]any)
+	models := provider["models"].(map[string]any)
+	if got := models["gemini-2.5-flash"].(map[string]any)["name"]; got != "Gemini 2.5 Flash" {
+		t.Fatalf("gemini-2.5-flash name = %#v", got)
+	}
+	if got := models["gemini-3-flash-agent"].(map[string]any)["name"]; got != "Gemini 3 Flash Agent" {
+		t.Fatalf("gemini-3-flash-agent name = %#v", got)
 	}
 }
 

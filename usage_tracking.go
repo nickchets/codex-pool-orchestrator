@@ -149,6 +149,10 @@ func (h *proxyHandler) refreshUsageIfStale() {
 }
 
 func (h *proxyHandler) fetchUsage(now time.Time, a *Account) error {
+	if isGitLabCodexAccount(a) {
+		return nil
+	}
+
 	// Proactively refresh expired tokens before making the request.
 	// This ensures tokens stay fresh even if access tokens outlive ID token expiry.
 	if !h.cfg.disableRefresh && h.needsRefresh(a) {

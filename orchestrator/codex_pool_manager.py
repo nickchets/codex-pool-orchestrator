@@ -40,7 +40,9 @@ CONFIG_PATH = RUNTIME_ROOT / "config.toml"
 ENV_PATH = RUNTIME_ROOT / "codex-pool.env"
 POOL_ROOT = RUNTIME_ROOT / "pool"
 POOL_CODEX_DIR = POOL_ROOT / "codex"
+POOL_CODEX_GITLAB_DIR = POOL_ROOT / "codex_gitlab"
 POOL_USER_TOKEN_PATH = RUNTIME_ROOT / "local_pool_user.token"
+CLCODE_USER_TOKEN_PATH = RUNTIME_ROOT / "clcode_pool_user.token"
 CODEX_HOME = _default_codex_home()
 CODEX_AUTH_PATH = CODEX_HOME / "auth.json"
 CODEX_CONFIG_PATH = CODEX_HOME / "config.toml"
@@ -116,6 +118,20 @@ def _http_json(path: str, *, method: str = "GET", body: dict[str, Any] | None = 
     return json.loads(raw.decode("utf-8"))
 
 
+def _http_text(path: str, *, method: str = "GET", body: bytes | None = None, admin: bool = False) -> str:
+    url = f"{_base_url().rstrip('/')}{path}"
+    headers = {"Accept": "text/plain, text/x-shellscript, application/json"}
+    if admin:
+        token = _admin_token()
+        if not token:
+            raise RuntimeError("ADMIN_TOKEN is missing from runtime env")
+        headers["X-Admin-Token"] = token
+    request = urllib.request.Request(url, method=method, headers=headers, data=body)
+    with urllib.request.urlopen(request, timeout=15) as response:
+        raw = response.read()
+    return raw.decode("utf-8")
+
+
 def _health_ok() -> bool:
     try:
         request = urllib.request.Request(f"{_base_url().rstrip('/')}/healthz", method="GET")
@@ -144,11 +160,18 @@ def _write_secret_file(path: Path, text: str) -> None:
     path.chmod(0o600)
 
 
+def _iter_codex_pool_files() -> list[Path]:
+    paths: list[Path] = []
+    for root in (POOL_CODEX_DIR, POOL_CODEX_GITLAB_DIR):
+        if not root.exists():
+            continue
+        paths.extend(sorted(root.glob("*.json")))
+    return paths
+
+
 def _load_codex_identity_rows() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    if not POOL_CODEX_DIR.exists():
-        return rows
-    for path in sorted(POOL_CODEX_DIR.glob("*.json")):
+    for path in _iter_codex_pool_files():
         try:
             auth = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
@@ -171,9 +194,7 @@ def _load_codex_identity_rows() -> list[dict[str, Any]]:
 
 
 def _codex_pool_account_stems() -> set[str]:
-    if not POOL_CODEX_DIR.exists():
-        return set()
-    return {path.stem for path in POOL_CODEX_DIR.glob("*.json")}
+    return {path.stem for path in _iter_codex_pool_files()}
 
 
 def _dashboard_account_by_id(account_id: str) -> dict[str, Any]:
@@ -374,21 +395,27 @@ def cmd_import_auth(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ensure_pool_user_token(email: str, plan_type: str, token_path: Path) -> str:
+    token = str(token_path.read_text(encoding="utf-8")).strip() if token_path.exists() else ""
+    if token:
+        return token
+    payload = _http_json(
+        "/admin/pool-users/",
+        method="POST",
+        body={"email": str(email), "plan_type": str(plan_type)},
+        admin=True,
+    )
+    token = str(payload.get("token") or "").strip()
+    if not token:
+        raise SystemExit("pool user creation returned empty token")
+    _write_secret_file(token_path, token + "\n")
+    return token
+
+
 def cmd_bootstrap_local_user(args: argparse.Namespace) -> int:
     token_path = Path(str(args.token_file or POOL_USER_TOKEN_PATH)).expanduser().resolve()
     target = Path(str(args.target or CODEX_AUTH_PATH)).expanduser().resolve()
-    token = str(token_path.read_text(encoding="utf-8")).strip() if token_path.exists() else ""
-    if not token:
-        payload = _http_json(
-            "/admin/pool-users/",
-            method="POST",
-            body={"email": str(args.email), "plan_type": str(args.plan_type)},
-            admin=True,
-        )
-        token = str(payload.get("token") or "").strip()
-        if not token:
-            raise SystemExit("pool user creation returned empty token")
-        _write_secret_file(token_path, token + "\n")
+    token = _ensure_pool_user_token(str(args.email), str(args.plan_type), token_path)
 
     auth = _http_json(f"/config/codex/{token}", method="GET", admin=False)
     if not isinstance(auth, dict) or not dict(auth.get("tokens") or {}).get("access_token"):
@@ -399,6 +426,39 @@ def cmd_bootstrap_local_user(args: argparse.Namespace) -> int:
     print(
         json.dumps(
             {"status": "BOOTSTRAPPED", "target": str(target), "token_path": str(token_path)},
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_bootstrap_clcode(args: argparse.Namespace) -> int:
+    token_path = Path(str(args.token_file or CLCODE_USER_TOKEN_PATH)).expanduser().resolve()
+    token = _ensure_pool_user_token(str(args.email), str(args.plan_type), token_path)
+    script = _http_text(f"/setup/clcode/{token}", method="GET", admin=False)
+    env = os.environ.copy()
+    clcode_root_value = str(args.clcode_root or "").strip()
+    if clcode_root_value:
+        env["CLCODE_ROOT"] = str(Path(clcode_root_value).expanduser().resolve())
+    subprocess.run(
+        ["bash"],
+        input=script,
+        text=True,
+        env=env,
+        check=True,
+    )
+    clcode_root = Path(str(env.get("CLCODE_ROOT") or (Path.home() / ".local" / "share" / "clcode"))).expanduser()
+    launcher_path = Path.home() / ".local" / "bin" / "clcode"
+    print(
+        json.dumps(
+            {
+                "status": "BOOTSTRAPPED",
+                "base_url": _base_url(),
+                "token_path": str(token_path),
+                "launcher": str(launcher_path),
+                "clcode_root": str(clcode_root),
+            },
             ensure_ascii=False,
             indent=2,
         )
@@ -417,7 +477,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "env_path": str(ENV_PATH),
         "service_name": SERVICE_NAME,
         "base_url": _base_url(),
-        "pool_codex_accounts": sorted(path.name for path in POOL_CODEX_DIR.glob("*.json")) if POOL_CODEX_DIR.exists() else [],
+        "pool_codex_accounts": sorted(path.name for path in _iter_codex_pool_files()),
         "admin_token_present": bool(_admin_token()),
         "pool_jwt_secret_present": bool(env.get("POOL_JWT_SECRET") or os.environ.get("POOL_JWT_SECRET")),
     }
@@ -646,6 +706,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_bootstrap.add_argument("--target", default=str(CODEX_AUTH_PATH))
     p_bootstrap.add_argument("--token-file", default=str(POOL_USER_TOKEN_PATH))
     p_bootstrap.set_defaults(func=cmd_bootstrap_local_user)
+
+    p_clcode = sub.add_parser("bootstrap-clcode", help="Create or reuse a local pool user and install isolated clcode sidecar config")
+    p_clcode.add_argument("--email", required=True)
+    p_clcode.add_argument("--plan-type", default="pro")
+    p_clcode.add_argument("--token-file", default=str(CLCODE_USER_TOKEN_PATH))
+    p_clcode.add_argument("--clcode-root", default=str(Path.home() / ".local" / "share" / "clcode"))
+    p_clcode.set_defaults(func=cmd_bootstrap_clcode)
 
     p_status = sub.add_parser("status", help="Show strict local codex-pool status")
     p_status.add_argument("--strict", action="store_true", default=False)

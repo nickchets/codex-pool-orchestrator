@@ -22,9 +22,11 @@ const (
 	managedGitLabClaudeDirectAccess             = "/api/v4/ai/third_party_agents/direct_access"
 	managedGitLabClaudeDefaultTTL               = 20 * time.Minute
 	managedGitLabClaudeRateLimitWait            = 15 * time.Minute
+	managedGitLabClaudeOrgTPMRateLimitWait      = 75 * time.Second
 	managedGitLabClaudeGatewayRejectWait        = 2 * time.Minute
 	managedGitLabClaudeQuotaExceededInitialWait = 30 * time.Minute
 	managedGitLabClaudeQuotaExceededMaxWait     = 24 * time.Hour
+	managedGitLabClaudeSharedOrgTPMHealthPrefix = "shared_org_tpm: "
 )
 
 type managedGitLabClaudeErrorSource string
@@ -40,6 +42,7 @@ type managedGitLabClaudeErrorDisposition struct {
 	Reason       string
 	HealthStatus string
 	Cooldown     time.Duration
+	SharedOrgTPM bool
 }
 
 func copyStringMap(in map[string]string) map[string]string {
@@ -72,6 +75,78 @@ func getHeaderValueFold(headers http.Header, key string) string {
 		return strings.TrimSpace(values[0])
 	}
 	return ""
+}
+
+func getMapValueFold(values map[string]string, key string) string {
+	if values == nil {
+		return ""
+	}
+	for valueKey, value := range values {
+		if !strings.EqualFold(valueKey, key) {
+			continue
+		}
+		return strings.TrimSpace(value)
+	}
+	return ""
+}
+
+func gitLabClaudeScopeKey(acc *Account) string {
+	if acc == nil || !isGitLabClaudeAccount(acc) {
+		return ""
+	}
+	source := strings.ToLower(firstNonEmpty(strings.TrimSpace(acc.SourceBaseURL), defaultGitLabInstanceURL))
+	gateway := strings.ToLower(firstNonEmpty(strings.TrimSpace(acc.UpstreamBaseURL), defaultGitLabClaudeGatewayURL))
+	instanceID := strings.ToLower(getMapValueFold(acc.ExtraHeaders, "X-Gitlab-Instance-Id"))
+	return strings.Join([]string{source, gateway, instanceID}, "|")
+}
+
+func isManagedGitLabClaudeOrgTPMRateLimit(reason string) bool {
+	lower := strings.ToLower(strings.TrimSpace(reason))
+	if lower == "" {
+		return false
+	}
+	hasOrgLimit := strings.Contains(lower, "organization's rate limit") ||
+		strings.Contains(lower, "organizations rate limit") ||
+		strings.Contains(lower, "organization rate limit") ||
+		strings.Contains(lower, "organisation's rate limit") ||
+		strings.Contains(lower, "organisation rate limit")
+	hasTPM := strings.Contains(lower, "tokens per minute") ||
+		strings.Contains(lower, "input tokens per minute") ||
+		strings.Contains(lower, "output tokens per minute")
+	return hasOrgLimit && hasTPM
+}
+
+func managedGitLabClaudeCooldownWait(disposition managedGitLabClaudeErrorDisposition, headers http.Header) time.Duration {
+	wait := disposition.Cooldown
+	switch {
+	case disposition.SharedOrgTPM && wait <= 0:
+		wait = managedGitLabClaudeOrgTPMRateLimitWait
+	case wait <= 0:
+		wait = managedGitLabClaudeRateLimitWait
+	}
+	if retryAfter, ok := parseRetryAfter(headers); ok && retryAfter > 0 {
+		wait = retryAfter
+	}
+	return wait
+}
+
+func managedGitLabClaudeSharedOrgTPMHealthError(reason string) string {
+	return managedGitLabClaudeSharedOrgTPMHealthPrefix + sanitizeStatusMessage(firstNonEmpty(reason, "gitlab claude organization token-per-minute rate limited"))
+}
+
+func isManagedGitLabClaudeSharedOrgTPMHealthError(reason string) bool {
+	trimmed := strings.TrimSpace(reason)
+	return len(trimmed) >= len(managedGitLabClaudeSharedOrgTPMHealthPrefix) &&
+		strings.EqualFold(trimmed[:len(managedGitLabClaudeSharedOrgTPMHealthPrefix)], managedGitLabClaudeSharedOrgTPMHealthPrefix)
+}
+
+func stripManagedGitLabClaudeSharedOrgTPMHealthPrefix(reason string) string {
+	trimmed := strings.TrimSpace(reason)
+	if len(trimmed) >= len(managedGitLabClaudeSharedOrgTPMHealthPrefix) &&
+		strings.EqualFold(trimmed[:len(managedGitLabClaudeSharedOrgTPMHealthPrefix)], managedGitLabClaudeSharedOrgTPMHealthPrefix) {
+		return strings.TrimSpace(trimmed[len(managedGitLabClaudeSharedOrgTPMHealthPrefix):])
+	}
+	return trimmed
 }
 
 func parseGitLabRateLimitHeaderInt(headers http.Header, key string) (int, bool) {
@@ -538,10 +613,18 @@ func classifyManagedGitLabClaudeError(source managedGitLabClaudeErrorSource, sta
 		disposition.RateLimit = true
 		disposition.HealthStatus = "rate_limited"
 		disposition.Cooldown = managedGitLabClaudeRateLimitWait
+		if isManagedGitLabClaudeOrgTPMRateLimit(reason) {
+			disposition.SharedOrgTPM = true
+			disposition.Cooldown = managedGitLabClaudeOrgTPMRateLimitWait
+		}
 	case strings.Contains(lower, "rate limit"):
 		disposition.RateLimit = true
 		disposition.HealthStatus = "rate_limited"
 		disposition.Cooldown = managedGitLabClaudeRateLimitWait
+		if isManagedGitLabClaudeOrgTPMRateLimit(reason) {
+			disposition.SharedOrgTPM = true
+			disposition.Cooldown = managedGitLabClaudeOrgTPMRateLimitWait
+		}
 	case source == managedGitLabClaudeErrorSourceGatewayRequest &&
 		(statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden):
 		disposition.RateLimit = true
@@ -576,12 +659,7 @@ func applyManagedGitLabClaudeDisposition(acc *Account, disposition managedGitLab
 			acc.GitLabLastQuotaExceededAt = now
 			wait = gitLabClaudeQuotaExceededCooldown(acc.GitLabQuotaExceededCount)
 		}
-		if wait <= 0 {
-			wait = managedGitLabClaudeRateLimitWait
-		}
-		if retryAfter, ok := parseRetryAfter(headers); ok && retryAfter > 0 {
-			wait = retryAfter
-		}
+		wait = managedGitLabClaudeCooldownWait(disposition, headers)
 		until := now.Add(wait)
 		if acc.RateLimitUntil.Before(until) {
 			acc.RateLimitUntil = until

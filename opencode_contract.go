@@ -112,12 +112,13 @@ func mergeOpenCodeProviderModelMetadata(models map[string]any, model GeminiModel
 	if name == "" {
 		return
 	}
+	_, knownModel := models[name]
 	existing, _ := models[name].(map[string]any)
 	if existing == nil {
 		existing = map[string]any{}
 		models[name] = existing
 	}
-	if strings.TrimSpace(model.DisplayName) != "" {
+	if strings.TrimSpace(model.DisplayName) != "" && !knownModel {
 		existing["name"] = strings.TrimSpace(model.DisplayName)
 	} else if _, ok := existing["name"]; !ok {
 		existing["name"] = name
@@ -180,7 +181,7 @@ func buildOpenCodeConfigDocument(baseURL, apiKey string, models map[string]any) 
 	}
 	return map[string]any{
 		"$schema": "https://opencode.ai/config.json",
-		"model":   openCodeAntigravityProviderID + "/gemini-3.1-pro-high",
+		"model":   openCodeAntigravityProviderID + "/gemini-3.1-flash-lite",
 		"provider": map[string]any{
 			openCodeAntigravityProviderID: map[string]any{
 				// OpenCode reaches this local Gemini pool over its Anthropic-compatible transport.

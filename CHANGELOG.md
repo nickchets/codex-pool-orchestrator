@@ -9,6 +9,22 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.10.0] - 2026-03-30
+
+### Added
+- An optional dedicated GitLab Codex sidecar lane for Codex CLI, including `PROXY_FORCE_CODEX_REQUIRED_PLAN=gitlab_duo`, discovery-backed GitLab Codex model catalogs, `systemd/codex-pool-gitlab.service`, and an isolated `clcode` setup/bootstrap flow that does not mutate the main `~/.codex`.
+- Pool-user onboarding now exposes a dedicated `clcode_setup` URL, and `orchestrator/codex_pool_manager.py` can bootstrap that isolated lane directly.
+
+### Changed
+- OpenCode export now defaults to `codex-pool/gemini-3.1-flash-lite` for a safer pooled Gemini baseline while still surfacing `gemini-3.1-pro-high`, `gemini-3.1-pro-low`, and the broader live Gemini model catalog.
+- The dedicated GitLab Codex sidecar now serves Codex CLI auxiliary plugin/connectors/WHAM endpoints locally instead of leaking those requests to upstream GitLab endpoints.
+
+### Fixed
+- GitLab Claude organization-level TPM `429` responses now become a scoped shared cooldown with honest `Retry-After` behavior instead of fanning out across sibling GitLab Claude seats and collapsing into `503 no live claude accounts`.
+- GitLab Codex `402 USAGE_QUOTA_EXCEEDED` and gateway `403` failures are now classified as cooldown states; when every eligible GitLab Codex seat is cooling down, the sidecar returns a local `429` rather than noisy `502`/`503` churn.
+- `clcode` model-catalog refresh now reads nested `tokens.access_token` from `auth.json`, and `/v1/models` now resolves through the same cached GitLab Codex catalog path as `/backend-api/codex/models`.
+- Antigravity Gemini fallback-project truth now persists more accurately for restricted or projectless seats, and OpenCode bundle metadata keeps canonical names for known Gemini models.
+
 ## [0.9.0] - 2026-03-29
 
 ### Changed
@@ -17,13 +33,13 @@ The format is loosely based on Keep a Changelog. Versioning rules are defined in
 
 ### Fixed
 - Refreshable expired Codex seats no longer fall out of sticky reuse or best-seat fallback solely because the current access token is expired; fallback now preserves the highest eligible tier instead of draining lower-headroom seats first.
-- The screenshot-first closure wave is now publishable as repo-local SSOT instead of temp-only proof: release docs/evidence point at permanent `screenshots/status-ui-audit-20260329/` artifacts rather than `.tmp` leftovers.
+- The screenshot-first status UI audit now points at permanent `screenshots/status-ui-audit-20260329/` artifacts rather than temporary `.tmp` leftovers.
 
 ## [0.8.7] - 2026-03-28
 
 ### Fixed
 - The canonical `/operator/gemini/oauth-start` route now dispatches to the browser-auth Gemini onboarding handler instead of the retired legacy Gemini OAuth path, so the published source matches the already-verified operator UI and running binary.
-- Public bundle export now excludes the repo-local `T57` closure spec alongside the other internal planning packets, keeping the extracted publish surface steriler.
+- Public bundle export now excludes leftover closure-spec artifacts alongside the other planning residue, keeping the extracted publish surface cleaner.
 
 ## [0.8.6] - 2026-03-28
 
@@ -156,7 +172,7 @@ The format is loosely based on Keep a Changelog. Versioning rules are defined in
 ### Changed
 - Refactored buffered, streamed, and websocket proxy response handling into smaller explicit seams so retryable status inspection, copied-response delivery, websocket success recovery, and pooled websocket proxy execution are no longer mixed into large inline handler blocks.
 - Shared pre-copy status inspection and replay handling between streamed and websocket lanes while keeping their remaining transport-specific differences explicit.
-- Hydrated the next websocket execution-shell follow-up (`T31`) in repo-local SSOT so the ongoing refactor wave is traceable from plan to evidence.
+- Documented the next websocket execution-shell follow-up (`T31`) so the ongoing refactor wave remains traceable end-to-end.
 - Replaced screenshot-heavy README sections with text-first operator documentation aligned with the current dashboard-first local UI.
 
 ### Added
@@ -172,8 +188,6 @@ The format is loosely based on Keep a Changelog. Versioning rules are defined in
 - Dashboard-first local landing with live `Codex`, `Claude`, and `Gemini` views powered by `/status?format=json`.
 - Additional operator controls for fallback API keys, GitLab Claude tokens, and manual account deletion on the dashboard surfaces.
 - GitLab-specific status/admin visibility for cooldowns, quota backoff counters, and direct-access rate-limit signals.
-- Repo-local engineering governance files: `ACTION_PLAN.md`, `DEBUG.md`,
-  `EVIDENCE_LOG.md`, and `PROJECT_MANIFEST.md`.
 
 ### Changed
 - Extracted proxy admission logic out of the main request handler.

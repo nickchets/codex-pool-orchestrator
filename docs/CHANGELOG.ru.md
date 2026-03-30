@@ -8,6 +8,22 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.10.0] - 2026-03-30
+
+### Добавлено
+- Опциональный выделенный GitLab Codex sidecar-лейн для Codex CLI: `PROXY_FORCE_CODEX_REQUIRED_PLAN=gitlab_duo`, discovery-backed каталог моделей GitLab Codex, `systemd/codex-pool-gitlab.service` и изолированный `clcode` setup/bootstrap без мутации основного `~/.codex`.
+- Onboarding pool-user теперь отдает отдельный `clcode_setup` URL, а `orchestrator/codex_pool_manager.py` умеет напрямую bootstrap'ить этот изолированный лейн.
+
+### Изменено
+- Экспорт OpenCode теперь по умолчанию ставит `codex-pool/gemini-3.1-flash-lite` как более безопасный pooled Gemini baseline, при этом сохраняя в каталоге `gemini-3.1-pro-high`, `gemini-3.1-pro-low` и более широкий live Gemini model catalog.
+- Выделенный GitLab Codex sidecar теперь локально обслуживает auxiliary endpoint'ы Codex CLI для plugins/connectors/WHAM вместо того, чтобы прокидывать их в upstream GitLab.
+
+### Исправлено
+- GitLab Claude org-level TPM `429` теперь превращается в scoped shared cooldown с честным `Retry-After` вместо fan-out по sibling GitLab Claude seat'ам и деградации в `503 no live claude accounts`.
+- Ошибки GitLab Codex `402 USAGE_QUOTA_EXCEEDED` и gateway `403` теперь классифицируются как cooldown state; когда все пригодные GitLab Codex seat'ы находятся в cooldown, sidecar возвращает локальный `429`, а не шумный `502`/`503`.
+- Refresh model-catalog в `clcode` теперь читает вложенный `tokens.access_token` из `auth.json`, а `/v1/models` теперь идет через тот же cached GitLab Codex catalog path, что и `/backend-api/codex/models`.
+- Truth для fallback-project в Antigravity Gemini теперь точнее сохраняется для restricted/projectless seat'ов, а OpenCode bundle metadata удерживает канонические названия для известных Gemini моделей.
+
 ## [0.9.0] - 2026-03-29
 
 ### Изменено
@@ -22,7 +38,7 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 ### Исправлено
 - Канонический маршрут `/operator/gemini/oauth-start` теперь действительно ведет в browser-auth Gemini onboarding handler, а не в retired legacy Gemini OAuth path, так что опубликованный исходник снова совпадает с уже проверенными operator UI и живым бинарем.
-- Public bundle export теперь тоже исключает repo-local `T57` closure spec вместе с остальными внутренними planning packet'ами, чтобы публикуемая поверхность оставалась стерильнее.
+- Public bundle export теперь исключает и оставшиеся closure-spec артефакты вместе с прочим planning residue, чтобы публикуемая поверхность оставалась чище.
 
 ## [0.8.6] - 2026-03-28
 
@@ -155,7 +171,7 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 ### Изменено
 - Buffered, streamed и websocket response handling разложены на меньшие явные seam-ы, так что retryable status inspection, copied-response delivery, websocket success recovery и pooled websocket proxy execution больше не смешаны в большие inline handler-блоки.
 - Общая pre-copy inspection/replay логика теперь разделяется между streamed и websocket path, при этом transport-specific отличия оставлены явными.
-- В repo-local SSOT гидрирован следующий websocket follow-up (`T31`), так что текущая refactor-волна прослеживается от плана до evidence.
+- Следующий websocket follow-up (`T31`) теперь задокументирован так, чтобы текущая refactor-волна прослеживалась end-to-end.
 - README и install/docs переведены на text-first операторский формат без logo/screenshot-шума и синхронизированы с текущим dashboard-first UI.
 
 ### Добавлено
@@ -171,8 +187,6 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 - Dashboard-first локальная главная страница с live-вкладками `Codex`, `Claude` и `Gemini`, питающимися от `/status?format=json`.
 - Дополнительные operator controls для fallback API keys, GitLab Claude токенов и ручного удаления аккаунтов на локальных dashboard surfaces.
 - GitLab-specific поля в status/admin для cooldown, quota backoff counters и direct-access rate-limit сигналов.
-- Repo-local инженерные файлы: `ACTION_PLAN.md`, `DEBUG.md`,
-  `EVIDENCE_LOG.md`, `PROJECT_MANIFEST.md`.
 
 ### Изменено
 - Логика proxy admission вынесена из основного request handler.

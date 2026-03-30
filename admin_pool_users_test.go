@@ -36,6 +36,9 @@ func TestHandlePoolUserCreateIncludesGeminiAndOpenCodeSetupURLs(t *testing.T) {
 		t.Fatalf("token missing from response: %v", payload)
 	}
 	setup, _ := payload["setup"].(map[string]any)
+	if got, _ := setup["clcode_setup"].(string); got != "http://pool.local/setup/clcode/"+token {
+		t.Fatalf("clcode_setup=%q", got)
+	}
 	if got, _ := setup["gemini_setup"].(string); got != "http://pool.local/setup/gemini/"+token {
 		t.Fatalf("gemini_setup=%q", got)
 	}

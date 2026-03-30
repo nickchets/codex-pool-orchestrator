@@ -599,8 +599,32 @@ echo "1. Fetching credentials..."
 curl -sL "$BASE_URL/config/codex/$TOKEN" -o "$AUTH_FILE"
 chmod 600 "$AUTH_FILE"
 
+extract_access_token() {
+    python3 - "$1" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    raise SystemExit(0)
+
+token = ""
+if isinstance(data, dict):
+    nested = data.get("tokens")
+    if isinstance(nested, dict):
+        token = str(nested.get("access_token") or "").strip()
+    if not token:
+        token = str(data.get("access_token") or "").strip()
+
+if token:
+    print(token)
+PY
+}
+
 echo "2. Fetching model catalog..."
-ACCESS_TOKEN=$(sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$AUTH_FILE" | head -n 1)
+ACCESS_TOKEN=$(extract_access_token "$AUTH_FILE")
 if [ -n "${ACCESS_TOKEN:-}" ]; then
     curl --connect-timeout 5 --max-time 10 -fsSL \
         -H "Authorization: Bearer $ACCESS_TOKEN" \
@@ -625,7 +649,28 @@ refresh_model_catalog() {
     fi
 
     local token
-    token=$(sed -n 's/.*"access_token"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$AUTH_FILE" | head -n 1)
+    token=$(python3 - "$AUTH_FILE" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    raise SystemExit(0)
+
+token = ""
+if isinstance(data, dict):
+    nested = data.get("tokens")
+    if isinstance(nested, dict):
+        token = str(nested.get("access_token") or "").strip()
+    if not token:
+        token = str(data.get("access_token") or "").strip()
+
+if token:
+    print(token)
+PY
+)
     if [ -z "${token:-}" ]; then
         return 0
     fi
@@ -819,6 +864,353 @@ fi
 
 echo "Setup complete! You are ready to use the pool."
 `, token, publicURL)
+
+	w.Header().Set("Content-Type", "text/x-shellscript")
+	w.Write([]byte(script))
+}
+
+func (h *proxyHandler) serveCLCodeSetupScript(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.URL.Path, "/setup/clcode/")
+	if token == "" || strings.Contains(token, "/") {
+		http.Error(w, "invalid token", http.StatusBadRequest)
+		return
+	}
+	publicURL := h.getEffectivePublicURL(r)
+	fallbackCatalog := string(buildSyntheticGitLabCodexModelsEntry().Body)
+
+	if wantsPowerShell(r) {
+		script := fmt.Sprintf(`#requires -Version 5.1
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$Token = '%s'
+$BaseUrl = '%s'
+
+$realHome = $HOME
+$laneRoot = if ($env:CLCODE_ROOT) { $env:CLCODE_ROOT } else { Join-Path (Join-Path (Join-Path $realHome '.local') 'share') 'clcode' }
+$laneHome = if ($env:CLCODE_HOME) { $env:CLCODE_HOME } else { Join-Path $laneRoot 'home' }
+$authDir = Join-Path $laneHome '.codex'
+$configFile = Join-Path $authDir 'config.toml'
+$authFile = Join-Path $authDir 'auth.json'
+$modelCatalog = Join-Path $authDir 'model_catalog.json'
+$launcherDir = Join-Path (Join-Path $realHome '.local') 'bin'
+$launcherFile = Join-Path $launcherDir 'clcode.ps1'
+$nl = [Environment]::NewLine
+
+function Set-Utf8NoBom {
+  param([string]$Path, [string]$Value)
+  $utf8 = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($Path, $Value, $utf8)
+}
+
+Write-Host 'Initializing clcode sidecar setup...'
+New-Item -ItemType Directory -Path $authDir -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $laneRoot 'config') -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $laneRoot 'data') -Force | Out-Null
+New-Item -ItemType Directory -Path $launcherDir -Force | Out-Null
+
+Write-Host '1. Fetching credentials...'
+$authUrl = "$BaseUrl/config/codex/$Token"
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+  $authContent = (Invoke-WebRequest -UseBasicParsing -Uri $authUrl).Content
+} else {
+  $authContent = (Invoke-WebRequest -Uri $authUrl).Content
+}
+Set-Utf8NoBom -Path $authFile -Value $authContent
+
+Write-Host '2. Fetching model catalog...'
+$fallbackCatalog = '%s'
+$catalogWritten = $false
+try {
+  $accessToken = [regex]::Match($authContent, '"access_token"\s*:\s*"([^"]+)"').Groups[1].Value
+  if (-not [string]::IsNullOrWhiteSpace($accessToken)) {
+    $modelsUrl = $BaseUrl.TrimEnd('/') + '/backend-api/codex/models?client_version=0.106.0'
+    $headers = @{ Authorization = "Bearer $accessToken" }
+    $tmp = [System.IO.Path]::GetTempFileName()
+    try {
+      if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        Invoke-WebRequest -UseBasicParsing -Uri $modelsUrl -Headers $headers -OutFile $tmp -TimeoutSec 10 | Out-Null
+      } else {
+        Invoke-WebRequest -Uri $modelsUrl -Headers $headers -OutFile $tmp -TimeoutSec 10 | Out-Null
+      }
+      Move-Item -Force -Path $tmp -Destination $modelCatalog
+      $catalogWritten = $true
+    } catch {
+      if (Test-Path $tmp) { Remove-Item -Force $tmp -ErrorAction SilentlyContinue }
+    }
+  }
+} catch {
+}
+if (-not $catalogWritten) {
+  Set-Utf8NoBom -Path $modelCatalog -Value $fallbackCatalog
+}
+
+Write-Host '3. Writing isolated Codex config...'
+$modelCatalogToml = $modelCatalog -replace '\\', '\\\\'
+$config = @"
+model = "gpt-5-codex"
+model_provider = "clcode"
+model_reasoning_effort = "medium"
+chatgpt_base_url = "$BaseUrl/backend-api"
+model_catalog_json = "$modelCatalogToml"
+
+[model_providers.clcode]
+name = "GitLab Codex via clcode sidecar"
+base_url = "$BaseUrl"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = false
+
+[model_providers.clcode.features]
+responses_websockets_v2 = false
+"@
+Set-Utf8NoBom -Path $configFile -Value $config
+
+Write-Host '4. Installing clcode launcher...'
+$launcher = @'
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$realHome = $HOME
+$callerPwd = (Get-Location).Path
+$env:CLCODE_ROOT = if ($env:CLCODE_ROOT) { $env:CLCODE_ROOT } else { Join-Path (Join-Path (Join-Path $realHome ".local") "share") "clcode" }
+$env:CLCODE_HOME = if ($env:CLCODE_HOME) { $env:CLCODE_HOME } else { Join-Path $env:CLCODE_ROOT "home" }
+$env:CLCODE_XDG_CONFIG_HOME = if ($env:CLCODE_XDG_CONFIG_HOME) { $env:CLCODE_XDG_CONFIG_HOME } else { Join-Path $env:CLCODE_ROOT "config" }
+$env:CLCODE_XDG_DATA_HOME = if ($env:CLCODE_XDG_DATA_HOME) { $env:CLCODE_XDG_DATA_HOME } else { Join-Path $env:CLCODE_ROOT "data" }
+$env:CODEX_HOME = Join-Path $env:CLCODE_HOME ".codex"
+$env:HOME = $env:CLCODE_HOME
+$env:XDG_CONFIG_HOME = $env:CLCODE_XDG_CONFIG_HOME
+$env:XDG_DATA_HOME = $env:CLCODE_XDG_DATA_HOME
+$baseUrl = if ($env:CLCODE_BASE_URL) { $env:CLCODE_BASE_URL } else { "%s" }
+$modelCatalog = Join-Path $env:CODEX_HOME "model_catalog.json"
+
+function Refresh-ModelCatalog {
+  $authFile = Join-Path $env:CODEX_HOME "auth.json"
+  if (-not (Test-Path $authFile)) {
+    return
+  }
+
+  try {
+    $auth = Get-Content -Raw -Path $authFile | ConvertFrom-Json
+  } catch {
+    return
+  }
+
+  $accessToken = ""
+  if ($auth -and $auth.tokens -and $auth.tokens.access_token) {
+    $accessToken = [string]$auth.tokens.access_token
+  }
+  if ([string]::IsNullOrWhiteSpace($accessToken)) {
+    return
+  }
+
+  $tmpCatalog = $modelCatalog + ".tmp"
+  try {
+    Invoke-WebRequest -Uri ($baseUrl.TrimEnd('/') + '/backend-api/codex/models?client_version=0.106.0') -Headers @{ Authorization = "Bearer $accessToken" } -OutFile $tmpCatalog | Out-Null
+    Move-Item -Force $tmpCatalog $modelCatalog
+  } catch {
+    if (Test-Path $tmpCatalog) {
+      Remove-Item -Force $tmpCatalog -ErrorAction SilentlyContinue
+    }
+  }
+}
+
+$commonArgs = @(
+  "-c", 'model_provider="clcode"',
+  "-c", 'model="gpt-5-codex"',
+  "-c", 'model_reasoning_effort="medium"',
+  "-c", ('chatgpt_base_url="' + $baseUrl + '/backend-api"'),
+  "-c", ('model_catalog_json="' + $modelCatalog.Replace('\', '\\') + '"'),
+  "-c", 'model_providers.clcode.name="GitLab Codex via clcode sidecar"',
+  "-c", ('model_providers.clcode.base_url="' + $baseUrl + '"'),
+  "-c", 'model_providers.clcode.wire_api="responses"',
+  "-c", 'model_providers.clcode.requires_openai_auth=true',
+  "-c", 'model_providers.clcode.supports_websockets=false',
+  "-c", 'model_providers.clcode.features.responses_websockets_v2=false'
+)
+
+New-Item -ItemType Directory -Path $env:HOME -Force | Out-Null
+New-Item -ItemType Directory -Path $env:CODEX_HOME -Force | Out-Null
+New-Item -ItemType Directory -Path $env:XDG_CONFIG_HOME -Force | Out-Null
+New-Item -ItemType Directory -Path $env:XDG_DATA_HOME -Force | Out-Null
+
+Refresh-ModelCatalog
+Set-Location $callerPwd
+& codex @commonArgs @args
+'@
+Set-Utf8NoBom -Path $launcherFile -Value $launcher
+
+Write-Host "Setup complete. Run $launcherFile exec 'Reply with exactly OK.'"
+`, token, publicURL, fallbackCatalog, publicURL)
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte(script))
+		return
+	}
+
+	script := fmt.Sprintf(`#!/bin/bash
+set -euo pipefail
+TOKEN="%s"
+BASE_URL="%s"
+REAL_HOME="$HOME"
+LANE_ROOT="${CLCODE_ROOT:-$REAL_HOME/.local/share/clcode}"
+LANE_HOME="${CLCODE_HOME:-$LANE_ROOT/home}"
+AUTH_DIR="$LANE_HOME/.codex"
+CONFIG_FILE="$AUTH_DIR/config.toml"
+AUTH_FILE="$AUTH_DIR/auth.json"
+MODEL_CATALOG="$AUTH_DIR/model_catalog.json"
+LAUNCHER_DIR="$REAL_HOME/.local/bin"
+LAUNCHER_FILE="$LAUNCHER_DIR/clcode"
+FALLBACK_CATALOG='%s'
+
+echo "Initializing clcode sidecar setup..."
+mkdir -p "$AUTH_DIR" "$LANE_ROOT/config" "$LANE_ROOT/data" "$LAUNCHER_DIR"
+
+echo "1. Fetching credentials..."
+curl -fsSL "$BASE_URL/config/codex/$TOKEN" -o "$AUTH_FILE"
+chmod 600 "$AUTH_FILE"
+
+extract_access_token() {
+    python3 - "$1" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    raise SystemExit(0)
+
+token = ""
+if isinstance(data, dict):
+    nested = data.get("tokens")
+    if isinstance(nested, dict):
+        token = str(nested.get("access_token") or "").strip()
+    if not token:
+        token = str(data.get("access_token") or "").strip()
+
+if token:
+    print(token)
+PY
+}
+
+echo "2. Fetching model catalog..."
+ACCESS_TOKEN=$(extract_access_token "$AUTH_FILE")
+if [ -n "${ACCESS_TOKEN:-}" ]; then
+    if ! curl --connect-timeout 5 --max-time 10 -fsSL \
+        -H "Authorization: Bearer $ACCESS_TOKEN" \
+        "$BASE_URL/backend-api/codex/models?client_version=0.106.0" \
+        -o "$MODEL_CATALOG"; then
+        printf '%%s\n' "$FALLBACK_CATALOG" > "$MODEL_CATALOG"
+    fi
+else
+    printf '%%s\n' "$FALLBACK_CATALOG" > "$MODEL_CATALOG"
+fi
+chmod 600 "$MODEL_CATALOG" 2>/dev/null || true
+
+echo "3. Writing isolated Codex config..."
+cat <<EOF > "$CONFIG_FILE"
+model = "gpt-5-codex"
+model_provider = "clcode"
+model_reasoning_effort = "medium"
+chatgpt_base_url = "$BASE_URL/backend-api"
+model_catalog_json = "$MODEL_CATALOG"
+
+[model_providers.clcode]
+name = "GitLab Codex via clcode sidecar"
+base_url = "$BASE_URL"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = false
+
+[model_providers.clcode.features]
+responses_websockets_v2 = false
+EOF
+chmod 600 "$CONFIG_FILE"
+
+echo "4. Installing clcode launcher..."
+cat <<'EOF' > "$LAUNCHER_FILE"
+#!/bin/bash
+set -euo pipefail
+CALLER_PWD="${PWD}"
+REAL_HOME="${HOME}"
+export CLCODE_ROOT="${CLCODE_ROOT:-$REAL_HOME/.local/share/clcode}"
+export CLCODE_HOME="${CLCODE_HOME:-$CLCODE_ROOT/home}"
+export CLCODE_XDG_CONFIG_HOME="${CLCODE_XDG_CONFIG_HOME:-$CLCODE_ROOT/config}"
+export CLCODE_XDG_DATA_HOME="${CLCODE_XDG_DATA_HOME:-$CLCODE_ROOT/data}"
+export CODEX_HOME="$CLCODE_HOME/.codex"
+export HOME="$CLCODE_HOME"
+export XDG_CONFIG_HOME="$CLCODE_XDG_CONFIG_HOME"
+export XDG_DATA_HOME="$CLCODE_XDG_DATA_HOME"
+CLCODE_BASE_URL="${CLCODE_BASE_URL:-%s}"
+CLCODE_MODEL_CATALOG="${CLCODE_MODEL_CATALOG:-$CODEX_HOME/model_catalog.json}"
+refresh_model_catalog() {
+  local auth_file="$CODEX_HOME/auth.json"
+  if [ ! -f "$auth_file" ]; then
+    return 0
+  fi
+
+  local access_token
+  access_token=$(python3 - "$auth_file" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    raise SystemExit(0)
+
+token = ""
+if isinstance(data, dict):
+    nested = data.get("tokens")
+    if isinstance(nested, dict):
+        token = str(nested.get("access_token") or "").strip()
+    if not token:
+        token = str(data.get("access_token") or "").strip()
+
+if token:
+    print(token)
+PY
+)
+  if [ -z "${access_token:-}" ]; then
+    return 0
+  fi
+
+  local tmp_file
+  tmp_file=$(mktemp "${CLCODE_MODEL_CATALOG}.tmp.XXXXXX")
+  if curl --connect-timeout 2 --max-time 8 -fsSL \
+    -H "Authorization: Bearer $access_token" \
+    "${CLCODE_BASE_URL%%/}/backend-api/codex/models?client_version=0.106.0" \
+    -o "$tmp_file"; then
+    mv "$tmp_file" "$CLCODE_MODEL_CATALOG"
+    chmod 600 "$CLCODE_MODEL_CATALOG" 2>/dev/null || true
+  else
+    rm -f "$tmp_file"
+  fi
+}
+COMMON_ARGS=(
+  -c 'model_provider="clcode"'
+  -c 'model="gpt-5-codex"'
+  -c 'model_reasoning_effort="medium"'
+  -c "chatgpt_base_url=\"$CLCODE_BASE_URL/backend-api\""
+  -c "model_catalog_json=\"$CLCODE_MODEL_CATALOG\""
+  -c 'model_providers.clcode.name="GitLab Codex via clcode sidecar"'
+  -c "model_providers.clcode.base_url=\"$CLCODE_BASE_URL\""
+  -c 'model_providers.clcode.wire_api="responses"'
+  -c 'model_providers.clcode.requires_openai_auth=true'
+  -c 'model_providers.clcode.supports_websockets=false'
+  -c 'model_providers.clcode.features.responses_websockets_v2=false'
+)
+mkdir -p "$HOME" "$CODEX_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME"
+refresh_model_catalog >/dev/null 2>&1 || true
+cd "$CALLER_PWD"
+exec codex "${COMMON_ARGS[@]}" "$@"
+EOF
+chmod 700 "$LAUNCHER_FILE"
+
+echo "Setup complete. Run clcode exec 'Reply with exactly OK.'"
+`, token, publicURL, fallbackCatalog, publicURL)
 
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.Write([]byte(script))

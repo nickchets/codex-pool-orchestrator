@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -75,26 +76,26 @@ func TestOperatorGeminiSeatSmokeBlockedSeatUsesFallbackProject(t *testing.T) {
 	}))
 	defer server.Close()
 
+	acc := &Account{
+		ID:                           "gemini-seat-blocked",
+		Type:                         AccountTypeGemini,
+		PlanType:                     "gemini",
+		AuthMode:                     accountAuthModeOAuth,
+		AccessToken:                  "seat-access",
+		OperatorSource:               geminiOperatorSourceAntigravityImport,
+		OAuthProfileID:               geminiOAuthAntigravityProfileID,
+		AntigravityValidationBlocked: true,
+		HealthStatus:                 "restricted",
+		GeminiProviderTruthState:     geminiProviderTruthStateRestricted,
+		GeminiValidationReasonCode:   "UNSUPPORTED_LOCATION",
+	}
+
 	h := &proxyHandler{
 		cfg: config{
 			geminiBase: mustParse(server.URL),
 		},
 		refreshTransport: server.Client().Transport,
-		pool: newPoolState([]*Account{
-			{
-				ID:                           "gemini-seat-blocked",
-				Type:                         AccountTypeGemini,
-				PlanType:                     "gemini",
-				AuthMode:                     accountAuthModeOAuth,
-				AccessToken:                  "seat-access",
-				OperatorSource:               geminiOperatorSourceAntigravityImport,
-				OAuthProfileID:               geminiOAuthAntigravityProfileID,
-				AntigravityValidationBlocked: true,
-				HealthStatus:                 "restricted",
-				GeminiProviderTruthState:     geminiProviderTruthStateRestricted,
-				GeminiValidationReasonCode:   "UNSUPPORTED_LOCATION",
-			},
-		}, false),
+		pool:             newPoolState([]*Account{acc}, false),
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/gemini/seat-smoke", strings.NewReader(`{"account_id":"gemini-seat-blocked","model":"gemini-2.5-flash","prompt":"Reply with exactly BLOCKED_OK."}`))
@@ -143,6 +144,114 @@ func TestOperatorGeminiSeatSmokeBlockedSeatUsesFallbackProject(t *testing.T) {
 	}
 	if resp.LoadCodeAssist == nil || !resp.LoadCodeAssist.OK {
 		t.Fatalf("load_code_assist = %+v", resp.LoadCodeAssist)
+	}
+	acc.mu.Lock()
+	gotProjectID := acc.AntigravityProjectID
+	gotProviderTruthState := acc.GeminiProviderTruthState
+	acc.mu.Unlock()
+	if gotProjectID != antigravityGeminiFallbackProject {
+		t.Fatalf("saved project_id = %q", gotProjectID)
+	}
+	if gotProviderTruthState != geminiProviderTruthStateRestricted {
+		t.Fatalf("saved provider_truth_state = %q", gotProviderTruthState)
+	}
+}
+
+func TestOperatorGeminiSeatSmokePersistsFallbackProjectForProjectlessSeat(t *testing.T) {
+	t.Helper()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1internal:loadCodeAssist":
+			var req antigravityLoadCodeAssistRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode load request: %v", err)
+			}
+			if req.CloudaicompanionProject != antigravityGeminiFallbackProject {
+				t.Fatalf("load project = %q", req.CloudaicompanionProject)
+			}
+			respondJSON(w, map[string]any{
+				"currentTier": map[string]any{
+					"id":   "free-tier",
+					"name": "Antigravity",
+				},
+			})
+		case "/v1internal:generateContent":
+			var req geminiCodeAssistRequestPayload
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode generate request: %v", err)
+			}
+			if req.Project != antigravityGeminiFallbackProject {
+				t.Fatalf("generate project = %q", req.Project)
+			}
+			respondJSON(w, map[string]any{
+				"response": map[string]any{
+					"candidates": []map[string]any{
+						{
+							"content": map[string]any{
+								"role": "model",
+								"parts": []map[string]any{
+									{"text": "PROJECT_OK"},
+								},
+							},
+						},
+					},
+				},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	acc := &Account{
+		ID:                     "gemini-seat-projectless",
+		Type:                   AccountTypeGemini,
+		PlanType:               "gemini",
+		AuthMode:               accountAuthModeOAuth,
+		AccessToken:            "seat-access",
+		OperatorSource:         geminiOperatorSourceAntigravityImport,
+		OAuthProfileID:         geminiOAuthAntigravityProfileID,
+		GeminiOperationalState: geminiOperationalTruthStateDegradedOK,
+	}
+
+	h := &proxyHandler{
+		cfg: config{
+			geminiBase: mustParse(server.URL),
+		},
+		refreshTransport: server.Client().Transport,
+		pool:             newPoolState([]*Account{acc}, false),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/gemini/seat-smoke", strings.NewReader(`{"account_id":"gemini-seat-projectless","model":"gemini-2.5-flash","prompt":"Reply with exactly PROJECT_OK."}`))
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp operatorGeminiSeatSmokeResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if !resp.Generate.OK {
+		t.Fatalf("generate not ok: %+v", resp.Generate)
+	}
+	acc.mu.Lock()
+	gotProjectID := acc.AntigravityProjectID
+	gotProviderTruthState := acc.GeminiProviderTruthState
+	gotOperationalState := acc.GeminiOperationalState
+	acc.mu.Unlock()
+	if gotProjectID != antigravityGeminiFallbackProject {
+		t.Fatalf("saved project_id = %q", gotProjectID)
+	}
+	if gotProviderTruthState != geminiProviderTruthStateReady {
+		t.Fatalf("saved provider_truth_state = %q", gotProviderTruthState)
+	}
+	if gotOperationalState != geminiOperationalTruthStateCleanOK {
+		t.Fatalf("saved operational_state = %q", gotOperationalState)
 	}
 }
 
@@ -266,6 +375,107 @@ func TestOperatorGeminiSeatSmokeRewritesGemini31ProAndFallsBackBases(t *testing.
 	}
 	if resp.RoutingState != routingDisplayStateEnabled {
 		t.Fatalf("routing_state = %q", resp.RoutingState)
+	}
+}
+
+func TestResolveAntigravityGeminiProviderTruthUsesFallbackProjectForProjectlessSeat(t *testing.T) {
+	t.Helper()
+
+	var emptyProjectLoads int
+	var fallbackProjectLoads int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1internal:loadCodeAssist" {
+			http.NotFound(w, r)
+			return
+		}
+		var req antigravityLoadCodeAssistRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode load request: %v", err)
+		}
+		switch req.CloudaicompanionProject {
+		case "":
+			emptyProjectLoads++
+			respondJSON(w, map[string]any{
+				"currentTier": map[string]any{
+					"id":   "free-tier",
+					"name": "Antigravity",
+				},
+			})
+		case antigravityGeminiFallbackProject:
+			fallbackProjectLoads++
+			respondJSON(w, map[string]any{
+				"currentTier": map[string]any{
+					"id":   "free-tier",
+					"name": "Antigravity",
+				},
+			})
+		default:
+			t.Fatalf("unexpected project %q", req.CloudaicompanionProject)
+		}
+	}))
+	defer server.Close()
+
+	h := &proxyHandler{
+		cfg:              config{geminiBase: mustParse(server.URL)},
+		refreshTransport: server.Client().Transport,
+	}
+
+	truth, err := h.resolveAntigravityGeminiProviderTruth(context.Background(), "seat-access")
+	if err != nil {
+		t.Fatalf("resolveAntigravityGeminiProviderTruth: %v", err)
+	}
+	if truth.ProjectID != antigravityGeminiFallbackProject {
+		t.Fatalf("project_id = %q", truth.ProjectID)
+	}
+	if truth.SubscriptionTierID != "free-tier" {
+		t.Fatalf("subscription_tier_id = %q", truth.SubscriptionTierID)
+	}
+	if emptyProjectLoads != 1 || fallbackProjectLoads != 1 {
+		t.Fatalf("load counts empty=%d fallback=%d", emptyProjectLoads, fallbackProjectLoads)
+	}
+}
+
+func TestResolveAntigravityGeminiProviderTruthUsesFallbackProjectForRestrictedSeat(t *testing.T) {
+	t.Helper()
+
+	var fallbackProjectLoads int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1internal:loadCodeAssist" {
+			http.NotFound(w, r)
+			return
+		}
+		var req antigravityLoadCodeAssistRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode load request: %v", err)
+		}
+		if req.CloudaicompanionProject == antigravityGeminiFallbackProject {
+			fallbackProjectLoads++
+		}
+		respondJSON(w, map[string]any{
+			"ineligibleTiers": []map[string]any{
+				{"reasonCode": "UNSUPPORTED_LOCATION", "reasonMessage": "region blocked"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	h := &proxyHandler{
+		cfg:              config{geminiBase: mustParse(server.URL)},
+		refreshTransport: server.Client().Transport,
+	}
+
+	truth, err := h.resolveAntigravityGeminiProviderTruth(context.Background(), "seat-access")
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if truth.ProjectID != antigravityGeminiFallbackProject {
+		t.Fatalf("project_id = %q", truth.ProjectID)
+	}
+	if truth.ValidationReasonCode != "UNSUPPORTED_LOCATION" {
+		t.Fatalf("validation_reason_code = %q", truth.ValidationReasonCode)
+	}
+	if fallbackProjectLoads != 1 {
+		t.Fatalf("fallback project loads = %d", fallbackProjectLoads)
 	}
 }
 

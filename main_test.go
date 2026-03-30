@@ -899,6 +899,92 @@ func TestCandidateSupportingPathAllowsForcedDebugGeminiSeatForAllowlistedBlocked
 	}
 }
 
+func TestCandidateSupportingPathReturnsGitLabSharedTPMRateLimitError(t *testing.T) {
+	now := time.Now().UTC()
+	until := now.Add(45 * time.Second)
+	gitlabOne := &Account{
+		ID:              "claude_gitlab_one",
+		Type:            AccountTypeClaude,
+		PlanType:        "gitlab_duo",
+		AuthMode:        accountAuthModeGitLab,
+		AccessToken:     "gateway-1",
+		RefreshToken:    "glpat-1",
+		SourceBaseURL:   defaultGitLabInstanceURL,
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders:    map[string]string{"X-Gitlab-Instance-Id": "inst-1"},
+		RateLimitUntil:  until,
+		HealthStatus:    "rate_limited",
+		HealthError:     managedGitLabClaudeSharedOrgTPMHealthError("This request would exceed your organization's rate limit of 18,000,000 input tokens per minute"),
+	}
+	gitlabTwo := &Account{
+		ID:              "claude_gitlab_two",
+		Type:            AccountTypeClaude,
+		PlanType:        "gitlab_duo",
+		AuthMode:        accountAuthModeGitLab,
+		AccessToken:     "gateway-2",
+		RefreshToken:    "glpat-2",
+		SourceBaseURL:   defaultGitLabInstanceURL,
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders:    map[string]string{"X-Gitlab-Instance-Id": "inst-1"},
+		RateLimitUntil:  until,
+		HealthStatus:    "rate_limited",
+		HealthError:     managedGitLabClaudeSharedOrgTPMHealthError("This request would exceed your organization's rate limit of 18,000,000 input tokens per minute"),
+	}
+	baseURL, _ := url.Parse(defaultGitLabClaudeGatewayURL)
+	h := &proxyHandler{pool: newPoolState([]*Account{gitlabOne, gitlabTwo}, false)}
+	provider := NewClaudeProvider(baseURL)
+
+	got, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeClaude, "gitlab_duo", provider, "/v1/messages", "claude-opus-4-6", "")
+	if got != nil {
+		t.Fatalf("candidate = %+v, want nil", got)
+	}
+	rateLimitErr, ok := asRateLimitResponseError(err)
+	if !ok {
+		t.Fatalf("expected rate-limit error, got %v", err)
+	}
+	if !strings.Contains(rateLimitErr.Error(), "organization's rate limit") {
+		t.Fatalf("error=%q", rateLimitErr.Error())
+	}
+	if rateLimitErr.retryAfter <= 0 {
+		t.Fatalf("retry_after=%v", rateLimitErr.retryAfter)
+	}
+}
+
+func TestCandidateSupportingPathStillUsesDirectClaudeWhenGitLabSharedTPMActive(t *testing.T) {
+	now := time.Now().UTC()
+	gitlab := &Account{
+		ID:              "claude_gitlab_rate_limited",
+		Type:            AccountTypeClaude,
+		PlanType:        "gitlab_duo",
+		AuthMode:        accountAuthModeGitLab,
+		AccessToken:     "gateway-1",
+		RefreshToken:    "glpat-1",
+		SourceBaseURL:   defaultGitLabInstanceURL,
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders:    map[string]string{"X-Gitlab-Instance-Id": "inst-1"},
+		RateLimitUntil:  now.Add(45 * time.Second),
+		HealthStatus:    "rate_limited",
+		HealthError:     managedGitLabClaudeSharedOrgTPMHealthError("This request would exceed your organization's rate limit of 18,000,000 input tokens per minute"),
+	}
+	direct := &Account{
+		ID:          "claude_direct_live",
+		Type:        AccountTypeClaude,
+		PlanType:    "claude",
+		AccessToken: "sk-ant-api-live",
+	}
+	baseURL, _ := url.Parse(defaultGitLabClaudeGatewayURL)
+	h := &proxyHandler{pool: newPoolState([]*Account{gitlab, direct}, false)}
+	provider := NewClaudeProvider(baseURL)
+
+	got, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeClaude, "", provider, "/v1/messages", "claude-opus-4-6", "")
+	if err != nil {
+		t.Fatalf("candidate supporting path: %v", err)
+	}
+	if got == nil || got.ID != direct.ID {
+		t.Fatalf("candidate = %+v, want %s", got, direct.ID)
+	}
+}
+
 func TestCandidateSupportingPathRejectsForcedDebugGeminiSeatForUnsupportedBlockedV1BetaPath(t *testing.T) {
 	blocked := &Account{
 		ID:                           "gemini_seat_blocked",

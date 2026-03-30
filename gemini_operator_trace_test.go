@@ -156,6 +156,9 @@ func TestResolveAntigravityGeminiProviderTruthStopsAfterStandardTierValidation(t
 	if truth.ValidationReasonCode != "UNSUPPORTED_LOCATION" {
 		t.Fatalf("ValidationReasonCode=%q", truth.ValidationReasonCode)
 	}
+	if truth.ProjectID != antigravityGeminiFallbackProject {
+		t.Fatalf("ProjectID=%q", truth.ProjectID)
+	}
 	if len(onboardCalls) != 1 {
 		t.Fatalf("onboard calls=%d want 1", len(onboardCalls))
 	}

@@ -1743,10 +1743,10 @@ func antigravityGeminiProviderTruthFromLoad(res *antigravityLoadCodeAssistRespon
 		truth.SubscriptionTierID = strings.TrimSpace(res.CurrentTier.ID)
 		truth.SubscriptionTierName = strings.TrimSpace(res.CurrentTier.Name)
 	}
-	usableProjectReady := strings.TrimSpace(truth.ProjectID) != ""
+	providerProjectReady := res != nil && strings.TrimSpace(res.CloudaicompanionProject) != ""
 	usableTierReady := res.CurrentTier != nil &&
 		(strings.TrimSpace(res.CurrentTier.ID) != "" || strings.TrimSpace(res.CurrentTier.Name) != "")
-	if !usableProjectReady && !usableTierReady {
+	if !providerProjectReady && !usableTierReady {
 		for _, tier := range res.IneligibleTiers {
 			reasonCode := strings.TrimSpace(tier.ReasonCode)
 			reasonMessage := strings.TrimSpace(tier.ReasonMessage)
@@ -1761,6 +1761,27 @@ func antigravityGeminiProviderTruthFromLoad(res *antigravityLoadCodeAssistRespon
 		}
 	}
 	return truth
+}
+
+func (h *proxyHandler) maybeLoadAntigravityGeminiFallbackProject(ctx context.Context, accessToken string, res *antigravityLoadCodeAssistResponse) (*antigravityLoadCodeAssistResponse, error, bool) {
+	if h == nil {
+		return res, nil, false
+	}
+	if strings.TrimSpace(accessToken) == "" {
+		return res, nil, false
+	}
+	if res != nil && strings.TrimSpace(res.CloudaicompanionProject) != "" {
+		return res, nil, false
+	}
+	fallbackProjectID := strings.TrimSpace(antigravityGeminiFallbackProject)
+	if fallbackProjectID == "" {
+		return res, nil, false
+	}
+	fallbackRes, err := h.loadAntigravityGeminiCodeAssist(ctx, accessToken, fallbackProjectID, "")
+	if err != nil {
+		return nil, err, true
+	}
+	return fallbackRes, nil, true
 }
 
 func antigravityOnboardTierCandidates(res *antigravityLoadCodeAssistResponse) []string {
@@ -1869,8 +1890,22 @@ func (h *proxyHandler) resolveAntigravityGeminiProviderTruth(ctx context.Context
 			trace.noteProviderTruth(AccountTypeGemini, "resolve", "ok", truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), nil)
 			return truth, nil
 		}
+		if fallbackRes, fallbackErr, usedFallback := h.maybeLoadAntigravityGeminiFallbackProject(ctx, accessToken, reloaded); usedFallback {
+			if fallbackErr == nil {
+				reloaded = fallbackRes
+				truth := antigravityGeminiProviderTruthFromLoad(reloaded, antigravityGeminiFallbackProject, time.Now().UTC())
+				if message := antigravityLoadValidationMessage(reloaded); message != "" {
+					validationErr := fmt.Errorf("%s", message)
+					trace.noteProviderTruth(AccountTypeGemini, "resolve", antigravityGeminiProviderTruthTraceState(truth), truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), validationErr)
+					return truth, validationErr
+				}
+				trace.noteProviderTruth(AccountTypeGemini, "resolve", "ok", truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), nil)
+				return truth, nil
+			}
+			lastErr = fallbackErr
+		}
 		if message := antigravityLoadValidationMessage(reloaded); message != "" {
-			truth := antigravityGeminiProviderTruthFromLoad(reloaded, "", time.Now().UTC())
+			truth := antigravityGeminiProviderTruthFromLoad(reloaded, antigravityGeminiFallbackProject, time.Now().UTC())
 			validationErr := fmt.Errorf("%s", message)
 			trace.noteProviderTruth(AccountTypeGemini, "resolve", antigravityGeminiProviderTruthTraceState(truth), truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), validationErr)
 			return truth, validationErr
@@ -1891,6 +1926,20 @@ func (h *proxyHandler) resolveAntigravityGeminiProviderTruth(ctx context.Context
 		truth := antigravityGeminiProviderTruthFromLoad(loadRes, projectID, time.Now().UTC())
 		trace.noteProviderTruth(AccountTypeGemini, "resolve", "ok", truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), nil)
 		return truth, nil
+	}
+	if fallbackRes, fallbackErr, usedFallback := h.maybeLoadAntigravityGeminiFallbackProject(ctx, accessToken, loadRes); usedFallback {
+		if fallbackErr == nil {
+			loadRes = fallbackRes
+			truth := antigravityGeminiProviderTruthFromLoad(loadRes, antigravityGeminiFallbackProject, time.Now().UTC())
+			if message := antigravityLoadValidationMessage(loadRes); message != "" {
+				validationErr := fmt.Errorf("%s", message)
+				trace.noteProviderTruth(AccountTypeGemini, "resolve", antigravityGeminiProviderTruthTraceState(truth), truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), validationErr)
+				return truth, validationErr
+			}
+			trace.noteProviderTruth(AccountTypeGemini, "resolve", "ok", truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), nil)
+			return truth, nil
+		}
+		lastErr = fallbackErr
 	}
 
 	for _, tierID := range antigravityOnboardTierCandidates(loadRes) {
@@ -1928,10 +1977,24 @@ func (h *proxyHandler) resolveAntigravityGeminiProviderTruth(ctx context.Context
 			trace.noteProviderTruth(AccountTypeGemini, "resolve", "ok", truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), nil)
 			return truth, nil
 		}
+		if fallbackRes, fallbackErr, usedFallback := h.maybeLoadAntigravityGeminiFallbackProject(ctx, accessToken, reloaded); usedFallback {
+			if fallbackErr == nil {
+				reloaded = fallbackRes
+				truth := antigravityGeminiProviderTruthFromLoad(reloaded, antigravityGeminiFallbackProject, time.Now().UTC())
+				if message := antigravityLoadValidationMessage(reloaded); message != "" {
+					validationErr := fmt.Errorf("%s", message)
+					trace.noteProviderTruth(AccountTypeGemini, "resolve", antigravityGeminiProviderTruthTraceState(truth), truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), validationErr)
+					return truth, validationErr
+				}
+				trace.noteProviderTruth(AccountTypeGemini, "resolve", "ok", truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), nil)
+				return truth, nil
+			}
+			lastErr = fallbackErr
+		}
 	}
 
 	if message := antigravityLoadValidationMessage(loadRes); message != "" {
-		truth := antigravityGeminiProviderTruthFromLoad(loadRes, "", time.Now().UTC())
+		truth := antigravityGeminiProviderTruthFromLoad(loadRes, antigravityGeminiFallbackProject, time.Now().UTC())
 		validationErr := fmt.Errorf("%s", message)
 		trace.noteProviderTruth(AccountTypeGemini, "resolve", antigravityGeminiProviderTruthTraceState(truth), truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), validationErr)
 		return truth, validationErr
@@ -1941,7 +2004,7 @@ func (h *proxyHandler) resolveAntigravityGeminiProviderTruth(ctx context.Context
 		return antigravityGeminiProviderTruth{}, lastErr
 	}
 	finalErr := fmt.Errorf("antigravity auth did not yield a Code Assist project id")
-	truth := antigravityGeminiProviderTruthFromLoad(loadRes, "", time.Now().UTC())
+	truth := antigravityGeminiProviderTruthFromLoad(loadRes, antigravityGeminiFallbackProject, time.Now().UTC())
 	trace.noteProviderTruth(AccountTypeGemini, "resolve", "fail", truth.ProjectID, truth.SubscriptionTierID, truth.ValidationReasonCode, time.Since(startedAt), finalErr)
 	return truth, finalErr
 }

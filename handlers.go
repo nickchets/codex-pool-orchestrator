@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -11,6 +12,136 @@ import (
 	"strings"
 	"time"
 )
+
+func isGitLabCodexAuxiliaryRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/backend-api/plugins/list":
+		return true
+	case r.Method == http.MethodGet && r.URL.Path == "/backend-api/plugins/featured":
+		return true
+	case r.Method == http.MethodGet && r.URL.Path == "/backend-api/connectors/directory/list":
+		return true
+	case r.Method == http.MethodPost && r.URL.Path == "/backend-api/wham/apps":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *proxyHandler) maybeServeGitLabCodexAuxiliary(w http.ResponseWriter, r *http.Request, reqID string, admission AdmissionResult) bool {
+	if h == nil || admission.Kind != AdmissionKindPoolUser || !codexRequiresGitLabPlan(h.cfg.forceCodexRequiredPlan) || !isGitLabCodexAuxiliaryRequest(r) {
+		return false
+	}
+
+	var payload any
+	switch r.URL.Path {
+	case "/backend-api/plugins/list":
+		payload = map[string]any{"items": []any{}}
+	case "/backend-api/plugins/featured":
+		payload = []string{}
+	case "/backend-api/connectors/directory/list":
+		payload = map[string]any{"items": []any{}}
+	case "/backend-api/wham/apps":
+		payload = gitLabCodexWHAMAppsResponse(r)
+	default:
+		return false
+	}
+
+	if h.cfg.debug {
+		log.Printf("[%s] served local gitlab codex auxiliary response for %s", reqID, r.URL.Path)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Codex-Auxiliary", "gitlab-sidecar")
+	respondJSON(w, payload)
+	return true
+}
+
+func gitLabCodexWHAMAppsResponse(r *http.Request) any {
+	type rpcEnvelope struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      any    `json:"id"`
+		Method  string `json:"method"`
+	}
+
+	if r == nil || r.Body == nil {
+		return map[string]any{"items": []any{}}
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+	if err != nil || len(bytes.TrimSpace(body)) == 0 {
+		return map[string]any{"items": []any{}}
+	}
+
+	var env rpcEnvelope
+	if err := json.Unmarshal(body, &env); err != nil || strings.TrimSpace(env.Method) == "" {
+		return map[string]any{"items": []any{}}
+	}
+
+	id := env.ID
+	switch strings.TrimSpace(env.Method) {
+	case "initialize":
+		return map[string]any{
+			"jsonrpc": "2.0",
+			"id":      id,
+			"result": map[string]any{
+				"protocolVersion": "2025-03-26",
+				"capabilities": map[string]any{
+					"tools":     map[string]any{},
+					"resources": map[string]any{},
+					"prompts":   map[string]any{},
+				},
+				"serverInfo": map[string]any{
+					"name":    "gitlab-codex-sidecar",
+					"version": "0.1.0",
+				},
+			},
+		}
+	case "notifications/initialized":
+		return map[string]any{}
+	case "ping":
+		return map[string]any{
+			"jsonrpc": "2.0",
+			"id":      id,
+			"result":  map[string]any{},
+		}
+	case "tools/list":
+		return map[string]any{
+			"jsonrpc": "2.0",
+			"id":      id,
+			"result": map[string]any{
+				"tools": []any{},
+			},
+		}
+	case "resources/list":
+		return map[string]any{
+			"jsonrpc": "2.0",
+			"id":      id,
+			"result": map[string]any{
+				"resources": []any{},
+			},
+		}
+	case "prompts/list":
+		return map[string]any{
+			"jsonrpc": "2.0",
+			"id":      id,
+			"result": map[string]any{
+				"prompts": []any{},
+			},
+		}
+	default:
+		return map[string]any{
+			"jsonrpc": "2.0",
+			"id":      id,
+			"error": map[string]any{
+				"code":    -32601,
+				"message": "method not supported by gitlab codex sidecar",
+			},
+		}
+	}
+}
 
 func (h *proxyHandler) serveHealth(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
@@ -541,7 +672,9 @@ func (h *proxyHandler) handleAggregatedUsage(w http.ResponseWriter, reqID string
 	poolStats := h.pool.getPoolStats()
 
 	resp := map[string]any{
-		"plan_type": "pool", // Indicate this is a pool, not a single account
+		"plan_type": "pro", // Keep a client-compatible value; the pool shape lives under "pool".
+		"is_pooled": true,
+		"pool_plan_type": "pool",
 		"rate_limit": map[string]any{
 			"allowed":       poolStats.HealthyCount > 0,
 			"limit_reached": poolStats.AvgSecondaryUsed > 0.9,

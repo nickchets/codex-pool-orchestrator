@@ -239,6 +239,47 @@ func TestPlanRouteStreamedBodyDoesNotInferRequiredPlan(t *testing.T) {
 	}
 }
 
+func TestPlanRouteForcedGitLabPlanForCodexResponses(t *testing.T) {
+	h := newPlanningTestHandler(t)
+	h.cfg.forceCodexRequiredPlan = accountAuthModeGitLab
+
+	req := httptest.NewRequest("POST", "http://example.com/responses", nil)
+	shape := buildStreamedRequestShape(req)
+
+	plan, rewrittenBody, err := h.planRoute(AdmissionResult{Kind: AdmissionKindPoolUser, UserID: "u1"}, req, shape, nil)
+	if err != nil {
+		t.Fatalf("plan route: %v", err)
+	}
+	if plan.AccountType != AccountTypeCodex {
+		t.Fatalf("account_type = %q", plan.AccountType)
+	}
+	if plan.RequiredPlan != accountAuthModeGitLab {
+		t.Fatalf("required_plan = %q", plan.RequiredPlan)
+	}
+	if rewrittenBody != nil {
+		t.Fatalf("rewritten body should be nil")
+	}
+}
+
+func TestPlanRouteForcedGitLabPlanDoesNotAffectClaude(t *testing.T) {
+	h := newPlanningTestHandler(t)
+	h.cfg.forceCodexRequiredPlan = accountAuthModeGitLab
+
+	req := httptest.NewRequest("POST", "http://example.com/v1/messages", nil)
+	req.Header.Set("X-Api-Key", "sk-ant-api03-real-key")
+
+	plan, _, err := h.planRoute(AdmissionResult{Kind: AdmissionKindPoolUser, UserID: "u1"}, req, buildStreamedRequestShape(req), nil)
+	if err != nil {
+		t.Fatalf("plan route: %v", err)
+	}
+	if plan.AccountType != AccountTypeClaude {
+		t.Fatalf("account_type = %q", plan.AccountType)
+	}
+	if plan.RequiredPlan != "" {
+		t.Fatalf("required_plan = %q", plan.RequiredPlan)
+	}
+}
+
 func TestResolveDebugGeminiSeatOverrideAllowsTrustedLoopback(t *testing.T) {
 	h := newPlanningTestHandler(t)
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8989/v1internal:generateContent", nil)

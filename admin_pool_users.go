@@ -126,6 +126,7 @@ func (h *proxyHandler) handlePoolUsersCreate(w http.ResponseWriter, r *http.Requ
 		"token": user.Token,
 		"setup": map[string]string{
 			"codex_config":    baseURL + "/config/codex/" + user.Token,
+			"clcode_setup":    baseURL + "/setup/clcode/" + user.Token,
 			"gemini_config":   baseURL + "/config/gemini/" + user.Token,
 			"gemini_setup":    baseURL + "/setup/gemini/" + user.Token,
 			"claude_config":   baseURL + "/config/claude/" + user.Token,

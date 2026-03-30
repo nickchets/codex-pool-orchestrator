@@ -1,0 +1,17 @@
+[Unit]
+Description=Codex Pool Proxy (GitLab Codex Sidecar)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.local/share/codex-pool-gitlab/runtime
+EnvironmentFile=%h/.local/share/codex-pool-gitlab/runtime/codex-pool.env
+ExecStart=%h/.local/bin/codex-pool-gitlab
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

@@ -34,7 +34,7 @@ The operator UI is dashboard-first:
 - account onboarding and delete actions are available from the web surface
 - fallback API keys and GitLab Claude tokens are managed from the same operator surface
 - Gemini seat onboarding starts from `/` via the shared pool auth flow; `/status` stays diagnostics-only
-- OpenCode via `codex-pool/gemini-3.1-pro-high` is the canonical Gemini client path after seat onboarding; the exported provider also surfaces `gemini-3.1-pro-low` and other live quota-backed Gemini models when available
+- OpenCode via a pool-backed Gemini default is the canonical client path after seat onboarding; the exported provider keeps a safer default on `codex-pool/gemini-3.1-flash-lite`, while still surfacing `gemini-3.1-pro-high`, `gemini-3.1-pro-low`, and other live quota-backed Gemini models when available
 - older local/manual Gemini import paths are intentionally not exposed on the operator surface anymore
 
 Friends mode still exists, but the local documentation and operator flow are intentionally text-first and dashboard-first instead of screenshot-driven.
@@ -108,12 +108,12 @@ Recommended day-one flow:
 ```bash
 # 1. Open the real per-user /setup/opencode/... URL emitted by the pool.
 # 2. Run the returned installer script.
-opencode run -m codex-pool/gemini-3.1-pro-high "Reply with exactly OK."
+opencode run -m codex-pool/gemini-3.1-flash-lite "Reply with exactly OK."
 ```
 
-The setup URL writes `~/.config/opencode/opencode.json` plus `~/.config/opencode/pool-gemini-accounts.json`, keeps the proxy base URL normalized to `/v1`, and exports `model = codex-pool/gemini-3.1-pro-high`. This is still Gemini through the pool, not a Claude provider switch.
+The setup URL writes `~/.config/opencode/opencode.json` plus `~/.config/opencode/pool-gemini-accounts.json`, keeps the proxy base URL normalized to `/v1`, and exports `model = codex-pool/gemini-3.1-flash-lite`. This is still Gemini through the pool, not a Claude provider switch.
 
-The default stays on `codex-pool/gemini-3.1-pro-high`, but the exported provider model catalog also includes `gemini-3.1-pro-low` and the broader live Gemini quota surface from the pool so OpenCode can stay aligned with what the runtime actually exposes.
+The default favors `codex-pool/gemini-3.1-flash-lite` because it is the most reliable local operator path during seat cooldown churn, but the exported provider model catalog still includes `gemini-3.1-pro-high`, `gemini-3.1-pro-low`, and the broader live Gemini quota surface from the pool so OpenCode can stay aligned with what the runtime actually exposes.
 
 The tokenized `/setup/opencode/...` URL returns an installer script. If you want the raw JSON bundle instead, use the matching tokenized `/config/opencode/...` URL.
 
@@ -187,6 +187,7 @@ Environment variable `PROXY_MAX_INMEM_BODY_BYTES` controls how large a request b
 This repository also includes generic deployment assets for self-hosted installs:
 
 - `systemd/codex-pool.service`
+- `systemd/codex-pool-gitlab.service`
 - `docs/install.md`
 - `docs/upstream-delta.md`
 - `CHANGELOG.md`
@@ -204,6 +205,8 @@ systemctl --user status codex-pool.service --no-pager
 ```
 
 The preferred add-account path is the `/` web surface. `/status` is intentionally diagnostics-only, while `/` stays the operator dashboard rather than a decorative landing page.
+
+If you need an isolated GitLab Codex-only CLI lane, `docs/install.md` also documents the optional `clcode` sidecar path on a separate runtime and port.
 
 Current tracked version is stored in `VERSION`. Fork-specific release history lives in
 `CHANGELOG.md`, and version bump rules live in `VERSIONING.md`.

@@ -36,6 +36,7 @@ type StatusData struct {
 	Accounts             []AccountStatus               `json:"accounts"`
 	TokenAnalytics       *TokenAnalytics               `json:"token_analytics,omitempty"`
 	PoolUtilization      []PoolUtilization             `json:"pool_utilization,omitempty"`
+	CodexForcedPlan      string                        `json:"codex_forced_plan,omitempty"`
 	LocalOperatorEnabled bool                          `json:"-"`
 }
 
@@ -888,6 +889,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		GeneratedAt: now,
 		Uptime:      now.Sub(h.startTime),
 	}
+	data.CodexForcedPlan = strings.TrimSpace(h.cfg.forceCodexRequiredPlan)
 
 	if h.poolUsers != nil {
 		data.PoolUsers = len(h.poolUsers.List())

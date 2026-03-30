@@ -41,27 +41,29 @@ type config struct {
 	disableRefresh  bool
 	refreshProxyURL string // HTTP proxy URL for refresh operations
 
-	debug                 bool
-	logBodies             bool
-	bodyLogLimit          int64
-	traceRequests         bool
-	tracePackets          bool
-	tracePayloads         bool
-	tracePayloadLimit     int
-	traceStallGap         time.Duration
-	maxInMemoryBodyBytes  int64
-	flushInterval         time.Duration
-	usageRefresh          time.Duration
-	maxAttempts           int
-	storePath             string
-	retentionDays         int
-	friendCode            string
-	adminToken            string
-	requestTimeout        time.Duration // Timeout for non-streaming requests (0 = no timeout)
-	streamTimeout         time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
-	streamIdleTimeout     time.Duration // Kill SSE streams idle for this long (0 = no idle timeout)
-	claudePingTailTimeout time.Duration // Cut GitLab Claude SSE tails that degrade into ping-only keepalives after useful output
-	tierThreshold         float64       // Secondary usage % at which we stop preferring a tier (default 0.15)
+	debug                      bool
+	logBodies                  bool
+	bodyLogLimit               int64
+	traceRequests              bool
+	tracePackets               bool
+	tracePayloads              bool
+	tracePayloadLimit          int
+	traceStallGap              time.Duration
+	forceCodexRequiredPlan     string
+	gitLabCodexDiscoveryModels []string
+	maxInMemoryBodyBytes       int64
+	flushInterval              time.Duration
+	usageRefresh               time.Duration
+	maxAttempts                int
+	storePath                  string
+	retentionDays              int
+	friendCode                 string
+	adminToken                 string
+	requestTimeout             time.Duration // Timeout for non-streaming requests (0 = no timeout)
+	streamTimeout              time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
+	streamIdleTimeout          time.Duration // Kill SSE streams idle for this long (0 = no idle timeout)
+	claudePingTailTimeout      time.Duration // Cut GitLab Claude SSE tails that degrade into ping-only keepalives after useful output
+	tierThreshold              float64       // Secondary usage % at which we stop preferring a tier (default 0.15)
 }
 
 func getenv(key, def string) string {
@@ -119,6 +121,8 @@ func buildConfig() config {
 	cfg.refreshProxyURL = getConfigString("REFRESH_PROXY_URL", fileCfg.RefreshProxyURL, "")
 
 	cfg.debug = getConfigBool("PROXY_DEBUG", fileCfg.Debug, false)
+	cfg.forceCodexRequiredPlan = normalizeForceCodexRequiredPlan(getConfigString("PROXY_FORCE_CODEX_REQUIRED_PLAN", fileCfg.ForceCodexRequiredPlan, ""))
+	cfg.gitLabCodexDiscoveryModels = parseCSVEnvList(getConfigString("PROXY_GITLAB_CODEX_DISCOVERY_MODELS", fileCfg.GitLabCodexDiscoveryModels, ""))
 	cfg.logBodies = getenv("PROXY_LOG_BODIES", "0") == "1"
 	cfg.bodyLogLimit = 16 * 1024 // 16 KiB
 	if v := getenv("PROXY_BODY_LOG_LIMIT", ""); v != "" {
@@ -351,24 +355,28 @@ func main() {
 	}
 	log.Printf("codex-pool proxy listening on %s (codex=%d, claude=%d, gemini=%d, kimi=%d, minimax=%d, request_timeout=%v, stream_timeout=%v, stream_idle_timeout=%v, claude_ping_tail_timeout=%v, trace_requests=%v, trace_packets=%v, trace_payloads=%v, trace_stall_gap=%v)",
 		cfg.listenAddr, codexCount, claudeCount, geminiCount, kimiCount, minimaxCount, cfg.requestTimeout, cfg.streamTimeout, cfg.streamIdleTimeout, cfg.claudePingTailTimeout, cfg.traceRequests, cfg.tracePackets, cfg.tracePayloads, cfg.traceStallGap)
+	if cfg.forceCodexRequiredPlan != "" {
+		log.Printf("codex forced required plan enabled: %s", cfg.forceCodexRequiredPlan)
+	}
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
 }
 
 type proxyHandler struct {
-	cfg              config
-	transport        http.RoundTripper
-	refreshTransport http.RoundTripper // Separate transport for refresh ops (may use proxy)
-	pool             *poolState
-	poolUsers        *PoolUserStore
-	registry         *ProviderRegistry
-	store            *usageStore
-	metrics          *metrics
-	recent           *recentErrors
-	inflight         int64
-	startTime        time.Time
-	codexModels      codexModelsCache
+	cfg               config
+	transport         http.RoundTripper
+	refreshTransport  http.RoundTripper // Separate transport for refresh ops (may use proxy)
+	pool              *poolState
+	poolUsers         *PoolUserStore
+	registry          *ProviderRegistry
+	store             *usageStore
+	metrics           *metrics
+	recent            *recentErrors
+	inflight          int64
+	startTime         time.Time
+	codexModels       codexModelsCache
+	gitlabCodexModels codexModelsCache
 
 	// Rate limiting for token refresh operations
 	refreshMu       sync.Mutex
@@ -526,6 +534,20 @@ func (h *proxyHandler) applyUpstreamAuthFailureDisposition(reqID string, acc *Ac
 	if acc == nil || resp == nil {
 		return
 	}
+	if isGitLabCodexAccount(acc) {
+		if accountIsDead(acc) {
+			return
+		}
+		disposition := classifyManagedGitLabCodexError(managedGitLabCodexErrorSourceGatewayRequest, resp.StatusCode, resp.Header, inspectedBody)
+		applyManagedGitLabCodexDisposition(acc, disposition, resp.Header, time.Now())
+		if err := saveAccount(acc); err != nil {
+			log.Printf("[%s] warning: failed to save gitlab codex account %s: %v", reqID, acc.ID, err)
+		}
+		if disposition.MarkDead {
+			log.Printf("[%s] gitlab codex account %s marked dead: %s", reqID, acc.ID, disposition.Reason)
+		}
+		return
+	}
 	if isGitLabClaudeAccount(acc) {
 		if accountIsDead(acc) {
 			return
@@ -610,14 +632,35 @@ func (h *proxyHandler) applyPreCopyUpstreamStatusDisposition(reqID string, acc *
 	if acc == nil || resp == nil {
 		return nil
 	}
+	if isGitLabCodexAccount(acc) && (resp.StatusCode == http.StatusPaymentRequired || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		if accountIsDead(acc) {
+			return nil
+		}
+		disposition := classifyManagedGitLabCodexError(managedGitLabCodexErrorSourceGatewayRequest, resp.StatusCode, resp.Header, inspectedBody)
+		applyManagedGitLabCodexDisposition(acc, disposition, resp.Header, time.Now())
+		if err := saveAccount(acc); err != nil {
+			log.Printf("[%s] warning: failed to save gitlab codex account %s: %v", reqID, acc.ID, err)
+		}
+		if disposition.MarkDead {
+			log.Printf("[%s] gitlab codex account %s unavailable: %s", reqID, acc.ID, disposition.Reason)
+		}
+		return nil
+	}
 	if isGitLabClaudeAccount(acc) && (resp.StatusCode == http.StatusPaymentRequired || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 		if accountIsDead(acc) {
 			return nil
 		}
+		now := time.Now()
 		disposition := classifyManagedGitLabClaudeError(managedGitLabClaudeErrorSourceGatewayRequest, resp.StatusCode, resp.Header, inspectedBody)
-		applyManagedGitLabClaudeDisposition(acc, disposition, resp.Header, time.Now())
-		if err := saveAccount(acc); err != nil {
-			log.Printf("[%s] warning: failed to save gitlab claude account %s: %v", reqID, acc.ID, err)
+		applyManagedGitLabClaudeDisposition(acc, disposition, resp.Header, now)
+		sharedPersisted := false
+		if disposition.RateLimit && disposition.SharedOrgTPM {
+			sharedPersisted = h.propagateManagedGitLabClaudeSharedTPMCooldown(reqID, acc, disposition, resp.Header, requestedModel, now)
+		}
+		if !sharedPersisted {
+			if err := saveAccount(acc); err != nil {
+				log.Printf("[%s] warning: failed to save gitlab claude account %s: %v", reqID, acc.ID, err)
+			}
 		}
 		if disposition.MarkDead {
 			log.Printf("[%s] gitlab claude account %s unavailable: %s", reqID, acc.ID, disposition.Reason)
@@ -669,6 +712,7 @@ func (h *proxyHandler) applyPreCopyUpstreamStatusHandling(reqID string, acc *Acc
 
 	result.NeedStatusBody = (isManagedCodexAPIKeyAccount(acc) && isManagedCodexAPIKeyRetryableStatus(resp.StatusCode)) ||
 		(acc != nil && acc.Type == AccountTypeGemini && resp.StatusCode == http.StatusTooManyRequests) ||
+		(isGitLabClaudeAccount(acc) && resp.StatusCode == http.StatusTooManyRequests) ||
 		resp.StatusCode == http.StatusUnauthorized ||
 		resp.StatusCode == http.StatusForbidden
 	if result.NeedStatusBody {
@@ -1117,10 +1161,15 @@ func formatBufferedRetryStatusError(resp *http.Response, bodyText string) error 
 	if resp == nil {
 		return nil
 	}
+	message := fmt.Sprintf("upstream %s", resp.Status)
 	if strings.TrimSpace(bodyText) != "" {
-		return fmt.Errorf("upstream %s: %s", resp.Status, bodyText)
+		message = fmt.Sprintf("upstream %s: %s", resp.Status, bodyText)
 	}
-	return fmt.Errorf("upstream %s", resp.Status)
+	if resp.StatusCode == http.StatusTooManyRequests {
+		retryAfter, _ := parseRetryAfter(resp.Header)
+		return &rateLimitResponseError{message: message, retryAfter: retryAfter}
+	}
+	return errors.New(message)
 }
 
 type bufferedAttemptSuccess struct {
@@ -1140,9 +1189,55 @@ type copiedProxyResponseDeliveryOptions struct {
 	existingSample        *bytes.Buffer
 }
 
+type rateLimitResponseError struct {
+	message    string
+	retryAfter time.Duration
+}
+
+func (e *rateLimitResponseError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.message
+}
+
+func asRateLimitResponseError(err error) (*rateLimitResponseError, bool) {
+	var target *rateLimitResponseError
+	if !errors.As(err, &target) || target == nil {
+		return nil, false
+	}
+	return target, true
+}
+
+func retryAfterHeaderValue(wait time.Duration) string {
+	if wait <= 0 {
+		return ""
+	}
+	seconds := int((wait + time.Second - 1) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	return strconv.Itoa(seconds)
+}
+
+func writeHTTPErrorWithOptionalRateLimit(w http.ResponseWriter, err error, fallbackStatus int) {
+	if err == nil {
+		http.Error(w, "request failed", fallbackStatus)
+		return
+	}
+	status := fallbackStatus
+	if rateLimitErr, ok := asRateLimitResponseError(err); ok {
+		status = http.StatusTooManyRequests
+		if retryAfter := retryAfterHeaderValue(rateLimitErr.retryAfter); retryAfter != "" {
+			w.Header().Set("Retry-After", retryAfter)
+		}
+	}
+	http.Error(w, err.Error(), status)
+}
+
 func writeBufferedUnavailableAccountError(w http.ResponseWriter, lastErr error, accountType AccountType, requiredPlan, requestedModel string) {
 	if lastErr != nil {
-		http.Error(w, lastErr.Error(), http.StatusServiceUnavailable)
+		writeHTTPErrorWithOptionalRateLimit(w, lastErr, http.StatusServiceUnavailable)
 		return
 	}
 	if requiredPlan != "" {
@@ -1160,7 +1255,7 @@ func writeBufferedAttemptFailure(w http.ResponseWriter, lastStatus int, lastErr 
 	if lastErr == nil {
 		lastErr = errors.New("all attempts failed")
 	}
-	http.Error(w, lastErr.Error(), status)
+	writeHTTPErrorWithOptionalRateLimit(w, lastErr, status)
 }
 
 func bufferedRetryTraceReason(statusCode int, bodyText string) string {
@@ -1207,7 +1302,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 
 	// Handle 402 Payment Required - often means deactivated workspace/subscription.
 	if resp.StatusCode == http.StatusPaymentRequired {
-		if isGitLabClaudeAccount(acc) {
+		if isGitLabClaudeAccount(acc) || isGitLabCodexAccount(acc) {
 			_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body, requestedModel, requestPath)
 			err := formatBufferedRetryStatusError(resp, retryInspection.Text)
 			h.recent.add(err.Error())
@@ -1375,7 +1470,7 @@ func (h *proxyHandler) candidateSupportingPath(conversationID string, exclude ma
 	for attempt := 0; attempt < attempts; attempt++ {
 		acc := h.pool.candidate(conversationID, exclude, accountType, requiredPlan)
 		if acc == nil {
-			return nil, nil
+			break
 		}
 		exclude[acc.ID] = true
 		if !providerSupportsPathForAccount(provider, path, acc) {
@@ -1392,7 +1487,159 @@ func (h *proxyHandler) candidateSupportingPath(conversationID string, exclude ma
 		return acc, nil
 	}
 
+	if err := h.gitLabClaudeSharedTPMCooldownError(now, accountType, requiredPlan, provider, path); err != nil {
+		return nil, err
+	}
+	if err := h.gitLabCodexCooldownError(now, accountType, requiredPlan, provider, path); err != nil {
+		return nil, err
+	}
 	return nil, nil
+}
+
+func (h *proxyHandler) propagateManagedGitLabClaudeSharedTPMCooldown(reqID string, trigger *Account, disposition managedGitLabClaudeErrorDisposition, headers http.Header, requestedModel string, now time.Time) bool {
+	if h == nil || h.pool == nil || trigger == nil || !isGitLabClaudeAccount(trigger) || !disposition.RateLimit || !disposition.SharedOrgTPM {
+		return false
+	}
+
+	scopeKey := gitLabClaudeScopeKey(trigger)
+	if scopeKey == "" {
+		return false
+	}
+	wait := managedGitLabClaudeCooldownWait(disposition, headers)
+	if wait <= 0 {
+		wait = managedGitLabClaudeOrgTPMRateLimitWait
+	}
+	until := now.Add(wait)
+	sharedReason := managedGitLabClaudeSharedOrgTPMHealthError(disposition.Reason)
+
+	h.pool.mu.RLock()
+	accounts := append([]*Account{}, h.pool.accounts...)
+	h.pool.mu.RUnlock()
+
+	var affected []string
+	for _, acc := range accounts {
+		if acc == nil || !isGitLabClaudeAccount(acc) || gitLabClaudeScopeKey(acc) != scopeKey {
+			continue
+		}
+
+		changed := false
+		acc.mu.Lock()
+		if acc.Disabled || acc.Dead {
+			acc.mu.Unlock()
+			continue
+		}
+		if acc.RateLimitUntil.Before(until) {
+			acc.RateLimitUntil = until
+			changed = true
+		}
+		if acc.HealthStatus != "rate_limited" {
+			acc.HealthStatus = "rate_limited"
+			changed = true
+		}
+		if acc.HealthCheckedAt.Before(now) {
+			acc.HealthCheckedAt = now
+			changed = true
+		}
+		if acc.HealthError != sharedReason {
+			acc.HealthError = sharedReason
+			changed = true
+		}
+		acc.mu.Unlock()
+
+		if !changed {
+			continue
+		}
+		affected = append(affected, acc.ID)
+		if err := saveAccount(acc); err != nil {
+			log.Printf("[%s] warning: failed to persist shared gitlab claude cooldown for %s: %v", reqID, acc.ID, err)
+		}
+	}
+
+	if len(affected) == 0 {
+		return false
+	}
+	log.Printf("[%s] gitlab claude shared org TPM cooldown activated scope=%s requested_model=%q until=%s seats=%s reason=%s", reqID, scopeKey, requestedModel, until.UTC().Format(time.RFC3339), strings.Join(affected, ","), stripManagedGitLabClaudeSharedOrgTPMHealthPrefix(sharedReason))
+	return true
+}
+
+func (h *proxyHandler) gitLabClaudeSharedTPMCooldownError(now time.Time, accountType AccountType, requiredPlan string, provider Provider, path string) error {
+	if h == nil || h.pool == nil || accountType != AccountTypeClaude || provider == nil || provider.Type() != AccountTypeClaude {
+		return nil
+	}
+
+	h.pool.mu.RLock()
+	accounts := append([]*Account{}, h.pool.accounts...)
+	h.pool.mu.RUnlock()
+
+	var until time.Time
+	reason := ""
+	for _, acc := range accounts {
+		if acc == nil || !isGitLabClaudeAccount(acc) || !planMatchesRequired(acc.PlanType, requiredPlan) || !providerSupportsPathForAccount(provider, path, acc) {
+			continue
+		}
+		acc.mu.Lock()
+		rateLimitUntil := acc.RateLimitUntil
+		healthStatus := acc.HealthStatus
+		healthError := acc.HealthError
+		acc.mu.Unlock()
+		if !rateLimitUntil.After(now) || healthStatus != "rate_limited" || !isManagedGitLabClaudeSharedOrgTPMHealthError(healthError) {
+			continue
+		}
+		if until.IsZero() || rateLimitUntil.Before(until) {
+			until = rateLimitUntil
+			reason = stripManagedGitLabClaudeSharedOrgTPMHealthPrefix(healthError)
+		}
+	}
+	if until.IsZero() {
+		return nil
+	}
+	return &rateLimitResponseError{
+		message:    firstNonEmpty(reason, "gitlab claude organization token-per-minute cooldown active"),
+		retryAfter: until.Sub(now),
+	}
+}
+
+func (h *proxyHandler) gitLabCodexCooldownError(now time.Time, accountType AccountType, requiredPlan string, provider Provider, path string) error {
+	if h == nil || h.pool == nil || accountType != AccountTypeCodex || provider == nil || provider.Type() != AccountTypeCodex || !codexRequiresGitLabPlan(requiredPlan) {
+		return nil
+	}
+
+	h.pool.mu.RLock()
+	accounts := append([]*Account{}, h.pool.accounts...)
+	h.pool.mu.RUnlock()
+
+	var until time.Time
+	reason := ""
+	relevant := 0
+	for _, acc := range accounts {
+		if acc == nil || !isGitLabCodexAccount(acc) || !planMatchesRequired(acc.PlanType, requiredPlan) || !providerSupportsPathForAccount(provider, path, acc) {
+			continue
+		}
+		acc.mu.Lock()
+		disabled := acc.Disabled
+		dead := acc.Dead
+		rateLimitUntil := acc.RateLimitUntil
+		healthError := acc.HealthError
+		acc.mu.Unlock()
+		if disabled || dead {
+			continue
+		}
+		relevant++
+		if !rateLimitUntil.After(now) {
+			return nil
+		}
+		if until.IsZero() || rateLimitUntil.Before(until) {
+			until = rateLimitUntil
+			reason = strings.TrimSpace(healthError)
+		}
+	}
+	if relevant == 0 || until.IsZero() {
+		return nil
+	}
+	return &rateLimitResponseError{
+		message:    firstNonEmpty(reason, "gitlab codex cooldown active"),
+		retryAfter: until.Sub(now),
+	}
 }
 
 func (h *proxyHandler) deliverCopiedProxyResponse(
@@ -1599,6 +1846,9 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	if h.maybeServeCachedCodexModels(w, r, reqID, admission) {
 		return
 	}
+	if h.maybeServeGitLabCodexAuxiliary(w, r, reqID, admission) {
+		return
+	}
 
 	if isWebSocketUpgradeRequest(r) {
 		shape := buildWebSocketRequestShape(r)
@@ -1751,7 +2001,7 @@ func (h *proxyHandler) proxyRequestWebSocket(w http.ResponseWriter, r *http.Requ
 
 	acc, err := h.candidateSupportingPath(conversationID, map[string]bool{}, accountType, routePlan.RequiredPlan, provider, requestPath, requestedModel, routePlan.DebugGeminiSeatID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		writeHTTPErrorWithOptionalRateLimit(w, err, http.StatusServiceUnavailable)
 		return
 	}
 	if acc == nil {
@@ -2061,7 +2311,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 
 	acc, err := h.candidateSupportingPath(routePlan.Shape.ConversationID, map[string]bool{}, accountType, routePlan.RequiredPlan, provider, routePlan.UpstreamPath, routePlan.Shape.RequestedModel, routePlan.DebugGeminiSeatID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		writeHTTPErrorWithOptionalRateLimit(w, err, http.StatusServiceUnavailable)
 		return
 	}
 	if acc == nil {
@@ -2851,6 +3101,14 @@ func (h *proxyHandler) tryOnce(
 	}
 
 	requestBody := bodyBytes
+	if isGitLabCodexAccount(acc) {
+		if rewritten, changed := coerceGitLabCodexRequestBody(requestBody); changed {
+			requestBody = rewritten
+			if h.cfg.debug {
+				log.Printf("[%s] coerced gitlab codex request body text.verbosity -> medium (account=%s)", reqID, acc.ID)
+			}
+		}
+	}
 	targetBase = providerUpstreamURLForAccount(provider, upstreamPath, acc)
 	targetBases := []*url.URL{targetBase}
 	if facadeReq != nil {
@@ -3146,7 +3404,7 @@ func (h *proxyHandler) needsRefresh(a *Account) bool {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if isGitLabClaudeAccount(a) && (strings.TrimSpace(a.AccessToken) == "" || len(a.ExtraHeaders) == 0) {
+	if (isGitLabClaudeAccount(a) || isGitLabCodexAccount(a)) && (strings.TrimSpace(a.AccessToken) == "" || len(a.ExtraHeaders) == 0) {
 		return true
 	}
 	if a.RefreshToken == "" {
@@ -3246,7 +3504,7 @@ func (h *proxyHandler) refreshAccountOnce(ctx context.Context, a *Account, force
 	// Per-account rate limiting (persisted to disk via LastRefresh)
 	a.mu.Lock()
 	sinceLastRefresh := time.Since(a.LastRefresh)
-	skipPerAccountThrottle := isGitLabClaudeAccount(a)
+	skipPerAccountThrottle := accountAuthMode(a) == accountAuthModeGitLab
 	if !force && !skipPerAccountThrottle && !a.LastRefresh.IsZero() && sinceLastRefresh < refreshPerAccountInterval {
 		a.mu.Unlock()
 		return fmt.Errorf("account refresh rate limited (%s), wait %v", a.ID, refreshPerAccountInterval-sinceLastRefresh)

@@ -3,25 +3,28 @@ package main
 import (
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/BurntSushi/toml"
 )
 
 // ConfigFile represents the config.toml structure.
 type ConfigFile struct {
-	ListenAddr      string  `toml:"listen_addr"`
-	PoolDir         string  `toml:"pool_dir"`
-	DBPath          string  `toml:"db_path"`
-	MaxAttempts     int     `toml:"max_attempts"`
-	DisableRefresh  bool    `toml:"disable_refresh"`
-	RefreshProxyURL string  `toml:"refresh_proxy_url"` // HTTP proxy for refresh operations
-	Debug           bool    `toml:"debug"`
-	PublicURL       string  `toml:"public_url"`
-	FriendCode      string  `toml:"friend_code"`
-	FriendName      string  `toml:"friend_name"`
-	FriendTagline   string  `toml:"friend_tagline"`
-	AdminToken      string  `toml:"admin_token"`
-	TierThreshold   float64 `toml:"tier_threshold"` // Secondary usage % threshold for tier preference (default 0.15)
+	ListenAddr                 string  `toml:"listen_addr"`
+	PoolDir                    string  `toml:"pool_dir"`
+	DBPath                     string  `toml:"db_path"`
+	MaxAttempts                int     `toml:"max_attempts"`
+	ForceCodexRequiredPlan     string  `toml:"force_codex_required_plan"`
+	GitLabCodexDiscoveryModels string  `toml:"gitlab_codex_discovery_models"`
+	DisableRefresh             bool    `toml:"disable_refresh"`
+	RefreshProxyURL            string  `toml:"refresh_proxy_url"` // HTTP proxy for refresh operations
+	Debug                      bool    `toml:"debug"`
+	PublicURL                  string  `toml:"public_url"`
+	FriendCode                 string  `toml:"friend_code"`
+	FriendName                 string  `toml:"friend_name"`
+	FriendTagline              string  `toml:"friend_tagline"`
+	AdminToken                 string  `toml:"admin_token"`
+	TierThreshold              float64 `toml:"tier_threshold"` // Secondary usage % threshold for tier preference (default 0.15)
 
 	PoolUsers PoolUsersConfig `toml:"pool_users"`
 }
@@ -114,4 +117,28 @@ func getConfigBool(envKey string, configValue bool, defaultValue bool) bool {
 		return true
 	}
 	return defaultValue
+}
+
+func parseCSVEnvList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+	})
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if _, ok := seen[part]; ok {
+			continue
+		}
+		seen[part] = struct{}{}
+		out = append(out, part)
+	}
+	return out
 }

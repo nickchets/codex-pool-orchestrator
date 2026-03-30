@@ -79,3 +79,49 @@ Low-level OAuth fallback:
 ```bash
 curl -fsS -X POST http://127.0.0.1:8989/operator/codex/oauth-start | jq .
 ```
+
+## Optional: GitLab Codex Sidecar (`clcode`)
+
+Use this only when you want an isolated Codex CLI lane backed purely by GitLab Codex seats, without touching the main mixed pool on `127.0.0.1:8989`.
+
+Suggested runtime layout:
+
+```bash
+gitlab_runtime_root="$HOME/.local/share/codex-pool-gitlab/runtime"
+go build -o "$HOME/.local/bin/codex-pool-gitlab" .
+mkdir -p "$gitlab_runtime_root"/{pool/codex,data,backups,quarantine}
+cp /path/to/codex-pool-orchestrator/systemd/codex-pool-gitlab.service "$HOME/.config/systemd/user/"
+```
+
+Minimal `"$gitlab_runtime_root/codex-pool.env"`:
+
+```bash
+PROXY_LISTEN_ADDR=127.0.0.1:8993
+POOL_DIR=pool
+PROXY_DB_PATH=./data/proxy.db
+POOL_USERS_PATH=./data/pool_users.json
+PROXY_FORCE_CODEX_REQUIRED_PLAN=gitlab_duo
+ADMIN_TOKEN=<generate-a-unique-admin-token>
+POOL_JWT_SECRET=<generate-a-unique-jwt-secret>
+PUBLIC_URL=http://127.0.0.1:8993
+```
+
+Then enable the sidecar:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now codex-pool-gitlab.service
+curl -fsS http://127.0.0.1:8993/healthz
+```
+
+Per-user setup flow for the isolated CLI lane:
+
+```bash
+CODEX_POOL_RUNTIME_ROOT="$HOME/.local/share/codex-pool-gitlab/runtime" \
+CODEX_POOL_BASE_URL="http://127.0.0.1:8993" \
+python3 orchestrator/codex_pool_manager.py bootstrap-clcode --email you@example.com
+
+clcode exec 'Reply with exactly OK.'
+```
+
+`clcode` installs an isolated Codex home under `~/.local/share/clcode/` and does not mutate the main `~/.codex`.

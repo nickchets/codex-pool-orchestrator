@@ -69,6 +69,38 @@ func newBufferedGitLabClaudeAccountForTest(t *testing.T, dir, id, sourceToken, g
 	}
 }
 
+func newBufferedGitLabCodexAccountForTest(t *testing.T, dir, id, sourceToken, gatewayToken, upstreamBaseURL string) *Account {
+	t.Helper()
+
+	file := filepath.Join(dir, id+".json")
+	payload := fmt.Sprintf(`{
+		"plan_type":"gitlab_duo",
+		"auth_mode":"gitlab_duo",
+		"gitlab_token":"%s",
+		"gitlab_gateway_token":"%s",
+		"gitlab_gateway_headers":{"X-Gitlab-Instance-Id":"inst-1"},
+		"gitlab_gateway_base_url":"%s"
+	}`, sourceToken, gatewayToken, upstreamBaseURL)
+	if err := os.WriteFile(file, []byte(payload), 0o600); err != nil {
+		t.Fatalf("write gitlab account file %s: %v", file, err)
+	}
+
+	return &Account{
+		ID:              id,
+		Type:            AccountTypeCodex,
+		File:            file,
+		PlanType:        "gitlab_duo",
+		AuthMode:        accountAuthModeGitLab,
+		RefreshToken:    sourceToken,
+		AccessToken:     gatewayToken,
+		SourceBaseURL:   defaultGitLabInstanceURL,
+		UpstreamBaseURL: upstreamBaseURL,
+		ExtraHeaders:    map[string]string{"X-Gitlab-Instance-Id": "inst-1"},
+		HealthStatus:    "healthy",
+		LastHealthyAt:   time.Now().UTC(),
+	}
+}
+
 func waitForBufferedProxySuccessAccountState(t *testing.T, acc *Account, reason string) proxyTestAccountSnapshot {
 	t.Helper()
 
@@ -1074,6 +1106,322 @@ func TestProxyBufferedGitLabClaude403GatewayRejectedRetriesNextSeat(t *testing.T
 	}
 	if staleCalls != 1 || freshCalls != 1 || liveCalls != 1 {
 		t.Fatalf("staleCalls=%d freshCalls=%d liveCalls=%d", staleCalls, freshCalls, liveCalls)
+	}
+}
+
+func TestProxyBufferedGitLabCodex402QuotaExceededRetriesNextSeatAndCooldown(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	var quotaCalls, liveCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Gitlab-Instance-Id"); got != "inst-1" {
+			t.Fatalf("missing gitlab header, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Header.Get("Authorization") {
+		case "Bearer gateway-quota":
+			quotaCalls++
+			w.WriteHeader(http.StatusPaymentRequired)
+			_, _ = w.Write([]byte(`{"error":"insufficient_credits","error_code":"USAGE_QUOTA_EXCEEDED","message":"Consumer does not have sufficient credits for this request"}`))
+		case "Bearer gateway-live":
+			liveCalls++
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"resp_live","object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}]}`))
+		default:
+			t.Fatalf("unexpected auth header %q", r.Header.Get("Authorization"))
+		}
+	}))
+	defer upstream.Close()
+
+	tmp := t.TempDir()
+	quotaAcc := newBufferedGitLabCodexAccountForTest(t, tmp, "codex_gitlab_quota", "glpat-quota", "gateway-quota", upstream.URL)
+	liveAcc := newBufferedGitLabCodexAccountForTest(t, tmp, "codex_gitlab_live", "glpat-live", "gateway-live", upstream.URL)
+
+	h := newBufferedCodexProxyHandlerForTest(t, upstream.URL, []*Account{quotaAcc, liveAcc})
+	h.cfg.forceCodexRequiredPlan = accountAuthModeGitLab
+	h.cfg.disableRefresh = true
+	h.pool.activeCodexID = quotaAcc.ID
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	reqBody := []byte(`{"model":"gpt-5.4-mini","input":"hi","stream":false}`)
+	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/responses", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken(getPoolJWTSecret(), "buffered-gitlab-codex-402-user"))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !bytes.Equal(body, []byte(`{"id":"resp_live","object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}]}`)) {
+		t.Fatalf("body = %q", string(body))
+	}
+
+	quotaState := snapshotProxyTestAccount(quotaAcc)
+	if quotaState.Dead {
+		t.Fatal("expected quota-exceeded GitLab Codex seat to stay non-dead")
+	}
+	if quotaState.HealthStatus != "quota_exceeded" {
+		t.Fatalf("health_status=%q", quotaState.HealthStatus)
+	}
+	if quotaState.GitLabQuotaExceededCount != 1 {
+		t.Fatalf("gitlab_quota_exceeded_count=%d", quotaState.GitLabQuotaExceededCount)
+	}
+	if quotaState.RateLimitUntil.IsZero() {
+		t.Fatal("expected quota-exceeded GitLab Codex seat to enter cooldown")
+	}
+	if quotaCalls != 1 || liveCalls != 1 {
+		t.Fatalf("quotaCalls=%d liveCalls=%d", quotaCalls, liveCalls)
+	}
+	waitForBufferedProxySuccessAccountState(t, liveAcc, "live gitlab codex account to be used")
+}
+
+func TestProxyBufferedGitLabCodex403GatewayRejectedRetriesNextSeatAndCooldown(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	var rejectedCalls, liveCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Gitlab-Instance-Id"); got != "inst-1" {
+			t.Fatalf("missing gitlab header, got %q", got)
+		}
+		switch r.Header.Get("Authorization") {
+		case "Bearer gateway-rejected":
+			rejectedCalls++
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte("error code: 1010"))
+		case "Bearer gateway-live":
+			liveCalls++
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"resp_live","object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}]}`))
+		default:
+			t.Fatalf("unexpected auth header %q", r.Header.Get("Authorization"))
+		}
+	}))
+	defer upstream.Close()
+
+	tmp := t.TempDir()
+	rejectedAcc := newBufferedGitLabCodexAccountForTest(t, tmp, "codex_gitlab_rejected", "glpat-rejected", "gateway-rejected", upstream.URL)
+	liveAcc := newBufferedGitLabCodexAccountForTest(t, tmp, "codex_gitlab_live", "glpat-live", "gateway-live", upstream.URL)
+
+	h := newBufferedCodexProxyHandlerForTest(t, upstream.URL, []*Account{rejectedAcc, liveAcc})
+	h.cfg.forceCodexRequiredPlan = accountAuthModeGitLab
+	h.cfg.disableRefresh = true
+	h.pool.activeCodexID = rejectedAcc.ID
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	reqBody := []byte(`{"model":"gpt-5.4-mini","input":"hi","stream":false}`)
+	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/responses", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken(getPoolJWTSecret(), "buffered-gitlab-codex-403-user"))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !bytes.Equal(body, []byte(`{"id":"resp_live","object":"response","output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}]}`)) {
+		t.Fatalf("body = %q", string(body))
+	}
+
+	rejectedState := snapshotProxyTestAccount(rejectedAcc)
+	if rejectedState.Dead {
+		t.Fatal("expected gateway-rejected GitLab Codex seat to stay non-dead")
+	}
+	if rejectedState.HealthStatus != "gateway_rejected" {
+		t.Fatalf("health_status=%q", rejectedState.HealthStatus)
+	}
+	if rejectedState.RateLimitUntil.IsZero() {
+		t.Fatal("expected gateway-rejected GitLab Codex seat to enter cooldown")
+	}
+	if rejectedCalls != 1 || liveCalls != 1 {
+		t.Fatalf("rejectedCalls=%d liveCalls=%d", rejectedCalls, liveCalls)
+	}
+	waitForBufferedProxySuccessAccountState(t, liveAcc, "live gitlab codex account to be used")
+}
+
+func TestProxyBufferedGitLabCodexAllCooldownReturns429(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	tmp := t.TempDir()
+	firstAcc := newBufferedGitLabCodexAccountForTest(t, tmp, "codex_gitlab_cooldown_1", "glpat-1", "gateway-1", "https://gitlab.example.com/ai/v1/proxy/openai")
+	secondAcc := newBufferedGitLabCodexAccountForTest(t, tmp, "codex_gitlab_cooldown_2", "glpat-2", "gateway-2", "https://gitlab.example.com/ai/v1/proxy/openai")
+	firstAcc.HealthStatus = "quota_exceeded"
+	firstAcc.HealthError = "Consumer does not have sufficient credits for this request"
+	firstAcc.RateLimitUntil = time.Now().UTC().Add(2 * time.Minute)
+	secondAcc.HealthStatus = "gateway_rejected"
+	secondAcc.HealthError = "Forbidden"
+	secondAcc.RateLimitUntil = time.Now().UTC().Add(90 * time.Second)
+
+	h := newBufferedCodexProxyHandlerForTest(t, "https://gitlab.example.com/ai/v1/proxy/openai", []*Account{firstAcc, secondAcc})
+	h.cfg.forceCodexRequiredPlan = accountAuthModeGitLab
+	h.cfg.disableRefresh = true
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	reqBody := []byte(`{"model":"gpt-5.4-mini","input":"hi","stream":false}`)
+	req, err := http.NewRequest(http.MethodPost, proxy.URL+"/responses", bytes.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken(getPoolJWTSecret(), "buffered-gitlab-codex-cooldown-user"))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if resp.Header.Get("Retry-After") == "" {
+		t.Fatal("expected Retry-After header")
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if !strings.Contains(string(body), "Forbidden") && !strings.Contains(string(body), "credits") {
+		t.Fatalf("body = %q", string(body))
+	}
+}
+
+func TestProxyBufferedGitLabClaude429OrgTPMActivatesSharedCooldownWithoutSiblingFanout(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	var firstCalls, secondCalls, thirdCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Gitlab-Instance-Id"); got != "inst-1" {
+			t.Fatalf("missing gitlab header, got %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.Header.Get("Authorization") {
+		case "Bearer gateway-tpm-1":
+			firstCalls++
+			w.Header().Set("Retry-After", "12")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"error":{"message":"This request would exceed your organization's rate limit of 18,000,000 input tokens per minute"}}`))
+		case "Bearer gateway-tpm-2":
+			secondCalls++
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"msg_unexpected","type":"message","content":[{"type":"text","text":"unexpected"}]}`))
+		case "Bearer gateway-tpm-3":
+			thirdCalls++
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"id":"msg_unexpected","type":"message","content":[{"type":"text","text":"unexpected"}]}`))
+		default:
+			t.Fatalf("unexpected auth header %q", r.Header.Get("Authorization"))
+		}
+	}))
+	defer upstream.Close()
+
+	tmp := t.TempDir()
+	firstAcc := newBufferedGitLabClaudeAccountForTest(t, tmp, "claude_gitlab_tpm_1", "glpat-tpm-1", "gateway-tpm-1", upstream.URL)
+	secondAcc := newBufferedGitLabClaudeAccountForTest(t, tmp, "claude_gitlab_tpm_2", "glpat-tpm-2", "gateway-tpm-2", upstream.URL)
+	thirdAcc := newBufferedGitLabClaudeAccountForTest(t, tmp, "claude_gitlab_tpm_3", "glpat-tpm-3", "gateway-tpm-3", upstream.URL)
+
+	h := newBufferedCodexProxyHandlerForTest(t, upstream.URL, []*Account{firstAcc, secondAcc, thirdAcc})
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	makeRequest := func() (*http.Response, string) {
+		reqBody := []byte(`{"model":"claude-opus-4-6","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}`)
+		req, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/messages", bytes.NewReader(reqBody))
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken(getPoolJWTSecret(), "buffered-gitlab-org-tpm-user"))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("anthropic-version", "2023-06-01")
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("proxy request: %v", err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("read body: %v", err)
+		}
+		return resp, string(body)
+	}
+
+	resp, body := makeRequest()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+	}
+	if got := resp.Header.Get("Retry-After"); got != "12" {
+		t.Fatalf("retry_after=%q", got)
+	}
+	if !strings.Contains(body, "organization's rate limit") {
+		t.Fatalf("body=%q", body)
+	}
+	if firstCalls != 1 || secondCalls != 0 || thirdCalls != 0 {
+		t.Fatalf("firstCalls=%d secondCalls=%d thirdCalls=%d", firstCalls, secondCalls, thirdCalls)
+	}
+
+	firstState := snapshotProxyTestAccount(firstAcc)
+	secondState := snapshotProxyTestAccount(secondAcc)
+	thirdState := snapshotProxyTestAccount(thirdAcc)
+	for _, item := range []struct {
+		name  string
+		state proxyTestAccountSnapshot
+	}{
+		{name: firstAcc.ID, state: firstState},
+		{name: secondAcc.ID, state: secondState},
+		{name: thirdAcc.ID, state: thirdState},
+	} {
+		state := item.state
+		if state.RateLimitUntil.IsZero() {
+			t.Fatalf("expected rate limit until for %s", item.name)
+		}
+		wait := time.Until(state.RateLimitUntil)
+		if wait < 10*time.Second || wait > 13*time.Second {
+			t.Fatalf("rate_limit_wait(%s)=%v", item.name, wait)
+		}
+		if state.HealthStatus != "rate_limited" {
+			t.Fatalf("health_status(%s)=%q", item.name, state.HealthStatus)
+		}
+		if !strings.HasPrefix(state.HealthError, managedGitLabClaudeSharedOrgTPMHealthPrefix) {
+			t.Fatalf("health_error(%s)=%q", item.name, state.HealthError)
+		}
+	}
+
+	resp, body = makeRequest()
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("second status = %d body=%s", resp.StatusCode, body)
+	}
+	if !strings.Contains(body, "organization's rate limit") {
+		t.Fatalf("second body=%q", body)
+	}
+	if firstCalls != 1 || secondCalls != 0 || thirdCalls != 0 {
+		t.Fatalf("unexpected fanout after shared cooldown: firstCalls=%d secondCalls=%d thirdCalls=%d", firstCalls, secondCalls, thirdCalls)
 	}
 }
 

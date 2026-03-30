@@ -145,6 +145,12 @@ func TestGenerateCodexAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("JSON marshal failed: %v", err)
 	}
+	jsonText := string(data)
+	for _, unexpected := range []string{`"auth_mode"`, `"plan_type"`, `"health_status"`, `"disabled"`} {
+		if strings.Contains(jsonText, unexpected) {
+			t.Fatalf("expected %s to be omitted from pool auth json: %s", unexpected, jsonText)
+		}
+	}
 	t.Logf("Generated auth.json:\n%s", string(data))
 }
 

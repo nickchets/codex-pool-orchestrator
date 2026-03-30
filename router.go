@@ -439,6 +439,10 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveCodexSetupScript(w, r)
 		return
 	}
+	if strings.HasPrefix(r.URL.Path, "/setup/clcode/") {
+		h.serveCLCodeSetupScript(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/setup/opencode/") {
 		h.serveOpenCodeSetupScript(w, r)
 		return

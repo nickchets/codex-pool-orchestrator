@@ -60,6 +60,12 @@ func TestServeCodexSetupScript_Bash(t *testing.T) {
 	if !strings.Contains(body, "model_sync.sh") {
 		t.Fatalf("expected MCP sidecar script install in bash body, got:\n%s", body)
 	}
+	if !strings.Contains(body, `python3 - "$AUTH_FILE" <<'PY'`) {
+		t.Fatalf("expected JSON token parsing in bash script body, got:\n%s", body)
+	}
+	if !strings.Contains(body, `nested.get("access_token")`) {
+		t.Fatalf("expected nested token fallback in bash script body, got:\n%s", body)
+	}
 	if !strings.Contains(body, "model_catalog_json = ") {
 		t.Fatalf("expected model catalog config in bash script body, got:\n%s", body)
 	}
@@ -68,6 +74,91 @@ func TestServeCodexSetupScript_Bash(t *testing.T) {
 	}
 	if !strings.Contains(body, "MCP_TRANSPORT_MODE=\"jsonl\"") {
 		t.Fatalf("expected MCP JSONL transport support in bash body, got:\n%s", body)
+	}
+}
+
+func TestServeCLCodeSetupScript_PowerShell(t *testing.T) {
+	h := &proxyHandler{}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/setup/clcode/testtoken?shell=powershell", nil)
+	rr := httptest.NewRecorder()
+	h.serveCLCodeSetupScript(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("Content-Type = %q, want text/plain*", ct)
+	}
+	body := rr.Body.String()
+	for _, fragment := range []string{
+		"Initializing clcode sidecar setup",
+		`model = "gpt-5-codex"`,
+		`model_provider = "clcode"`,
+		`model_reasoning_effort = "medium"`,
+		`Join-Path $laneHome '.codex'`,
+		"clcode.ps1",
+		`$callerPwd = (Get-Location).Path`,
+		`$env:CLCODE_ROOT = if ($env:CLCODE_ROOT)`,
+		`$env:CODEX_HOME = Join-Path $env:CLCODE_HOME ".codex"`,
+		`$baseUrl = if ($env:CLCODE_BASE_URL)`,
+		`function Refresh-ModelCatalog`,
+		`Invoke-WebRequest -Uri ($baseUrl.TrimEnd('/') + '/backend-api/codex/models?client_version=0.106.0')`,
+		`'model_reasoning_effort="medium"'`,
+		`Refresh-ModelCatalog`,
+		`Set-Location $callerPwd`,
+		`& codex @commonArgs @args`,
+		`supports_websockets = false`,
+		`responses_websockets_v2 = false`,
+		`"slug":"gpt-5-codex"`,
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("expected %q in PowerShell body, got:\n%s", fragment, body)
+		}
+	}
+}
+
+func TestServeCLCodeSetupScript_Bash(t *testing.T) {
+	h := &proxyHandler{}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/setup/clcode/testtoken", nil)
+	rr := httptest.NewRecorder()
+	h.serveCLCodeSetupScript(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/x-shellscript") {
+		t.Fatalf("Content-Type = %q, want text/x-shellscript*", ct)
+	}
+	body := rr.Body.String()
+	for _, fragment := range []string{
+		"Initializing clcode sidecar setup",
+		`model = "gpt-5-codex"`,
+		`model_provider = "clcode"`,
+		`model_reasoning_effort = "medium"`,
+		`LANE_ROOT="${CLCODE_ROOT:-$REAL_HOME/.local/share/clcode}"`,
+		`LAUNCHER_FILE="$LAUNCHER_DIR/clcode"`,
+		`CALLER_PWD="${PWD}"`,
+		`export CLCODE_ROOT="${CLCODE_ROOT:-$REAL_HOME/.local/share/clcode}"`,
+		`export CODEX_HOME="$CLCODE_HOME/.codex"`,
+		`CLCODE_BASE_URL="${CLCODE_BASE_URL:-http://example.com}"`,
+		`refresh_model_catalog() {`,
+		`python3 - "$auth_file" <<'PY'`,
+		`nested.get("access_token")`,
+		`${CLCODE_BASE_URL%/}/backend-api/codex/models?client_version=0.106.0`,
+		`-c 'model_reasoning_effort="medium"'`,
+		`COMMON_ARGS=(`,
+		`refresh_model_catalog >/dev/null 2>&1 || true`,
+		`cd "$CALLER_PWD"`,
+		`exec codex "${COMMON_ARGS[@]}" "$@"`,
+		`supports_websockets = false`,
+		`responses_websockets_v2 = false`,
+		`"slug":"gpt-5-codex"`,
+	} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("expected %q in bash body, got:\n%s", fragment, body)
+		}
 	}
 }
 

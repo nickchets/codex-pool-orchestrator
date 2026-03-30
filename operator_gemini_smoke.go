@@ -311,7 +311,7 @@ func (h *proxyHandler) handleOperatorGeminiSeatSmoke(w http.ResponseWriter, r *h
 	}
 	if loadRes != nil {
 		acc.mu.Lock()
-		applyAntigravityGeminiProviderTruthLocked(acc, antigravityGeminiProviderTruthFromLoad(loadRes, result.ProjectID, time.Now().UTC()))
+		applyAntigravityGeminiProviderTruthLocked(acc, antigravityGeminiProviderTruthFromLoad(loadRes, projectID, time.Now().UTC()))
 		acc.mu.Unlock()
 	}
 

@@ -49,6 +49,56 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 	if err := json.Unmarshal(data, &aj); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
+	if strings.TrimSpace(aj.GitLabToken) != "" {
+		acc := &Account{
+			Type:                     AccountTypeCodex,
+			ID:                       strings.TrimSuffix(name, filepath.Ext(name)),
+			File:                     path,
+			AccessToken:              strings.TrimSpace(aj.GitLabGatewayToken),
+			RefreshToken:             strings.TrimSpace(aj.GitLabToken),
+			PlanType:                 firstNonEmpty(strings.TrimSpace(aj.PlanType), "gitlab_duo"),
+			AuthMode:                 accountAuthModeGitLab,
+			Disabled:                 aj.Disabled,
+			Dead:                     aj.Dead,
+			HealthStatus:             strings.TrimSpace(aj.HealthStatus),
+			HealthError:              strings.TrimSpace(aj.HealthError),
+			SourceBaseURL:            firstNonEmpty(strings.TrimSpace(aj.GitLabInstanceURL), defaultGitLabInstanceURL),
+			UpstreamBaseURL:          firstNonEmpty(strings.TrimSpace(aj.GitLabGatewayBaseURL), defaultGitLabCodexGatewayURL),
+			ExtraHeaders:             copyStringMap(aj.GitLabGatewayHeaders),
+			GitLabRateLimitName:      strings.TrimSpace(aj.GitLabRateLimitName),
+			GitLabRateLimitLimit:     aj.GitLabRateLimitLimit,
+			GitLabRateLimitRemaining: aj.GitLabRateLimitRemaining,
+			GitLabQuotaExceededCount: aj.GitLabQuotaExceededCount,
+		}
+		if aj.LastRefresh != nil {
+			acc.LastRefresh = aj.LastRefresh.UTC()
+		}
+		if aj.GitLabGatewayExpiresAt != nil {
+			acc.ExpiresAt = aj.GitLabGatewayExpiresAt.UTC()
+		}
+		if aj.GitLabRateLimitResetAt != nil {
+			acc.GitLabRateLimitResetAt = aj.GitLabRateLimitResetAt.UTC()
+		}
+		if aj.GitLabLastQuotaExceededAt != nil {
+			acc.GitLabLastQuotaExceededAt = aj.GitLabLastQuotaExceededAt.UTC()
+		}
+		if aj.RateLimitUntil != nil {
+			acc.RateLimitUntil = aj.RateLimitUntil.UTC()
+		}
+		if aj.HealthCheckedAt != nil {
+			acc.HealthCheckedAt = aj.HealthCheckedAt.UTC()
+		}
+		if aj.LastHealthyAt != nil {
+			acc.LastHealthyAt = aj.LastHealthyAt.UTC()
+		}
+		if aj.DeadSince != nil {
+			acc.DeadSince = aj.DeadSince.UTC()
+		}
+		if acc.HealthStatus == "" {
+			acc.HealthStatus = "unknown"
+		}
+		return acc, nil
+	}
 	if aj.OpenAIKey != nil && strings.TrimSpace(*aj.OpenAIKey) != "" {
 		acc := &Account{
 			Type:        AccountTypeCodex,
@@ -125,6 +175,17 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 
 func (p *CodexProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 	req.Header.Set("Authorization", "Bearer "+acc.AccessToken)
+	if isGitLabCodexAccount(acc) {
+		for key, value := range acc.ExtraHeaders {
+			key = strings.TrimSpace(key)
+			value = strings.TrimSpace(value)
+			if key == "" || value == "" {
+				continue
+			}
+			req.Header.Set(key, value)
+		}
+		return
+	}
 	if isManagedCodexAPIKeyAccount(acc) {
 		return
 	}
@@ -141,6 +202,16 @@ func (p *CodexProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 func (p *CodexProvider) RefreshToken(ctx context.Context, acc *Account, transport http.RoundTripper) error {
 	trace := requestTraceFromContext(ctx)
 	startedAt := time.Now()
+
+	if isGitLabCodexAccount(acc) {
+		err := refreshGitLabCodexAccess(ctx, acc, transport)
+		status := "ok"
+		if err != nil {
+			status = "fail"
+		}
+		trace.noteTokenRefresh(AccountTypeCodex, acc, "", status, time.Since(startedAt), err)
+		return err
+	}
 
 	acc.mu.Lock()
 	refreshTok := acc.RefreshToken
@@ -349,6 +420,11 @@ func (p *CodexProvider) UpstreamURL(path string) *url.URL {
 }
 
 func (p *CodexProvider) UpstreamURLForAccount(path string, acc *Account) *url.URL {
+	if isGitLabCodexAccount(acc) {
+		if parsed, err := url.Parse(firstNonEmpty(strings.TrimSpace(acc.UpstreamBaseURL), defaultGitLabCodexGatewayURL)); err == nil {
+			return parsed
+		}
+	}
 	if isManagedCodexAPIKeyAccount(acc) && p.apiBase != nil {
 		return p.apiBase
 	}
@@ -381,6 +457,16 @@ func (p *CodexProvider) NormalizePath(path string) string {
 }
 
 func (p *CodexProvider) NormalizePathForAccount(path string, acc *Account) string {
+	if isGitLabCodexAccount(acc) {
+		switch {
+		case strings.HasPrefix(path, "/responses"):
+			return "/v1" + path
+		case strings.HasPrefix(path, "/v1/"):
+			return path
+		default:
+			return path
+		}
+	}
 	if !isManagedCodexAPIKeyAccount(acc) {
 		return p.NormalizePath(path)
 	}
@@ -395,6 +481,9 @@ func (p *CodexProvider) NormalizePathForAccount(path string, acc *Account) strin
 }
 
 func (p *CodexProvider) SupportsAccountPath(path string, acc *Account) bool {
+	if isGitLabCodexAccount(acc) {
+		return strings.HasPrefix(path, "/v1/") || strings.HasPrefix(path, "/responses")
+	}
 	if !isManagedCodexAPIKeyAccount(acc) {
 		return true
 	}

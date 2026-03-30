@@ -161,6 +161,43 @@ func buildWebSocketRequestShape(r *http.Request) RequestShape {
 	}
 }
 
+func normalizeForceCodexRequiredPlan(plan string) string {
+	plan = strings.TrimSpace(plan)
+	if codexRequiresGitLabPlan(plan) {
+		return accountAuthModeGitLab
+	}
+	return plan
+}
+
+func isCodexModelsPath(path string) bool {
+	switch strings.TrimSpace(path) {
+	case "/backend-api/codex/models", "/v1/models":
+		return true
+	default:
+		return false
+	}
+}
+
+func isCodexPlanForcedPath(path string) bool {
+	if isCodexModelsPath(path) {
+		return true
+	}
+	return mapResponsesPath(path) == "/responses"
+}
+
+func (h *proxyHandler) forcedCodexRequiredPlan(admission AdmissionResult, path string, accountType AccountType) string {
+	if h == nil || accountType != AccountTypeCodex {
+		return ""
+	}
+	if admission.Kind != AdmissionKindPoolUser {
+		return ""
+	}
+	if !isCodexPlanForcedPath(path) {
+		return ""
+	}
+	return normalizeForceCodexRequiredPlan(h.cfg.forceCodexRequiredPlan)
+}
+
 func (h *proxyHandler) planRoute(admission AdmissionResult, r *http.Request, shape RequestShape, bodyBytes []byte) (RoutePlan, []byte, error) {
 	provider, targetBase := h.pickUpstream(shape.Path, r.Header)
 	if provider == nil || targetBase == nil {
@@ -188,18 +225,26 @@ func (h *proxyHandler) planRoute(admission AdmissionResult, r *http.Request, sha
 	}
 
 	requiredPlan := ""
-	if accountType == AccountTypeCodex && modelRequiresCodexPro(shape.RequestedModel) {
-		requiredPlan = "pro"
+	if accountType == AccountTypeCodex {
+		requiredPlan = h.forcedCodexRequiredPlan(admission, shape.Path, accountType)
+		if targetModel, ok := gitLabCodexTargetModel(shape.RequestedModel); ok {
+			requiredPlan = accountAuthModeGitLab
+			if rewritten := rewriteModelInBody(rewrittenBody, targetModel); rewritten != nil {
+				rewrittenBody = rewritten
+			}
+		} else if requiredPlan == "" && modelRequiresCodexPro(shape.RequestedModel) {
+			requiredPlan = "pro"
+		}
 	}
 
 	return RoutePlan{
-		Admission:    admission,
-		Shape:        shape,
-		Provider:     provider,
-		TargetBase:   targetBase,
-		UpstreamPath: upstreamPath,
-		AccountType:  accountType,
-		RequiredPlan: requiredPlan,
+		Admission:       admission,
+		Shape:           shape,
+		Provider:        provider,
+		TargetBase:      targetBase,
+		UpstreamPath:    upstreamPath,
+		AccountType:     accountType,
+		RequiredPlan:    requiredPlan,
 		ResponseAdapter: responseAdapter,
 	}, rewrittenBody, nil
 }

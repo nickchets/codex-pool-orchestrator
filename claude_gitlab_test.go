@@ -250,6 +250,27 @@ func TestClassifyManagedGitLabClaudeDirectAccessForbiddenMarksDead(t *testing.T)
 	}
 }
 
+func TestClassifyManagedGitLabClaudeErrorOrgTPMUsesSharedShortCooldown(t *testing.T) {
+	disposition := classifyManagedGitLabClaudeError(
+		managedGitLabClaudeErrorSourceGatewayRequest,
+		http.StatusTooManyRequests,
+		http.Header{},
+		[]byte(`{"error":{"message":"This request would exceed your organization's rate limit of 18,000,000 input tokens per minute"}}`),
+	)
+	if !disposition.RateLimit {
+		t.Fatalf("expected rate limit classification, got %+v", disposition)
+	}
+	if disposition.MarkDead {
+		t.Fatalf("did not expect dead classification, got %+v", disposition)
+	}
+	if !disposition.SharedOrgTPM {
+		t.Fatalf("expected shared org TPM classification, got %+v", disposition)
+	}
+	if disposition.Cooldown != managedGitLabClaudeOrgTPMRateLimitWait {
+		t.Fatalf("cooldown=%v", disposition.Cooldown)
+	}
+}
+
 func TestGitLabClaudeQuotaExceededCooldownExpandsExponentially(t *testing.T) {
 	if got := gitLabClaudeQuotaExceededCooldown(1); got != 30*time.Minute {
 		t.Fatalf("count1=%v", got)
@@ -291,6 +312,34 @@ func TestApplyManagedGitLabClaudeDispositionParsesRetryAfterHTTPDate(t *testing.
 	}
 	wait := acc.RateLimitUntil.Sub(now)
 	if wait < 89*time.Second || wait > 91*time.Second {
+		t.Fatalf("rate_limit_until=%v wait=%v", acc.RateLimitUntil, wait)
+	}
+}
+
+func TestApplyManagedGitLabClaudeDispositionOrgTPMUsesShortFallbackWithoutRetryAfter(t *testing.T) {
+	acc := &Account{
+		ID:           "claude_gitlab_org_tpm",
+		Type:         AccountTypeClaude,
+		AuthMode:     accountAuthModeGitLab,
+		AccessToken:  "gateway-token",
+		ExtraHeaders: map[string]string{"X-Test": "org-tpm"},
+	}
+	now := time.Now().UTC()
+	disposition := managedGitLabClaudeErrorDisposition{
+		RateLimit:    true,
+		SharedOrgTPM: true,
+		HealthStatus: "rate_limited",
+		Cooldown:     managedGitLabClaudeOrgTPMRateLimitWait,
+		Reason:       "This request would exceed your organization's rate limit of 18,000,000 input tokens per minute",
+	}
+
+	applyManagedGitLabClaudeDisposition(acc, disposition, http.Header{}, now)
+
+	if acc.RateLimitUntil.IsZero() {
+		t.Fatal("expected rate limit until")
+	}
+	wait := acc.RateLimitUntil.Sub(now)
+	if wait < 74*time.Second || wait > 76*time.Second {
 		t.Fatalf("rate_limit_until=%v wait=%v", acc.RateLimitUntil, wait)
 	}
 }

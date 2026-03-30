@@ -7,6 +7,7 @@ listen_addr = "127.0.0.1:8989"
 pool_dir = "pool"
 db_path = "./data/proxy.db"
 max_attempts = 3
+force_codex_required_plan = ""
 disable_refresh = false
 debug = false
 # Max request body size to buffer in memory before streaming (bytes).
@@ -16,6 +17,16 @@ debug = false
 # Use this when behind a reverse proxy or using a custom domain
 # Example: "https://proxy.example.com" or "http://192.168.1.100:8989"
 public_url = ""
+
+# Optional: force all pooled Codex traffic handled by this runtime onto one plan.
+# Intended for a dedicated GitLab Codex sidecar runtime.
+# Example: "gitlab_duo"
+# force_codex_required_plan = "gitlab_duo"
+
+# Optional: candidate model slugs for GitLab Codex sidecar discovery.
+# When force_codex_required_plan = "gitlab_duo", /backend-api/codex/models can
+# probe this list against GitLab direct-access and publish only working models.
+# gitlab_codex_discovery_models = "gpt-5-codex,gpt-5.3-codex,gpt-5.2-codex,gpt-5,gpt-5.4-mini,gpt-5.4-nano"
 
 # Friend Code Access
 # Enable a self-service landing page at / where users with this code

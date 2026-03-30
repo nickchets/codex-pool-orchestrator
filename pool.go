@@ -199,6 +199,13 @@ func routingStateLocked(a *Account, now time.Time, accountType AccountType, requ
 		state.BlockReason = "missing_gateway_state"
 		return state
 	}
+	if isGitLabCodexAccount(a) && missingGitLabCodexGatewayState(a) {
+		if strings.TrimSpace(a.RefreshToken) == "" {
+			state.Eligible = false
+			state.BlockReason = "missing_gateway_state"
+			return state
+		}
+	}
 	if a.Type == AccountTypeGemini {
 		syncGeminiProviderTruthStateLocked(a)
 		freshness := geminiProviderTruthFreshnessStatus(a.GeminiProviderTruthState, a.GeminiProviderCheckedAt, a.GeminiQuotaUpdatedAt, now)
@@ -396,6 +403,24 @@ func isManagedCodexAPIKeyAccount(a *Account) bool {
 	return a != nil && a.Type == AccountTypeCodex && accountAuthMode(a) == accountAuthModeAPIKey
 }
 
+func codexRequiresGitLabPlan(requiredPlan string) bool {
+	return strings.EqualFold(strings.TrimSpace(requiredPlan), accountAuthModeGitLab) ||
+		strings.EqualFold(strings.TrimSpace(requiredPlan), "gitlab_duo")
+}
+
+func codexAccountMatchesSelectionMode(a *Account, requiredPlan string, managed bool) bool {
+	if a == nil || a.Type != AccountTypeCodex {
+		return false
+	}
+	if managed {
+		return isManagedCodexAPIKeyAccount(a)
+	}
+	if codexRequiresGitLabPlan(requiredPlan) {
+		return isGitLabCodexAccount(a)
+	}
+	return !isManagedCodexAPIKeyAccount(a) && !isGitLabCodexAccount(a)
+}
+
 func normalizeGeminiOperatorSource(source, profileID string, accountType AccountType) string {
 	if accountType != AccountTypeGemini {
 		return ""
@@ -542,18 +567,31 @@ func (a *Account) applyRequestUsage(u RequestUsage) {
 
 // CodexAuthJSON is the format for Codex auth.json files.
 type CodexAuthJSON struct {
-	OpenAIKey       *string    `json:"OPENAI_API_KEY"`
-	Tokens          *TokenData `json:"tokens"`
-	LastRefresh     *time.Time `json:"last_refresh"`
-	LastHealthyAt   *time.Time `json:"last_healthy_at"`
-	HealthCheckedAt *time.Time `json:"health_checked_at"`
-	DeadSince       *time.Time `json:"dead_since"`
-	HealthStatus    string     `json:"health_status"`
-	HealthError     string     `json:"health_error"`
-	PlanType        string     `json:"plan_type"`
-	AuthMode        string     `json:"auth_mode"`
-	Dead            bool       `json:"dead"`
-	Disabled        bool       `json:"disabled"`
+	OpenAIKey                 *string           `json:"OPENAI_API_KEY"`
+	Tokens                    *TokenData        `json:"tokens"`
+	LastRefresh               *time.Time        `json:"last_refresh,omitempty"`
+	LastHealthyAt             *time.Time        `json:"last_healthy_at,omitempty"`
+	HealthCheckedAt           *time.Time        `json:"health_checked_at,omitempty"`
+	DeadSince                 *time.Time        `json:"dead_since,omitempty"`
+	HealthStatus              string            `json:"health_status,omitempty"`
+	HealthError               string            `json:"health_error,omitempty"`
+	PlanType                  string            `json:"plan_type,omitempty"`
+	AuthMode                  string            `json:"auth_mode,omitempty"`
+	Dead                      bool              `json:"dead"`
+	Disabled                  bool              `json:"disabled,omitempty"`
+	GitLabToken               string            `json:"gitlab_token,omitempty"`
+	GitLabInstanceURL         string            `json:"gitlab_instance_url,omitempty"`
+	GitLabGatewayToken        string            `json:"gitlab_gateway_token,omitempty"`
+	GitLabGatewayBaseURL      string            `json:"gitlab_gateway_base_url,omitempty"`
+	GitLabGatewayHeaders      map[string]string `json:"gitlab_gateway_headers,omitempty"`
+	GitLabGatewayExpiresAt    *time.Time        `json:"gitlab_gateway_expires_at,omitempty"`
+	GitLabRateLimitName       string            `json:"gitlab_rate_limit_name,omitempty"`
+	GitLabRateLimitLimit      int               `json:"gitlab_rate_limit_limit,omitempty"`
+	GitLabRateLimitRemaining  int               `json:"gitlab_rate_limit_remaining,omitempty"`
+	GitLabRateLimitResetAt    *time.Time        `json:"gitlab_rate_limit_reset_at,omitempty"`
+	GitLabQuotaExceededCount  int               `json:"gitlab_quota_exceeded_count,omitempty"`
+	GitLabLastQuotaExceededAt *time.Time        `json:"gitlab_last_quota_exceeded_at,omitempty"`
+	RateLimitUntil            *time.Time        `json:"rate_limit_until,omitempty"`
 }
 
 type TokenData struct {
@@ -1290,6 +1328,7 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 	}
 	providerDirs := []providerDir{
 		{name: "codex", accountType: AccountTypeCodex},
+		{name: "codex_gitlab", accountType: AccountTypeCodex},
 		{name: "openai_api", accountType: AccountTypeCodex},
 		{name: "claude", accountType: AccountTypeClaude},
 		{name: "claude_gitlab", accountType: AccountTypeClaude},
@@ -1599,9 +1638,12 @@ func (p *poolState) stickyEligibleCandidateLocked(now time.Time, exclude map[str
 			return acc
 		}
 		if acc := p.stickyEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, func(a *Account) bool {
-			return !isManagedCodexAPIKeyAccount(a)
+			return codexAccountMatchesSelectionMode(a, requiredPlan, false)
 		}); acc != nil {
 			return acc
+		}
+		if codexRequiresGitLabPlan(requiredPlan) {
+			return nil
 		}
 		return p.stickyEligibleCandidateMatchingLocked(now, exclude, accountType, "", func(a *Account) bool {
 			return isManagedCodexAPIKeyAccount(a)
@@ -1694,7 +1736,7 @@ func (p *poolState) activeCodexCandidateLocked(now time.Time, exclude map[string
 
 	a.mu.Lock()
 	routing := routingStateLocked(a, now, AccountTypeCodex, requiredPlan)
-	ok := routing.Eligible && !authExpiryBlocksStickySelectionLocked(a, now) && (isManagedCodexAPIKeyAccount(a) == managed)
+	ok := routing.Eligible && !authExpiryBlocksStickySelectionLocked(a, now) && codexAccountMatchesSelectionMode(a, requiredPlan, managed)
 	a.mu.Unlock()
 	if !ok {
 		p.clearActiveCodexSeatLocked(managed)
@@ -1740,9 +1782,12 @@ func (p *poolState) stickyEligibleCandidateMatchingLocked(now time.Time, exclude
 func (p *poolState) selectEligibleCandidateLocked(now time.Time, exclude map[string]bool, accountType AccountType, requiredPlan string, advanceRR bool) *Account {
 	if accountType == AccountTypeCodex {
 		if acc := p.selectEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, advanceRR, true, func(a *Account) bool {
-			return !isManagedCodexAPIKeyAccount(a)
+			return codexAccountMatchesSelectionMode(a, requiredPlan, false)
 		}); acc != nil {
 			return acc
+		}
+		if codexRequiresGitLabPlan(requiredPlan) {
+			return nil
 		}
 		if acc := p.activeCodexCandidateLocked(now, exclude, "", true); acc != nil {
 			return acc
@@ -2116,6 +2161,10 @@ func saveAccount(a *Account) error {
 }
 
 func saveCodexAccount(a *Account) error {
+	if isGitLabCodexAccount(a) {
+		return saveGitLabCodexAccount(a)
+	}
+
 	// Preserve ALL fields in the original auth.json by modifying only token fields that
 	// refresh updates. If we can't parse the existing file, fail closed to avoid
 	// clobbering user-provided auth.json content.
