@@ -9,18 +9,9 @@ mkdir -p "$out_dir"
 
 rsync -a \
   --exclude='.git/' \
-  --exclude='ACTION_PLAN.md' \
-  --exclude='DEBUG.md' \
-  --exclude='EVIDENCE_LOG.md' \
-  --exclude='PROJECT_MANIFEST.md' \
   --exclude='codex-pool-proxy' \
-  --exclude='orchestrator/' \
   --exclude='tests/' \
   --exclude='screenshots/' \
-  --exclude='docs/GEMINI_POOL_AUDIT_PLAN_20260325.ru.md' \
-  --exclude='docs/OBSERVABILITY_PROVIDER_ALIGNMENT_20260325.ru.md' \
-  --exclude='docs/STATUS_TRUTH_WAVE_20260325.ru.md' \
-  --exclude='docs/T57_FINAL_CLOSURE_SPEC_20260328.ru.md' \
   --exclude='__pycache__/' \
   --exclude='*.pyc' \
   --exclude='*.pyo' \
@@ -37,7 +28,6 @@ declare -a forbidden_refs=(
   "/home/"'lap'
   '.root''_layer'
   'ag''code'
-  'codex_pool_''manager.py'
   'codex.''ppflix.net'
 )
 
@@ -50,18 +40,9 @@ for needle in "${forbidden_refs[@]}"; do
 done
 
 declare -a forbidden_paths=(
-  ACTION_PLAN.md
-  DEBUG.md
-  EVIDENCE_LOG.md
-  PROJECT_MANIFEST.md
   codex-pool-proxy
-  orchestrator
   tests
   screenshots
-  docs/GEMINI_POOL_AUDIT_PLAN_20260325.ru.md
-  docs/OBSERVABILITY_PROVIDER_ALIGNMENT_20260325.ru.md
-  docs/STATUS_TRUTH_WAVE_20260325.ru.md
-  docs/T57_FINAL_CLOSURE_SPEC_20260328.ru.md
 )
 
 for rel in "${forbidden_paths[@]}"; do

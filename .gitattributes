@@ -1,14 +1,6 @@
-ACTION_PLAN.md export-ignore
-DEBUG.md export-ignore
-EVIDENCE_LOG.md export-ignore
-PROJECT_MANIFEST.md export-ignore
 codex-pool-proxy export-ignore
-orchestrator/** export-ignore
 tests/** export-ignore
 screenshots/** export-ignore
-docs/GEMINI_ANTIGRAVITY_AUDIT_PLAN_20260325.ru.md export-ignore
-docs/OBSERVABILITY_PROVIDER_ALIGNMENT_20260325.ru.md export-ignore
-docs/STATUS_TRUTH_WAVE_20260325.ru.md export-ignore
 __pycache__/** export-ignore
 *.pyc export-ignore
 *.pyo export-ignore

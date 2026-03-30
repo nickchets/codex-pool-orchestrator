@@ -9,6 +9,12 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.10.1] - 2026-03-30
+
+### Changed
+- The published repository tree is now steriler: repo-local governance, handoff, audit, and closure-spec documents are no longer shipped in `main`.
+- Public bundle export rules now match the published tree and keep the documented `orchestrator/codex_pool_manager.py` helper available instead of treating it as private packaging residue.
+
 ## [0.10.0] - 2026-03-30
 
 ### Added

@@ -8,6 +8,12 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.10.1] - 2026-03-30
+
+### Изменено
+- Опубликованное дерево репозитория стало стерильнее: repo-local governance, handoff, audit и closure-spec документы больше не поставляются в `main`.
+- Правила экспорта public bundle теперь совпадают с опубликованным деревом и сохраняют документированный helper `orchestrator/codex_pool_manager.py`, а не считают его private packaging residue.
+
 ## [0.10.0] - 2026-03-30
 
 ### Добавлено
