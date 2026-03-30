@@ -14,6 +14,15 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 - Опубликованное дерево репозитория стало стерильнее: repo-local governance, handoff, audit и closure-spec документы больше не поставляются в `main`.
 - Правила экспорта public bundle теперь совпадают с опубликованным деревом и сохраняют документированный helper `orchestrator/codex_pool_manager.py`, а не считают его private packaging residue.
 
+## [0.10.2] - 2026-03-30
+
+### Исправлено
+- Propagation shared org-TPM cooldown для GitLab Claude теперь опирается на live entitlement headers, а не схлопывает все `gitlab.com` Claude Duo seat'ы в один синтетический cooldown bucket.
+- Pool-side GitLab Claude routing больше не объявляет здоровые sibling seat'ы недоступными только потому, что другой seat из другой entitlement-группы поймал shared TPM limiter.
+
+### Проверено
+- Live per-seat probes теперь честно отделяют один реально мертвый `claude_gitlab` seat (`402 insufficient_credits`) от остальных здоровых seat'ов вместо flattening всего provider lane в `rate_limited`.
+
 ## [0.10.0] - 2026-03-30
 
 ### Добавлено

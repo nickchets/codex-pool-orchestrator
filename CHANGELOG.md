@@ -15,6 +15,15 @@ The format is loosely based on Keep a Changelog. Versioning rules are defined in
 - The published repository tree is now steriler: repo-local governance, handoff, audit, and closure-spec documents are no longer shipped in `main`.
 - Public bundle export rules now match the published tree and keep the documented `orchestrator/codex_pool_manager.py` helper available instead of treating it as private packaging residue.
 
+## [0.10.2] - 2026-03-30
+
+### Fixed
+- GitLab Claude shared org-TPM cooldown propagation now scopes by live entitlement headers instead of collapsing every `gitlab.com` Claude Duo seat into one synthetic cooldown bucket.
+- Pool-side GitLab Claude routing no longer falsely marks healthy sibling seats unavailable just because another seat in a different entitlement group hit the shared TPM limiter.
+
+### Verified
+- Live per-seat probes now separate one genuinely dead `claude_gitlab` seat (`402 insufficient_credits`) from the remaining healthy seats instead of flattening the whole provider lane into `rate_limited`.
+
 ## [0.10.0] - 2026-03-30
 
 ### Added

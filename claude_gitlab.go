@@ -97,7 +97,20 @@ func gitLabClaudeScopeKey(acc *Account) string {
 	source := strings.ToLower(firstNonEmpty(strings.TrimSpace(acc.SourceBaseURL), defaultGitLabInstanceURL))
 	gateway := strings.ToLower(firstNonEmpty(strings.TrimSpace(acc.UpstreamBaseURL), defaultGitLabClaudeGatewayURL))
 	instanceID := strings.ToLower(getMapValueFold(acc.ExtraHeaders, "X-Gitlab-Instance-Id"))
-	return strings.Join([]string{source, gateway, instanceID}, "|")
+	entitlementScope := strings.TrimSpace(getMapValueFold(acc.ExtraHeaders, "X-Gitlab-Feature-Enabled-By-Namespace-Ids"))
+	if entitlementScope == "" {
+		entitlementScope = strings.TrimSpace(getMapValueFold(acc.ExtraHeaders, "X-Gitlab-Root-Namespace-Id"))
+	}
+	if entitlementScope == "" {
+		entitlementScope = strings.TrimSpace(getMapValueFold(acc.ExtraHeaders, "X-Gitlab-Namespace-Id"))
+	}
+	if entitlementScope == "" {
+		entitlementScope = strings.TrimSpace(getMapValueFold(acc.ExtraHeaders, "X-Gitlab-Global-User-Id"))
+	}
+	if entitlementScope == "" {
+		entitlementScope = strings.TrimSpace(getMapValueFold(acc.ExtraHeaders, "X-Gitlab-User-Id"))
+	}
+	return strings.ToLower(strings.Join([]string{source, gateway, instanceID, entitlementScope}, "|"))
 }
 
 func isManagedGitLabClaudeOrgTPMRateLimit(reason string) bool {

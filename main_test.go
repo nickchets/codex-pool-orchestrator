@@ -985,6 +985,73 @@ func TestCandidateSupportingPathStillUsesDirectClaudeWhenGitLabSharedTPMActive(t
 	}
 }
 
+func TestPropagateManagedGitLabClaudeSharedTPMCooldownOnlyTouchesMatchingEntitlementScope(t *testing.T) {
+	now := time.Now().UTC()
+	trigger := &Account{
+		ID:              "claude_gitlab_trigger",
+		Type:            AccountTypeClaude,
+		PlanType:        "gitlab_duo",
+		AuthMode:        accountAuthModeGitLab,
+		AccessToken:     "gateway-trigger",
+		RefreshToken:    "glpat-trigger",
+		SourceBaseURL:   defaultGitLabInstanceURL,
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders: map[string]string{
+			"X-Gitlab-Instance-Id":                  "inst-1",
+			"X-Gitlab-Feature-Enabled-By-Namespace-Ids": "100,200",
+			"X-Gitlab-User-Id":                      "42",
+		},
+	}
+	sameScope := &Account{
+		ID:              "claude_gitlab_same_scope",
+		Type:            AccountTypeClaude,
+		PlanType:        "gitlab_duo",
+		AuthMode:        accountAuthModeGitLab,
+		AccessToken:     "gateway-same",
+		RefreshToken:    "glpat-same",
+		SourceBaseURL:   defaultGitLabInstanceURL,
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders: map[string]string{
+			"X-Gitlab-Instance-Id":                  "inst-1",
+			"X-Gitlab-Feature-Enabled-By-Namespace-Ids": "100,200",
+			"X-Gitlab-User-Id":                      "77",
+		},
+	}
+	otherScope := &Account{
+		ID:              "claude_gitlab_other_scope",
+		Type:            AccountTypeClaude,
+		PlanType:        "gitlab_duo",
+		AuthMode:        accountAuthModeGitLab,
+		AccessToken:     "gateway-other",
+		RefreshToken:    "glpat-other",
+		SourceBaseURL:   defaultGitLabInstanceURL,
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders: map[string]string{
+			"X-Gitlab-Instance-Id":                  "inst-1",
+			"X-Gitlab-Feature-Enabled-By-Namespace-Ids": "300",
+			"X-Gitlab-User-Id":                      "42",
+		},
+	}
+	h := &proxyHandler{pool: newPoolState([]*Account{trigger, sameScope, otherScope}, false)}
+	disposition := managedGitLabClaudeErrorDisposition{
+		RateLimit:    true,
+		SharedOrgTPM: true,
+		HealthStatus: "rate_limited",
+		Cooldown:     managedGitLabClaudeOrgTPMRateLimitWait,
+		Reason:       "This request would exceed your organization's rate limit of 18,000,000 input tokens per minute",
+	}
+
+	if !h.propagateManagedGitLabClaudeSharedTPMCooldown("req-test", trigger, disposition, http.Header{}, "claude-opus-4-6", now) {
+		t.Fatal("expected propagation to affect matching entitlement scope")
+	}
+	if trigger.RateLimitUntil.IsZero() || sameScope.RateLimitUntil.IsZero() {
+		t.Fatal("expected matching entitlement scope seats to receive cooldown")
+	}
+	if !otherScope.RateLimitUntil.IsZero() {
+		t.Fatalf("expected other entitlement scope to stay clear, got %v", otherScope.RateLimitUntil)
+	}
+}
+
 func TestCandidateSupportingPathRejectsForcedDebugGeminiSeatForUnsupportedBlockedV1BetaPath(t *testing.T) {
 	blocked := &Account{
 		ID:                           "gemini_seat_blocked",

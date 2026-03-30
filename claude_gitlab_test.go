@@ -344,6 +344,52 @@ func TestApplyManagedGitLabClaudeDispositionOrgTPMUsesShortFallbackWithoutRetryA
 	}
 }
 
+func TestGitLabClaudeScopeKeyPrefersEntitlementHeadersOverInstanceOnly(t *testing.T) {
+	base := &Account{
+		Type:            AccountTypeClaude,
+		AuthMode:        accountAuthModeGitLab,
+		SourceBaseURL:   defaultGitLabInstanceURL,
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders: map[string]string{
+			"X-Gitlab-Instance-Id":                  "inst-1",
+			"X-Gitlab-Feature-Enabled-By-Namespace-Ids": "100,200",
+			"X-Gitlab-User-Id":                      "42",
+		},
+	}
+	sameEntitlement := &Account{
+		Type:            AccountTypeClaude,
+		AuthMode:        accountAuthModeGitLab,
+		SourceBaseURL:   defaultGitLabInstanceURL,
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders: map[string]string{
+			"X-Gitlab-Instance-Id":                  "inst-1",
+			"X-Gitlab-Feature-Enabled-By-Namespace-Ids": "100,200",
+			"X-Gitlab-User-Id":                      "77",
+		},
+	}
+	differentEntitlement := &Account{
+		Type:            AccountTypeClaude,
+		AuthMode:        accountAuthModeGitLab,
+		SourceBaseURL:   defaultGitLabInstanceURL,
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders: map[string]string{
+			"X-Gitlab-Instance-Id":                  "inst-1",
+			"X-Gitlab-Feature-Enabled-By-Namespace-Ids": "300",
+			"X-Gitlab-User-Id":                      "42",
+		},
+	}
+
+	if got := gitLabClaudeScopeKey(base); got == "" {
+		t.Fatal("expected non-empty scope key")
+	}
+	if got, want := gitLabClaudeScopeKey(sameEntitlement), gitLabClaudeScopeKey(base); got != want {
+		t.Fatalf("same entitlement scope mismatch: got %q want %q", got, want)
+	}
+	if got, want := gitLabClaudeScopeKey(differentEntitlement), gitLabClaudeScopeKey(base); got == want {
+		t.Fatalf("expected different entitlement scope, got %q", got)
+	}
+}
+
 func TestClaudeProviderLoadsLegacyQuotaExceededAccountWithDefaultBackoffCount(t *testing.T) {
 	baseURL, _ := url.Parse("https://claude.example.com")
 	provider := NewClaudeProvider(baseURL)
