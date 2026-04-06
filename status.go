@@ -1050,6 +1050,45 @@ func enrichGeminiDashboardStatus(status *AccountStatus, snapshot accountSnapshot
 	status.ProviderQuotaSummary = summarizeGeminiQuotaStatus(snapshot.GeminiQuotaUpdatedAt, quotaModels)
 }
 
+func enrichGitLabClaudeDashboardStatus(status *AccountStatus, snapshot accountSnapshot, now time.Time) {
+	if status == nil || !snapshot.GitLabClaude {
+		return
+	}
+	status.GitLabRateLimitName = strings.TrimSpace(snapshot.GitLabRateLimitName)
+	status.GitLabRateLimitLimit = snapshot.GitLabRateLimitLimit
+	status.GitLabRateLimitRemaining = snapshot.GitLabRateLimitRemaining
+	status.GitLabQuotaExceededCount = snapshot.GitLabQuotaExceededCount
+	if !snapshot.GitLabRateLimitResetAt.IsZero() {
+		status.GitLabRateLimitResetAt = snapshot.GitLabRateLimitResetAt.UTC().Format(time.RFC3339)
+		if snapshot.GitLabRateLimitResetAt.After(now) {
+			status.GitLabRateLimitResetIn = formatDuration(snapshot.GitLabRateLimitResetAt.Sub(now))
+		}
+	}
+	if snapshot.GitLabQuotaExceededCount > 0 && !snapshot.RateLimitUntil.IsZero() && snapshot.RateLimitUntil.After(now) {
+		status.GitLabQuotaProbeIn = formatDuration(snapshot.RateLimitUntil.Sub(now))
+	}
+	status.GitLabCanaryModel = strings.TrimSpace(snapshot.GitLabCanaryModel)
+	if !snapshot.GitLabCanaryNextProbeAt.IsZero() {
+		status.GitLabCanaryProbeAt = snapshot.GitLabCanaryNextProbeAt.UTC().Format(time.RFC3339)
+		if snapshot.GitLabCanaryNextProbeAt.After(now) {
+			status.GitLabCanaryProbeIn = formatDuration(snapshot.GitLabCanaryNextProbeAt.Sub(now))
+		} else {
+			status.GitLabCanaryProbeIn = "due now"
+		}
+	}
+	if !snapshot.GitLabCanaryLastAttemptAt.IsZero() {
+		status.GitLabCanaryLastAttemptAt = snapshot.GitLabCanaryLastAttemptAt.UTC().Format(time.RFC3339)
+	}
+	if !snapshot.GitLabCanaryLastSuccessAt.IsZero() {
+		status.GitLabCanaryLastSuccessAt = snapshot.GitLabCanaryLastSuccessAt.UTC().Format(time.RFC3339)
+	}
+	status.GitLabCanaryLastResult = strings.TrimSpace(snapshot.GitLabCanaryLastResult)
+	status.GitLabCanaryLastError = sanitizeStatusMessage(snapshot.GitLabCanaryLastError)
+	if status.UsageObserved == "" {
+		status.UsageObserved = "local totals only · GitLab quota hidden"
+	}
+}
+
 func buildPoolDashboardRouting(snapshot accountSnapshot, routing routingState, now time.Time) PoolDashboardRouting {
 	state, degradedReason := geminiRoutingDisplay(snapshot, routing, now)
 	row := PoolDashboardRouting{
@@ -1256,41 +1295,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		} else if strings.TrimSpace(snapshot.Usage.Source) != "" {
 			status.UsageObserved = strings.TrimSpace(snapshot.Usage.Source)
 		}
-		if snapshot.GitLabClaude {
-			status.GitLabRateLimitName = strings.TrimSpace(snapshot.GitLabRateLimitName)
-			status.GitLabRateLimitLimit = snapshot.GitLabRateLimitLimit
-			status.GitLabRateLimitRemaining = snapshot.GitLabRateLimitRemaining
-			status.GitLabQuotaExceededCount = snapshot.GitLabQuotaExceededCount
-			if !snapshot.GitLabRateLimitResetAt.IsZero() {
-				status.GitLabRateLimitResetAt = snapshot.GitLabRateLimitResetAt.UTC().Format(time.RFC3339)
-				if snapshot.GitLabRateLimitResetAt.After(now) {
-					status.GitLabRateLimitResetIn = formatDuration(snapshot.GitLabRateLimitResetAt.Sub(now))
-				}
-			}
-			if snapshot.GitLabQuotaExceededCount > 0 && !snapshot.RateLimitUntil.IsZero() && snapshot.RateLimitUntil.After(now) {
-				status.GitLabQuotaProbeIn = formatDuration(snapshot.RateLimitUntil.Sub(now))
-			}
-			status.GitLabCanaryModel = strings.TrimSpace(snapshot.GitLabCanaryModel)
-			if !snapshot.GitLabCanaryNextProbeAt.IsZero() {
-				status.GitLabCanaryProbeAt = snapshot.GitLabCanaryNextProbeAt.UTC().Format(time.RFC3339)
-				if snapshot.GitLabCanaryNextProbeAt.After(now) {
-					status.GitLabCanaryProbeIn = formatDuration(snapshot.GitLabCanaryNextProbeAt.Sub(now))
-				} else {
-					status.GitLabCanaryProbeIn = "due now"
-				}
-			}
-			if !snapshot.GitLabCanaryLastAttemptAt.IsZero() {
-				status.GitLabCanaryLastAttemptAt = snapshot.GitLabCanaryLastAttemptAt.UTC().Format(time.RFC3339)
-			}
-			if !snapshot.GitLabCanaryLastSuccessAt.IsZero() {
-				status.GitLabCanaryLastSuccessAt = snapshot.GitLabCanaryLastSuccessAt.UTC().Format(time.RFC3339)
-			}
-			status.GitLabCanaryLastResult = strings.TrimSpace(snapshot.GitLabCanaryLastResult)
-			status.GitLabCanaryLastError = sanitizeStatusMessage(snapshot.GitLabCanaryLastError)
-			if status.UsageObserved == "" {
-				status.UsageObserved = "local totals only · GitLab quota hidden"
-			}
-		}
+		enrichGitLabClaudeDashboardStatus(&status, snapshot, now)
 		if snapshot.Type == AccountTypeGemini {
 			switch operatorSource {
 			case geminiOperatorSourceManagedOAuth:
