@@ -1276,6 +1276,12 @@ func (h *proxyHandler) recordTransparentPrestreamRetry(acc *Account) {
 	}
 }
 
+func (h *proxyHandler) finishBufferedRetry(trace *requestTrace, acc *Account, resp *http.Response, attempt, attempts int, refreshFailed bool, retryText string, err error) (bool, error) {
+	h.recordTransparentPrestreamRetry(acc)
+	trace.noteRetryDisposition(acc.Type, acc, attempt, attempts, resp.StatusCode, true, bufferedRetryTraceReason(resp.StatusCode, retryText), refreshFailed)
+	return true, err
+}
+
 func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *requestTrace, acc *Account, resp *http.Response, refreshFailed bool, requestedModel, requestPath string, attempt, attempts int) (bool, error) {
 	var retryInspection bufferedRetryInspection
 	if needsBufferedRetryInspection(acc, resp.StatusCode) {
@@ -1292,15 +1298,12 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 		if h.cfg.debug {
 			log.Printf("[%s] attempt %d/%d account=%s retryable status=%d refreshFailed=%v", reqID, attempt, attempts, acc.ID, resp.StatusCode, refreshFailed)
 		}
-		trace.noteRetryDisposition(acc.Type, acc, attempt, attempts, resp.StatusCode, true, bufferedRetryTraceReason(resp.StatusCode, retryInspection.Text), refreshFailed)
-		return true, err
+		return h.finishBufferedRetry(trace, acc, resp, attempt, attempts, refreshFailed, retryInspection.Text, err)
 	}
 
 	if isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired) {
 		err := h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body, requestedModel, requestPath)
-		h.recordTransparentPrestreamRetry(acc)
-		trace.noteRetryDisposition(acc.Type, acc, attempt, attempts, resp.StatusCode, true, bufferedRetryTraceReason(resp.StatusCode, retryInspection.Text), refreshFailed)
-		return true, err
+		return h.finishBufferedRetry(trace, acc, resp, attempt, attempts, refreshFailed, retryInspection.Text, err)
 	}
 
 	// Handle 402 Payment Required - often means deactivated workspace/subscription.
@@ -1309,9 +1312,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 			_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body, requestedModel, requestPath)
 			err := formatBufferedRetryStatusError(resp, retryInspection.Text)
 			h.recent.add(err.Error())
-			h.recordTransparentPrestreamRetry(acc)
-			trace.noteRetryDisposition(acc.Type, acc, attempt, attempts, resp.StatusCode, true, bufferedRetryTraceReason(resp.StatusCode, retryInspection.Text), refreshFailed)
-			return true, err
+			return h.finishBufferedRetry(trace, acc, resp, attempt, attempts, refreshFailed, retryInspection.Text, err)
 		}
 		// Check for deactivated_workspace or similar permanent failures.
 		if strings.Contains(retryInspection.Text, "deactivated_workspace") || strings.Contains(retryInspection.Text, "subscription") {
@@ -1325,9 +1326,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 			}
 			err := fmt.Errorf("account deactivated: %s", retryInspection.Text)
 			h.recent.add(err.Error())
-			h.recordTransparentPrestreamRetry(acc)
-			trace.noteRetryDisposition(acc.Type, acc, attempt, attempts, resp.StatusCode, true, bufferedRetryTraceReason(resp.StatusCode, retryInspection.Text), refreshFailed)
-			return true, err
+			return h.finishBufferedRetry(trace, acc, resp, attempt, attempts, refreshFailed, retryInspection.Text, err)
 		}
 	}
 
@@ -1337,9 +1336,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 			if h.cfg.debug {
 				log.Printf("[%s] attempt %d/%d account=%s retryable status=%d refreshFailed=%v", reqID, attempt, attempts, acc.ID, resp.StatusCode, refreshFailed)
 			}
-			h.recordTransparentPrestreamRetry(acc)
-			trace.noteRetryDisposition(acc.Type, acc, attempt, attempts, resp.StatusCode, true, bufferedRetryTraceReason(resp.StatusCode, retryInspection.Text), refreshFailed)
-			return true, err
+			return h.finishBufferedRetry(trace, acc, resp, attempt, attempts, refreshFailed, retryInspection.Text, err)
 		}
 
 		_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body, requestedModel, requestPath)
@@ -1363,9 +1360,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 		if h.cfg.debug {
 			log.Printf("[%s] attempt %d/%d account=%s retryable status=%d refreshFailed=%v", reqID, attempt, attempts, acc.ID, resp.StatusCode, refreshFailed)
 		}
-		h.recordTransparentPrestreamRetry(acc)
-		trace.noteRetryDisposition(acc.Type, acc, attempt, attempts, resp.StatusCode, true, bufferedRetryTraceReason(resp.StatusCode, retryInspection.Text), refreshFailed)
-		return true, err
+		return h.finishBufferedRetry(trace, acc, resp, attempt, attempts, refreshFailed, retryInspection.Text, err)
 	}
 
 	return false, nil
