@@ -855,6 +855,53 @@ func firstSeatStatus(values ...*CurrentSeatStatus) *CurrentSeatStatus {
 	return nil
 }
 
+type currentSeatDashboardState struct {
+	ActiveSeat         *CurrentSeatStatus
+	LastUsedSeat       *CurrentSeatStatus
+	BestEligibleSeat   *CurrentSeatStatus
+	CurrentSeat        *CurrentSeatStatus
+	NextOpenAIAPIKeyID string
+	NextGitLabTokenID  string
+}
+
+func buildCurrentSeatDashboardState(pool *poolState, now time.Time, candidateByID map[string]currentSeatCandidate, activeSeat, lastUsedSeat, nextOpenAIAPIKey, nextGitLabClaudeToken *currentSeatCandidate, activeSeatCount int) currentSeatDashboardState {
+	state := currentSeatDashboardState{
+		ActiveSeat:   currentSeatStatusFromCandidate(activeSeat, "Live requests are currently using this seat.", activeSeatCount),
+		LastUsedSeat: currentSeatStatusFromCandidate(lastUsedSeat, "This is the most recently used local seat.", activeSeatCount),
+	}
+	if sameSeatStatus(state.ActiveSeat, state.LastUsedSeat) {
+		state.LastUsedSeat = nil
+	}
+
+	var nextAccount *Account
+	if pool != nil {
+		nextAccount = pool.peekCandidateAt(now, AccountTypeCodex, "")
+		if nextAccount == nil {
+			nextAccount = pool.peekCandidateAt(now, "", "")
+		}
+	}
+	if nextAccount != nil {
+		if nextCandidate, ok := candidateByID[nextAccount.ID]; ok {
+			nextBasis := "If a new unpinned request starts now, the pool will choose this seat."
+			if state.ActiveSeat != nil && sameSeatStatus(state.ActiveSeat, currentSeatStatusFromCandidate(&nextCandidate, nextBasis, activeSeatCount)) {
+				nextBasis = "New unpinned requests would also land on this seat right now."
+			}
+			state.BestEligibleSeat = currentSeatStatusFromCandidate(&nextCandidate, nextBasis, activeSeatCount)
+		}
+	}
+	if sameSeatStatus(state.ActiveSeat, state.BestEligibleSeat) || sameSeatStatus(state.LastUsedSeat, state.BestEligibleSeat) {
+		state.BestEligibleSeat = nil
+	}
+	state.CurrentSeat = firstSeatStatus(state.ActiveSeat, state.BestEligibleSeat, state.LastUsedSeat)
+	if nextOpenAIAPIKey != nil {
+		state.NextOpenAIAPIKeyID = nextOpenAIAPIKey.status.ID
+	}
+	if nextGitLabClaudeToken != nil {
+		state.NextGitLabTokenID = nextGitLabClaudeToken.status.ID
+	}
+	return state
+}
+
 func buildPoolDashboardRouting(snapshot accountSnapshot, routing routingState, now time.Time) PoolDashboardRouting {
 	state, degradedReason := geminiRoutingDisplay(snapshot, routing, now)
 	row := PoolDashboardRouting{
@@ -1356,35 +1403,14 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 	if !earliestRecovery.IsZero() {
 		data.PoolSummary.NextRecoveryAt = earliestRecovery.Format(time.RFC3339)
 	}
-	data.ActiveSeat = currentSeatStatusFromCandidate(activeSeat, "Live requests are currently using this seat.", activeSeatCount)
-	data.LastUsedSeat = currentSeatStatusFromCandidate(lastUsedSeat, "This is the most recently used local seat.", activeSeatCount)
-	if sameSeatStatus(data.ActiveSeat, data.LastUsedSeat) {
-		data.LastUsedSeat = nil
-	}
-	nextAccount := h.pool.peekCandidateAt(now, AccountTypeCodex, "")
-	if nextAccount == nil {
-		nextAccount = h.pool.peekCandidateAt(now, "", "")
-	}
-	if nextAccount != nil {
-		if nextCandidate, ok := candidateByID[nextAccount.ID]; ok {
-			nextBasis := "If a new unpinned request starts now, the pool will choose this seat."
-			if data.ActiveSeat != nil && sameSeatStatus(data.ActiveSeat, currentSeatStatusFromCandidate(&nextCandidate, nextBasis, activeSeatCount)) {
-				nextBasis = "New unpinned requests would also land on this seat right now."
-			}
-			data.BestEligibleSeat = currentSeatStatusFromCandidate(&nextCandidate, nextBasis, activeSeatCount)
-		}
-	}
-	if sameSeatStatus(data.ActiveSeat, data.BestEligibleSeat) || sameSeatStatus(data.LastUsedSeat, data.BestEligibleSeat) {
-		data.BestEligibleSeat = nil
-	}
-	data.CurrentSeat = firstSeatStatus(data.ActiveSeat, data.BestEligibleSeat, data.LastUsedSeat)
-	if nextOpenAIAPIKey != nil {
-		data.OpenAIAPIPool.NextKeyID = nextOpenAIAPIKey.status.ID
-	}
+	seatState := buildCurrentSeatDashboardState(h.pool, now, candidateByID, activeSeat, lastUsedSeat, nextOpenAIAPIKey, nextGitLabClaudeToken, activeSeatCount)
+	data.ActiveSeat = seatState.ActiveSeat
+	data.LastUsedSeat = seatState.LastUsedSeat
+	data.BestEligibleSeat = seatState.BestEligibleSeat
+	data.CurrentSeat = seatState.CurrentSeat
+	data.OpenAIAPIPool.NextKeyID = seatState.NextOpenAIAPIKeyID
 	data.OpenAIAPIPool.StatusNote = managedOpenAIAPIPoolStatusNote(data.OpenAIAPIPool)
-	if nextGitLabClaudeToken != nil {
-		data.GitLabClaudePool.NextTokenID = nextGitLabClaudeToken.status.ID
-	}
+	data.GitLabClaudePool.NextTokenID = seatState.NextGitLabTokenID
 	data.GeminiOperator.Note = geminiOperatorStatusNote(data.GeminiOperator)
 	if geminiPool.TotalSeats > 0 {
 		geminiPool.Note = geminiPoolStatusNote(geminiPool)
