@@ -7,6 +7,7 @@ out_dir="${1:-$repo_root/dist/public-bundle}"
 rm -rf "$out_dir"
 mkdir -p "$out_dir"
 
+# Source-only private repo artifacts stay tracked here but must not leak into the public bundle.
 rsync -a \
   --exclude='.git' \
   --exclude='.git/' \
