@@ -902,6 +902,154 @@ func buildCurrentSeatDashboardState(pool *poolState, now time.Time, candidateByI
 	return state
 }
 
+func enrichGeminiDashboardStatus(status *AccountStatus, snapshot accountSnapshot, routing routingState, now time.Time, geminiPool *GeminiPoolStatus) {
+	if status == nil || geminiPool == nil || snapshot.Type != AccountTypeGemini {
+		return
+	}
+
+	geminiPool.TotalSeats++
+	if routing.Eligible {
+		geminiPool.EligibleSeats++
+		if status.Routing.State == routingDisplayStateDegradedEnabled {
+			geminiPool.DegradedEligibleSeats++
+		} else {
+			geminiPool.CleanEligibleSeats++
+		}
+	}
+	if snapshot.GeminiProviderTruthReady {
+		geminiPool.ReadySeats++
+	}
+	operationalState := strings.TrimSpace(snapshot.GeminiOperationalState)
+	if geminiHasOperationalProof(operationalState) {
+		geminiPool.WarmSeats++
+	}
+	cooldownCounted := false
+	if operationalState == geminiOperationalTruthStateCooldown {
+		geminiPool.CooldownSeats++
+		cooldownCounted = true
+	}
+	if snapshot.AntigravityValidationBlocked {
+		geminiPool.ValidationFlaggedSeats++
+	}
+	switch strings.TrimSpace(snapshot.GeminiProviderTruthState) {
+	case geminiProviderTruthStateRestricted:
+		geminiPool.RestrictedSeats++
+	case geminiProviderTruthStateMissingProjectID:
+		geminiPool.MissingProjectSeats++
+	}
+	switch strings.TrimSpace(routing.BlockReason) {
+	case "rate_limited":
+		if !cooldownCounted {
+			geminiPool.CooldownSeats++
+		}
+	case "not_warmed":
+		geminiPool.NotWarmedSeats++
+	case "stale_provider_truth":
+		geminiPool.StaleTruthSeats++
+	case "stale_quota_snapshot":
+		geminiPool.StaleTruthSeats++
+		geminiPool.StaleQuotaSeats++
+	}
+	status.ProviderSubscriptionTier = strings.TrimSpace(snapshot.GeminiSubscriptionTierID)
+	status.ProviderSubscriptionName = strings.TrimSpace(snapshot.GeminiSubscriptionTierName)
+	status.ProviderValidationCode = strings.TrimSpace(snapshot.GeminiValidationReasonCode)
+	status.ProviderValidationMessage = sanitizeStatusMessage(snapshot.GeminiValidationMessage)
+	status.ProviderValidationURL = strings.TrimSpace(snapshot.GeminiValidationURL)
+	if !snapshot.GeminiProviderCheckedAt.IsZero() {
+		status.ProviderCheckedAt = snapshot.GeminiProviderCheckedAt.UTC().Format(time.RFC3339)
+	}
+
+	protectedModels := normalizeStringSlice(snapshot.GeminiProtectedModels)
+	protectedSet := make(map[string]struct{}, len(protectedModels))
+	for _, modelID := range protectedModels {
+		protectedSet[modelID] = struct{}{}
+	}
+	geminiPool.ProtectedModelCount += len(protectedModels)
+
+	quotaModels := make([]GeminiModelQuotaStatus, 0, len(snapshot.GeminiQuotaModels))
+	for _, model := range snapshot.GeminiQuotaModels {
+		routeProvider := firstNonEmpty(strings.TrimSpace(model.RouteProvider), geminiQuotaModelRouteProvider(model.Name))
+		runtimeSupport := geminiQuotaModelRuntimeSupportForSnapshot(snapshot, routeProvider)
+		quotaModel := GeminiModelQuotaStatus{
+			Name:                strings.TrimSpace(model.Name),
+			RouteProvider:       routeProvider,
+			Routable:            runtimeSupport.Routable,
+			CompatibilityLane:   runtimeSupport.CompatibilityLane,
+			CompatibilityReason: runtimeSupport.CompatibilityReason,
+			Percentage:          model.Percentage,
+			ResetTime:           strings.TrimSpace(model.ResetTime),
+			DisplayName:         strings.TrimSpace(model.DisplayName),
+			SupportsImages:      model.SupportsImages,
+			SupportsThinking:    model.SupportsThinking,
+			ThinkingBudget:      model.ThinkingBudget,
+			Recommended:         model.Recommended,
+			MaxTokens:           model.MaxTokens,
+			MaxOutputTokens:     model.MaxOutputTokens,
+			SupportedMimeTypes:  cloneSupportedMimeTypes(model.SupportedMimeTypes),
+		}
+		_, quotaModel.Protected = protectedSet[quotaModel.Name]
+		quotaModels = append(quotaModels, quotaModel)
+	}
+
+	var quotaStatus *GeminiProviderQuotaStatus
+	if !snapshot.GeminiQuotaUpdatedAt.IsZero() || len(snapshot.GeminiModelForwardingRules) > 0 || len(quotaModels) > 0 {
+		quotaStatus = &GeminiProviderQuotaStatus{
+			ModelForwardingRules: cloneStringMap(snapshot.GeminiModelForwardingRules),
+			Models:               quotaModels,
+		}
+		if !snapshot.GeminiQuotaUpdatedAt.IsZero() {
+			quotaStatus.UpdatedAt = snapshot.GeminiQuotaUpdatedAt.UTC().Format(time.RFC3339)
+		}
+	}
+	if quotaStatus != nil {
+		geminiPool.QuotaTrackedSeats++
+		geminiPool.QuotaModelCount += len(quotaModels)
+		if len(quotaModels) == 0 {
+			geminiPool.QuotaEmptySeats++
+		}
+	}
+
+	providerTruth := &GeminiProviderTruthStatus{
+		Ready:                snapshot.GeminiProviderTruthReady,
+		State:                strings.TrimSpace(snapshot.GeminiProviderTruthState),
+		Reason:               sanitizeStatusMessage(snapshot.GeminiProviderTruthReason),
+		ProjectID:            strings.TrimSpace(snapshot.AntigravityProjectID),
+		SubscriptionTierID:   strings.TrimSpace(snapshot.GeminiSubscriptionTierID),
+		SubscriptionTierName: strings.TrimSpace(snapshot.GeminiSubscriptionTierName),
+		ValidationReasonCode: strings.TrimSpace(snapshot.GeminiValidationReasonCode),
+		ValidationMessage:    sanitizeStatusMessage(snapshot.GeminiValidationMessage),
+		ValidationURL:        strings.TrimSpace(snapshot.GeminiValidationURL),
+		ProxyDisabled:        snapshot.AntigravityProxyDisabled,
+		Restricted:           strings.TrimSpace(snapshot.GeminiProviderTruthState) == geminiProviderTruthStateRestricted,
+		ValidationBlocked:    snapshot.AntigravityValidationBlocked,
+		QuotaForbidden:       snapshot.AntigravityQuotaForbidden,
+		QuotaForbiddenReason: sanitizeStatusMessage(snapshot.AntigravityQuotaForbiddenReason),
+		ProtectedModels:      protectedModels,
+		RateLimitResetTimes:  formatGeminiModelRateLimitResetTimes(snapshot.GeminiModelRateLimitResetTimes, now),
+		Quota:                quotaStatus,
+	}
+	if !snapshot.GeminiProviderCheckedAt.IsZero() {
+		providerTruth.CheckedAt = snapshot.GeminiProviderCheckedAt.UTC().Format(time.RFC3339)
+	}
+	freshness := geminiProviderTruthFreshnessStatus(
+		snapshot.GeminiProviderTruthState,
+		snapshot.GeminiProviderCheckedAt,
+		snapshot.GeminiQuotaUpdatedAt,
+		now,
+	)
+	if freshness.State != "" {
+		providerTruth.FreshnessState = freshness.State
+		providerTruth.Stale = freshness.Stale
+		providerTruth.StaleReason = sanitizeStatusMessage(freshness.Reason)
+		if !freshness.FreshUntil.IsZero() {
+			providerTruth.FreshUntil = freshness.FreshUntil.UTC().Format(time.RFC3339)
+		}
+	}
+	status.ProviderTruth = providerTruth
+	status.OperationalTruth = geminiOperationalTruthStatus(snapshot)
+	status.ProviderQuotaSummary = summarizeGeminiQuotaStatus(snapshot.GeminiQuotaUpdatedAt, quotaModels)
+}
+
 func buildPoolDashboardRouting(snapshot accountSnapshot, routing routingState, now time.Time) PoolDashboardRouting {
 	state, degradedReason := geminiRoutingDisplay(snapshot, routing, now)
 	row := PoolDashboardRouting{
@@ -1075,145 +1223,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		if !snapshot.LastHealthyAt.IsZero() {
 			status.LastHealthyAt = snapshot.LastHealthyAt.UTC().Format(time.RFC3339)
 		}
-		if snapshot.Type == AccountTypeGemini {
-			geminiPool.TotalSeats++
-			if routing.Eligible {
-				geminiPool.EligibleSeats++
-				if status.Routing.State == routingDisplayStateDegradedEnabled {
-					geminiPool.DegradedEligibleSeats++
-				} else {
-					geminiPool.CleanEligibleSeats++
-				}
-			}
-			if snapshot.GeminiProviderTruthReady {
-				geminiPool.ReadySeats++
-			}
-			operationalState := strings.TrimSpace(snapshot.GeminiOperationalState)
-			if geminiHasOperationalProof(operationalState) {
-				geminiPool.WarmSeats++
-			}
-			cooldownCounted := false
-			if operationalState == geminiOperationalTruthStateCooldown {
-				geminiPool.CooldownSeats++
-				cooldownCounted = true
-			}
-			if snapshot.AntigravityValidationBlocked {
-				geminiPool.ValidationFlaggedSeats++
-			}
-			switch strings.TrimSpace(snapshot.GeminiProviderTruthState) {
-			case geminiProviderTruthStateRestricted:
-				geminiPool.RestrictedSeats++
-			case geminiProviderTruthStateMissingProjectID:
-				geminiPool.MissingProjectSeats++
-			}
-			switch strings.TrimSpace(routing.BlockReason) {
-			case "rate_limited":
-				if !cooldownCounted {
-					geminiPool.CooldownSeats++
-				}
-			case "not_warmed":
-				geminiPool.NotWarmedSeats++
-			case "stale_provider_truth":
-				geminiPool.StaleTruthSeats++
-			case "stale_quota_snapshot":
-				geminiPool.StaleTruthSeats++
-				geminiPool.StaleQuotaSeats++
-			}
-			status.ProviderSubscriptionTier = strings.TrimSpace(snapshot.GeminiSubscriptionTierID)
-			status.ProviderSubscriptionName = strings.TrimSpace(snapshot.GeminiSubscriptionTierName)
-			status.ProviderValidationCode = strings.TrimSpace(snapshot.GeminiValidationReasonCode)
-			status.ProviderValidationMessage = sanitizeStatusMessage(snapshot.GeminiValidationMessage)
-			status.ProviderValidationURL = strings.TrimSpace(snapshot.GeminiValidationURL)
-			if !snapshot.GeminiProviderCheckedAt.IsZero() {
-				status.ProviderCheckedAt = snapshot.GeminiProviderCheckedAt.UTC().Format(time.RFC3339)
-			}
-			protectedModels := normalizeStringSlice(snapshot.GeminiProtectedModels)
-			protectedSet := make(map[string]struct{}, len(protectedModels))
-			for _, modelID := range protectedModels {
-				protectedSet[modelID] = struct{}{}
-			}
-			geminiPool.ProtectedModelCount += len(protectedModels)
-			quotaModels := make([]GeminiModelQuotaStatus, 0, len(snapshot.GeminiQuotaModels))
-			for _, model := range snapshot.GeminiQuotaModels {
-				routeProvider := firstNonEmpty(strings.TrimSpace(model.RouteProvider), geminiQuotaModelRouteProvider(model.Name))
-				runtimeSupport := geminiQuotaModelRuntimeSupportForSnapshot(snapshot, routeProvider)
-				quotaModel := GeminiModelQuotaStatus{
-					Name:                strings.TrimSpace(model.Name),
-					RouteProvider:       routeProvider,
-					Routable:            runtimeSupport.Routable,
-					CompatibilityLane:   runtimeSupport.CompatibilityLane,
-					CompatibilityReason: runtimeSupport.CompatibilityReason,
-					Percentage:          model.Percentage,
-					ResetTime:           strings.TrimSpace(model.ResetTime),
-					DisplayName:         strings.TrimSpace(model.DisplayName),
-					SupportsImages:      model.SupportsImages,
-					SupportsThinking:    model.SupportsThinking,
-					ThinkingBudget:      model.ThinkingBudget,
-					Recommended:         model.Recommended,
-					MaxTokens:           model.MaxTokens,
-					MaxOutputTokens:     model.MaxOutputTokens,
-					SupportedMimeTypes:  cloneSupportedMimeTypes(model.SupportedMimeTypes),
-				}
-				_, quotaModel.Protected = protectedSet[quotaModel.Name]
-				quotaModels = append(quotaModels, quotaModel)
-			}
-			var quotaStatus *GeminiProviderQuotaStatus
-			if !snapshot.GeminiQuotaUpdatedAt.IsZero() || len(snapshot.GeminiModelForwardingRules) > 0 || len(quotaModels) > 0 {
-				quotaStatus = &GeminiProviderQuotaStatus{
-					ModelForwardingRules: cloneStringMap(snapshot.GeminiModelForwardingRules),
-					Models:               quotaModels,
-				}
-				if !snapshot.GeminiQuotaUpdatedAt.IsZero() {
-					quotaStatus.UpdatedAt = snapshot.GeminiQuotaUpdatedAt.UTC().Format(time.RFC3339)
-				}
-			}
-			if quotaStatus != nil {
-				geminiPool.QuotaTrackedSeats++
-				geminiPool.QuotaModelCount += len(quotaModels)
-				if len(quotaModels) == 0 {
-					geminiPool.QuotaEmptySeats++
-				}
-			}
-			providerTruth := &GeminiProviderTruthStatus{
-				Ready:                snapshot.GeminiProviderTruthReady,
-				State:                strings.TrimSpace(snapshot.GeminiProviderTruthState),
-				Reason:               sanitizeStatusMessage(snapshot.GeminiProviderTruthReason),
-				ProjectID:            strings.TrimSpace(snapshot.AntigravityProjectID),
-				SubscriptionTierID:   strings.TrimSpace(snapshot.GeminiSubscriptionTierID),
-				SubscriptionTierName: strings.TrimSpace(snapshot.GeminiSubscriptionTierName),
-				ValidationReasonCode: strings.TrimSpace(snapshot.GeminiValidationReasonCode),
-				ValidationMessage:    sanitizeStatusMessage(snapshot.GeminiValidationMessage),
-				ValidationURL:        strings.TrimSpace(snapshot.GeminiValidationURL),
-				ProxyDisabled:        snapshot.AntigravityProxyDisabled,
-				Restricted:           strings.TrimSpace(snapshot.GeminiProviderTruthState) == geminiProviderTruthStateRestricted,
-				ValidationBlocked:    snapshot.AntigravityValidationBlocked,
-				QuotaForbidden:       snapshot.AntigravityQuotaForbidden,
-				QuotaForbiddenReason: sanitizeStatusMessage(snapshot.AntigravityQuotaForbiddenReason),
-				ProtectedModels:      protectedModels,
-				RateLimitResetTimes:  formatGeminiModelRateLimitResetTimes(snapshot.GeminiModelRateLimitResetTimes, now),
-				Quota:                quotaStatus,
-			}
-			if !snapshot.GeminiProviderCheckedAt.IsZero() {
-				providerTruth.CheckedAt = snapshot.GeminiProviderCheckedAt.UTC().Format(time.RFC3339)
-			}
-			freshness := geminiProviderTruthFreshnessStatus(
-				snapshot.GeminiProviderTruthState,
-				snapshot.GeminiProviderCheckedAt,
-				snapshot.GeminiQuotaUpdatedAt,
-				now,
-			)
-			if freshness.State != "" {
-				providerTruth.FreshnessState = freshness.State
-				providerTruth.Stale = freshness.Stale
-				providerTruth.StaleReason = sanitizeStatusMessage(freshness.Reason)
-				if !freshness.FreshUntil.IsZero() {
-					providerTruth.FreshUntil = freshness.FreshUntil.UTC().Format(time.RFC3339)
-				}
-			}
-			status.ProviderTruth = providerTruth
-			status.OperationalTruth = geminiOperationalTruthStatus(snapshot)
-			status.ProviderQuotaSummary = summarizeGeminiQuotaStatus(snapshot.GeminiQuotaUpdatedAt, quotaModels)
-		}
+		enrichGeminiDashboardStatus(&status, snapshot, routing, now, &geminiPool)
 		if !snapshot.DeadSince.IsZero() {
 			status.DeadSince = snapshot.DeadSince.UTC().Format(time.RFC3339)
 		}
