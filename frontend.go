@@ -282,8 +282,8 @@ func (h *proxyHandler) requireSetupPoolUser(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *proxyHandler) serveCodexSetupScript(w http.ResponseWriter, r *http.Request) {
-	token := strings.TrimPrefix(r.URL.Path, "/setup/codex/")
-	if token == "" || strings.Contains(token, "/") {
+	token := setupTokenFromPath(r.URL.Path, "/setup/codex/")
+	if token == "" {
 		http.Error(w, "invalid token", http.StatusBadRequest)
 		return
 	}
@@ -904,8 +904,8 @@ echo "Setup complete! You are ready to use the pool."
 }
 
 func (h *proxyHandler) serveCLCodeSetupScript(w http.ResponseWriter, r *http.Request) {
-	token := strings.TrimPrefix(r.URL.Path, "/setup/clcode/")
-	if token == "" || strings.Contains(token, "/") {
+	token := setupTokenFromPath(r.URL.Path, "/setup/clcode/")
+	if token == "" {
 		http.Error(w, "invalid token", http.StatusBadRequest)
 		return
 	}
