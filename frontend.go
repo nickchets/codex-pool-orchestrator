@@ -225,6 +225,11 @@ func wantsPowerShell(r *http.Request) bool {
 	}
 }
 
+func writeSetupScriptResponse(w http.ResponseWriter, contentType string, script string) {
+	w.Header().Set("Content-Type", contentType)
+	_, _ = w.Write([]byte(script))
+}
+
 func setupTokenFromPath(path string, prefix string) string {
 	token := strings.TrimPrefix(path, prefix)
 	if token == "" || strings.Contains(token, "/") {
@@ -633,8 +638,7 @@ args = ["-NoLogo", "-NoProfile", "-File", "$mcpScriptToml", "$BaseUrl"]
 Write-Host 'Setup complete! You are ready to use the pool.'
 `, token, publicURL)
 
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write([]byte(script))
+		writeSetupScriptResponse(w, "text/plain; charset=utf-8", script)
 		return
 	}
 
@@ -899,8 +903,7 @@ fi
 echo "Setup complete! You are ready to use the pool."
 `, token, publicURL, bashExtractAccessTokenFunction())
 
-	w.Header().Set("Content-Type", "text/x-shellscript")
-	w.Write([]byte(script))
+	writeSetupScriptResponse(w, "text/x-shellscript", script)
 }
 
 func (h *proxyHandler) serveCLCodeSetupScript(w http.ResponseWriter, r *http.Request) {
@@ -1077,8 +1080,7 @@ Set-Utf8NoBom -Path $launcherFile -Value $launcher
 Write-Host "Setup complete. Run $launcherFile exec 'Reply with exactly OK.'"
 `, token, publicURL, fallbackCatalog, publicURL)
 
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write([]byte(script))
+		writeSetupScriptResponse(w, "text/plain; charset=utf-8", script)
 		return
 	}
 
@@ -1224,8 +1226,7 @@ chmod 700 "$LAUNCHER_FILE"
 echo "Setup complete. Run clcode exec 'Reply with exactly OK.'"
 `, token, publicURL, fallbackCatalog, bashExtractAccessTokenFunction(), publicURL)
 
-	w.Header().Set("Content-Type", "text/x-shellscript")
-	w.Write([]byte(script))
+	writeSetupScriptResponse(w, "text/x-shellscript", script)
 }
 
 func (h *proxyHandler) serveGeminiSetupScript(w http.ResponseWriter, r *http.Request) {
@@ -1331,8 +1332,7 @@ Write-Host ''
 Write-Host 'Start a new terminal, or run: . $PROFILE'
 `, publicURL, geminiAPIKey)
 
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write([]byte(script))
+		writeSetupScriptResponse(w, "text/plain; charset=utf-8", script)
 		return
 	}
 
@@ -1423,8 +1423,7 @@ echo "Run 'source ~/.zshrc' or start a new terminal, then use this only if you n
 		geminiAPIKey, publicURL,
 		geminiAPIKey, publicURL)
 
-	w.Header().Set("Content-Type", "text/x-shellscript")
-	w.Write([]byte(script))
+	writeSetupScriptResponse(w, "text/x-shellscript", script)
 }
 
 func (h *proxyHandler) serveOpenCodeSetupScript(w http.ResponseWriter, r *http.Request) {
@@ -1476,8 +1475,7 @@ Write-Host ('Base URL: ' + $payload.base_url)
 Write-Host 'OpenCode will use codex-pool/gemini-3.1-pro-high via codex-pool /v1.'
 `, configURL)
 
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write([]byte(script))
+		writeSetupScriptResponse(w, "text/plain; charset=utf-8", script)
 		return
 	}
 
@@ -1519,8 +1517,7 @@ echo ""
 echo "OpenCode will use codex-pool/gemini-3.1-pro-high via codex-pool /v1."
 `, configURL)
 
-	w.Header().Set("Content-Type", "text/x-shellscript")
-	w.Write([]byte(script))
+	writeSetupScriptResponse(w, "text/x-shellscript", script)
 }
 
 func (h *proxyHandler) serveClaudeSetupScript(w http.ResponseWriter, r *http.Request) {
@@ -1631,8 +1628,7 @@ Write-Host ''
 Write-Host 'Start a new terminal, or run: . $PROFILE'
 `, publicURL, claudeAuth.AccessToken)
 
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.Write([]byte(script))
+		writeSetupScriptResponse(w, "text/plain; charset=utf-8", script)
 		return
 	}
 
@@ -1792,8 +1788,7 @@ fi
 		publicURL, claudeAuth.AccessToken, // python
 		publicURL, claudeAuth.AccessToken) // bash fallback
 
-	w.Header().Set("Content-Type", "text/x-shellscript")
-	w.Write([]byte(script))
+	writeSetupScriptResponse(w, "text/x-shellscript", script)
 }
 
 // hashAccountID creates a short anonymized hash of an account identifier
