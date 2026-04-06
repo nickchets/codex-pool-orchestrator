@@ -88,24 +88,21 @@ func startOfGitLabClaudeRecoveryCandidate(now time.Time, acc *Account) (gitLabCl
 	if scopeKey == "" {
 		return gitLabClaudeSharedTPMCanaryScope{}, false
 	}
-
-	acc.mu.Lock()
-	defer acc.mu.Unlock()
-
-	if acc.Disabled || acc.Dead || missingGitLabClaudeGatewayState(acc) {
+	snapshot := snapshotGitLabClaudeAccount(acc)
+	if !snapshot.relevantForSharedCooldown() {
 		return gitLabClaudeSharedTPMCanaryScope{}, false
 	}
-	if !acc.RateLimitUntil.After(now) || strings.TrimSpace(acc.HealthStatus) != "rate_limited" || !isManagedGitLabClaudeSharedOrgTPMHealthError(acc.HealthError) {
+	if !snapshot.sharedTPMBlocked(now) {
 		return gitLabClaudeSharedTPMCanaryScope{}, false
 	}
-	if acc.GitLabCanaryNextProbeAt.IsZero() || acc.GitLabCanaryNextProbeAt.After(now) {
+	if snapshot.CanaryNextProbeAt.IsZero() || snapshot.CanaryNextProbeAt.After(now) {
 		return gitLabClaudeSharedTPMCanaryScope{}, false
 	}
 
 	return gitLabClaudeSharedTPMCanaryScope{
 		scopeKey:    scopeKey,
-		model:       managedGitLabClaudeCanaryModel(acc.GitLabCanaryModel),
-		nextProbeAt: acc.GitLabCanaryNextProbeAt,
+		model:       managedGitLabClaudeCanaryModel(snapshot.CanaryModel),
+		nextProbeAt: snapshot.CanaryNextProbeAt,
 		account:     acc,
 	}, true
 }
@@ -306,27 +303,20 @@ func (h *proxyHandler) prepareManagedGitLabClaudeCanarySeat(ctx context.Context,
 	if h == nil || acc == nil || !isGitLabClaudeAccount(acc) {
 		return nil
 	}
+	snapshot := snapshotGitLabClaudeAccount(acc)
 	if h.cfg.disableRefresh {
-		if missingGitLabClaudeGatewayState(acc) {
+		if snapshot.MissingGatewayState {
 			return context.DeadlineExceeded
 		}
 		return nil
 	}
-
-	missingState := false
-	acc.mu.Lock()
-	missingState = strings.TrimSpace(acc.AccessToken) == "" || len(acc.ExtraHeaders) == 0
-	acc.mu.Unlock()
-	needRefresh := missingState || h.needsRefresh(acc)
+	needRefresh := snapshot.MissingGatewayState || h.needsRefresh(acc)
 	if !needRefresh {
 		return nil
 	}
 
 	if err := h.refreshAccount(ctx, acc); err != nil {
-		acc.mu.Lock()
-		missingState := missingGitLabClaudeGatewayState(acc)
-		acc.mu.Unlock()
-		if missingState {
+		if snapshotGitLabClaudeAccount(acc).MissingGatewayState {
 			return err
 		}
 		log.Printf("warning: gitlab claude canary refresh for %s failed but existing gateway state remains usable: %v", acc.ID, err)

@@ -45,6 +45,17 @@ type managedGitLabClaudeErrorDisposition struct {
 	SharedOrgTPM bool
 }
 
+type gitLabClaudeAccountSnapshot struct {
+	Disabled            bool
+	Dead                bool
+	MissingGatewayState bool
+	RateLimitUntil      time.Time
+	HealthStatus        string
+	HealthError         string
+	CanaryModel         string
+	CanaryNextProbeAt   time.Time
+}
+
 func copyStringMap(in map[string]string) map[string]string {
 	if len(in) == 0 {
 		return nil
@@ -228,6 +239,35 @@ func gitLabClaudeQuotaExceededCooldown(nextCount int) time.Duration {
 
 func isGitLabClaudeAccount(a *Account) bool {
 	return a != nil && a.Type == AccountTypeClaude && accountAuthMode(a) == accountAuthModeGitLab
+}
+
+func snapshotGitLabClaudeAccount(acc *Account) gitLabClaudeAccountSnapshot {
+	if acc == nil {
+		return gitLabClaudeAccountSnapshot{}
+	}
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
+	return gitLabClaudeAccountSnapshot{
+		Disabled:            acc.Disabled,
+		Dead:                acc.Dead,
+		MissingGatewayState: strings.TrimSpace(acc.AccessToken) == "" || len(acc.ExtraHeaders) == 0,
+		RateLimitUntil:      acc.RateLimitUntil,
+		HealthStatus:        strings.TrimSpace(acc.HealthStatus),
+		HealthError:         acc.HealthError,
+		CanaryModel:         strings.TrimSpace(acc.GitLabCanaryModel),
+		CanaryNextProbeAt:   acc.GitLabCanaryNextProbeAt,
+	}
+}
+
+func (s gitLabClaudeAccountSnapshot) relevantForSharedCooldown() bool {
+	return !s.Disabled && !s.Dead && !s.MissingGatewayState
+}
+
+func (s gitLabClaudeAccountSnapshot) sharedTPMBlocked(now time.Time) bool {
+	return s.relevantForSharedCooldown() &&
+		s.RateLimitUntil.After(now) &&
+		s.HealthStatus == "rate_limited" &&
+		isManagedGitLabClaudeSharedOrgTPMHealthError(s.HealthError)
 }
 
 func missingGitLabClaudeGatewayState(a *Account) bool {

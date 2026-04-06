@@ -1593,24 +1593,17 @@ func (h *proxyHandler) gitLabClaudeSharedTPMCooldownError(now time.Time, account
 		if acc == nil || !isGitLabClaudeAccount(acc) || !planMatchesRequired(acc.PlanType, requiredPlan) || !providerSupportsPathForAccount(provider, path, acc) {
 			continue
 		}
-		acc.mu.Lock()
-		disabled := acc.Disabled
-		dead := acc.Dead
-		missingGatewayState := missingGitLabClaudeGatewayState(acc)
-		rateLimitUntil := acc.RateLimitUntil
-		healthStatus := acc.HealthStatus
-		healthError := acc.HealthError
-		acc.mu.Unlock()
-		if disabled || dead || missingGatewayState {
+		snapshot := snapshotGitLabClaudeAccount(acc)
+		if !snapshot.relevantForSharedCooldown() {
 			continue
 		}
 		relevant++
-		if !rateLimitUntil.After(now) || healthStatus != "rate_limited" || !isManagedGitLabClaudeSharedOrgTPMHealthError(healthError) {
+		if !snapshot.sharedTPMBlocked(now) {
 			return nil
 		}
-		if until.IsZero() || rateLimitUntil.Before(until) {
-			until = rateLimitUntil
-			reason = stripManagedGitLabClaudeSharedOrgTPMHealthPrefix(healthError)
+		if until.IsZero() || snapshot.RateLimitUntil.Before(until) {
+			until = snapshot.RateLimitUntil
+			reason = stripManagedGitLabClaudeSharedOrgTPMHealthPrefix(snapshot.HealthError)
 		}
 	}
 	if relevant == 0 || until.IsZero() {
