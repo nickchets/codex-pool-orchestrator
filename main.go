@@ -1439,36 +1439,36 @@ func (h *proxyHandler) runBufferedAttemptContour(
 	return nil, true
 }
 
-func (h *proxyHandler) candidateSupportingPath(conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string, provider Provider, path, requestedModel, forcedGeminiSeatID string) (*Account, error) {
-	if h == nil || h.pool == nil {
-		return nil, nil
+func (h *proxyHandler) forcedGeminiSeatForPath(accountType AccountType, provider Provider, path, forcedGeminiSeatID string) (*Account, error, bool) {
+	if forcedGeminiSeatID == "" {
+		return nil, nil, false
 	}
-	if exclude == nil {
-		exclude = map[string]bool{}
+	acc := h.pool.getByID(forcedGeminiSeatID)
+	if acc == nil {
+		return nil, fmt.Errorf("debug Gemini seat %s not found", forcedGeminiSeatID), true
 	}
-	if forcedGeminiSeatID != "" {
-		acc := h.pool.getByID(forcedGeminiSeatID)
-		if acc == nil {
-			return nil, fmt.Errorf("debug Gemini seat %s not found", forcedGeminiSeatID)
-		}
-		if accountType != AccountTypeGemini || acc.Type != AccountTypeGemini {
-			return nil, fmt.Errorf("debug Gemini seat %s does not match the requested provider", forcedGeminiSeatID)
-		}
-		if !providerSupportsPathForAccount(provider, path, acc) {
-			return nil, fmt.Errorf("debug Gemini seat %s does not support path %s", forcedGeminiSeatID, path)
-		}
-		atomic.AddInt64(&acc.Inflight, 1)
-		return acc, nil
+	if accountType != AccountTypeGemini || acc.Type != AccountTypeGemini {
+		return nil, fmt.Errorf("debug Gemini seat %s does not match the requested provider", forcedGeminiSeatID), true
 	}
+	if !providerSupportsPathForAccount(provider, path, acc) {
+		return nil, fmt.Errorf("debug Gemini seat %s does not support path %s", forcedGeminiSeatID, path), true
+	}
+	atomic.AddInt64(&acc.Inflight, 1)
+	return acc, nil, true
+}
 
+func (h *proxyHandler) candidateSupportingPathAttempts(accountType AccountType) int {
 	attempts := h.pool.count()
 	if accountType != "" {
 		if n := h.pool.countByType(accountType); n > 0 {
 			attempts = n
 		}
 	}
+	return attempts
+}
 
-	now := time.Now().UTC()
+func (h *proxyHandler) claimPathSupportingCandidate(now time.Time, conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string, provider Provider, path, requestedModel string) *Account {
+	attempts := h.candidateSupportingPathAttempts(accountType)
 	for attempt := 0; attempt < attempts; attempt++ {
 		acc := h.pool.claimCandidate(conversationID, exclude, accountType, requiredPlan)
 		if acc == nil {
@@ -1490,6 +1490,24 @@ func (h *proxyHandler) candidateSupportingPath(conversationID string, exclude ma
 		}
 		atomic.AddInt64(&acc.Inflight, 1)
 		h.pool.releaseClaim(acc.ID)
+		return acc
+	}
+	return nil
+}
+
+func (h *proxyHandler) candidateSupportingPath(conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string, provider Provider, path, requestedModel, forcedGeminiSeatID string) (*Account, error) {
+	if h == nil || h.pool == nil {
+		return nil, nil
+	}
+	if exclude == nil {
+		exclude = map[string]bool{}
+	}
+	if acc, err, handled := h.forcedGeminiSeatForPath(accountType, provider, path, forcedGeminiSeatID); handled {
+		return acc, err
+	}
+
+	now := time.Now().UTC()
+	if acc := h.claimPathSupportingCandidate(now, conversationID, exclude, accountType, requiredPlan, provider, path, requestedModel); acc != nil {
 		return acc, nil
 	}
 

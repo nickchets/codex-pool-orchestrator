@@ -902,6 +902,50 @@ func buildCurrentSeatDashboardState(pool *poolState, now time.Time, candidateByI
 	return state
 }
 
+func recordProviderSummary(providerSummary map[string]PoolDashboardProviderSum, providerKey string, eligible bool) {
+	if providerSummary == nil || providerKey == "" {
+		return
+	}
+	prov := providerSummary[providerKey]
+	prov.TotalAccounts++
+	if eligible {
+		prov.EligibleAccounts++
+	}
+	providerSummary[providerKey] = prov
+}
+
+func recordWorkspaceGroupSeat(workspaceGroups map[string]*poolWorkspaceAccumulator, now time.Time, status AccountStatus, routing routingState) {
+	if workspaceGroups == nil || status.FallbackOnly {
+		return
+	}
+	groupKey := workspaceKeyFor(status.Type, status.WorkspaceID)
+	group := workspaceGroups[groupKey]
+	if group == nil {
+		group = &poolWorkspaceAccumulator{
+			WorkspaceID: status.WorkspaceID,
+			Provider:    status.Type,
+			SeatKeys:    make(map[string]struct{}),
+			AccountIDs:  make(map[string]struct{}),
+			Emails:      make(map[string]struct{}),
+		}
+		workspaceGroups[groupKey] = group
+	}
+	group.SeatCount++
+	group.SeatKeys[status.SeatKey] = struct{}{}
+	group.AccountIDs[status.ID] = struct{}{}
+	if status.Email != "" {
+		group.Emails[status.Email] = struct{}{}
+	}
+	if routing.Eligible {
+		group.EligibleCount++
+		return
+	}
+	group.BlockedCount++
+	if routing.RecoveryAt.After(now) && (group.NextRecoveryAt.IsZero() || routing.RecoveryAt.Before(group.NextRecoveryAt)) {
+		group.NextRecoveryAt = routing.RecoveryAt
+	}
+}
+
 func enrichGeminiDashboardStatus(status *AccountStatus, snapshot accountSnapshot, routing routingState, now time.Time, geminiPool *GeminiPoolStatus) {
 	if status == nil || geminiPool == nil || snapshot.Type != AccountTypeGemini {
 		return
@@ -1309,42 +1353,10 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 			}
 		}
 
-		providerKey := status.Type
-		prov := providerSummary[providerKey]
-		prov.TotalAccounts++
-		if routing.Eligible {
-			prov.EligibleAccounts++
-		}
-		providerSummary[providerKey] = prov
-
-		if !status.FallbackOnly {
-			groupKey := workspaceKeyFor(status.Type, workspaceID)
-			group := workspaceGroups[groupKey]
-			if group == nil {
-				group = &poolWorkspaceAccumulator{
-					WorkspaceID: workspaceID,
-					Provider:    status.Type,
-					SeatKeys:    make(map[string]struct{}),
-					AccountIDs:  make(map[string]struct{}),
-					Emails:      make(map[string]struct{}),
-				}
-				workspaceGroups[groupKey] = group
-			}
-			group.SeatCount++
-			group.SeatKeys[seatKey] = struct{}{}
-			group.AccountIDs[status.ID] = struct{}{}
-			if status.Email != "" {
-				group.Emails[status.Email] = struct{}{}
-			}
-			if routing.Eligible {
-				group.EligibleCount++
-			} else {
-				group.BlockedCount++
-				if routing.RecoveryAt.After(now) && (group.NextRecoveryAt.IsZero() || routing.RecoveryAt.Before(group.NextRecoveryAt)) {
-					group.NextRecoveryAt = routing.RecoveryAt
-				}
-			}
-		}
+		recordProviderSummary(providerSummary, status.Type, routing.Eligible)
+		status.WorkspaceID = workspaceID
+		status.SeatKey = seatKey
+		recordWorkspaceGroupSeat(workspaceGroups, now, status, routing)
 
 		if routing.RecoveryAt.After(now) && (earliestRecovery.IsZero() || routing.RecoveryAt.Before(earliestRecovery)) {
 			earliestRecovery = routing.RecoveryAt
