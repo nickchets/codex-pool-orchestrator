@@ -86,3 +86,4 @@ Optional git metadata may be attached in release automation only, for example:
 - `0.10.1`: sterile publish cleanup that removes repo-local governance/audit artifacts from `main` and aligns the public bundle export rules with the documented helper surface
 - `0.10.2`: GitLab Claude shared-TPM cooldown scope fix so healthy sibling seats stay routable
 - `0.10.3`: GitLab Claude recovery canaries, persisted local Codex stream cooldowns, and lower-inflight Codex seat reservation for fresh work
+- `0.10.4`: export-path hardening plus helper-driven cleanup across dashboard assembly, retry bookkeeping, provider boilerplate, and persisted health writes

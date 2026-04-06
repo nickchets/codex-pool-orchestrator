@@ -9,6 +9,20 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.10.4] - 2026-04-06
+
+### Changed
+- Public bundle export now uses a deterministic tar-based copy path instead of the previous `rsync` flow that could hang in uninterruptible IO wait on this workstation during local release validation.
+- Dashboard assembly is split into smaller helper stages for current-seat selection, Gemini/GitLab enrichment, workspace grouping, provider summaries, and fallback pool bookkeeping without changing the `/status` JSON or HTML contract.
+
+### Fixed
+- Buffered retry handling now reuses one shared bookkeeping helper, reducing branch drift in prestream retry paths.
+- GitLab Claude shared-cooldown reads now use a shared snapshot helper so recovery polling, cooldown gating, and status paths stop duplicating lock/read/filter logic.
+
+### Internal
+- Kimi and MiniMax now share one API-key provider base, and repeated setup/opencode response-body helpers were collapsed into common utilities.
+- Persisted account health field writes now flow through one shared helper instead of being re-serialized in multiple save paths.
+
 ## [0.10.3] - 2026-04-06
 
 ### Added
