@@ -2205,6 +2205,19 @@ func saveAccount(a *Account) error {
 	}
 }
 
+func setAccountHealthJSONFields(root map[string]any, a *Account, includeRateLimit bool) {
+	if root == nil || a == nil {
+		return
+	}
+	setJSONField(root, "health_status", strings.TrimSpace(a.HealthStatus), strings.TrimSpace(a.HealthStatus) != "")
+	setJSONField(root, "health_error", strings.TrimSpace(a.HealthError), strings.TrimSpace(a.HealthError) != "")
+	setJSONTimeField(root, "health_checked_at", a.HealthCheckedAt)
+	setJSONTimeField(root, "last_healthy_at", a.LastHealthyAt)
+	if includeRateLimit {
+		setJSONTimeField(root, "rate_limit_until", a.RateLimitUntil)
+	}
+}
+
 func saveCodexAccount(a *Account) error {
 	if isGitLabCodexAccount(a) {
 		return saveGitLabCodexAccount(a)
@@ -2291,11 +2304,7 @@ func saveCodexAccount(a *Account) error {
 		root["last_refresh"] = a.LastRefresh.UTC().Format(time.RFC3339Nano)
 	}
 
-	setJSONField(root, "health_status", strings.TrimSpace(a.HealthStatus), strings.TrimSpace(a.HealthStatus) != "")
-	setJSONField(root, "health_error", strings.TrimSpace(a.HealthError), strings.TrimSpace(a.HealthError) != "")
-	setJSONTimeField(root, "health_checked_at", a.HealthCheckedAt)
-	setJSONTimeField(root, "last_healthy_at", a.LastHealthyAt)
-	setJSONTimeField(root, "rate_limit_until", a.RateLimitUntil)
+	setAccountHealthJSONFields(root, a, true)
 
 	// Persist dead flag so accounts stay dead across restarts
 	if a.Dead {
@@ -2403,11 +2412,7 @@ func saveGeminiAccount(a *Account) error {
 	setJSONField(root, "disabled", true, a.Disabled)
 	setJSONField(root, "dead", true, a.Dead)
 	setJSONTimeField(root, "dead_since", a.DeadSince)
-	setJSONTimeField(root, "rate_limit_until", a.RateLimitUntil)
-	setJSONField(root, "health_status", strings.TrimSpace(a.HealthStatus), strings.TrimSpace(a.HealthStatus) != "")
-	setJSONField(root, "health_error", strings.TrimSpace(a.HealthError), strings.TrimSpace(a.HealthError) != "")
-	setJSONTimeField(root, "health_checked_at", a.HealthCheckedAt)
-	setJSONTimeField(root, "last_healthy_at", a.LastHealthyAt)
+	setAccountHealthJSONFields(root, a, true)
 
 	return atomicWriteJSON(a.File, root)
 }
