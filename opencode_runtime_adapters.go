@@ -715,6 +715,28 @@ func geminiSchemaTypeName(raw string) string {
 	}
 }
 
+func replaceBufferedHTTPResponseBody(resp *http.Response, contentType string, body []byte) {
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(body)))
+	resp.Header.Set("Content-Type", contentType)
+}
+
+func replaceStreamingHTTPResponseBody(resp *http.Response, src io.ReadCloser, transform func(io.Writer, io.ReadCloser) error) {
+	pr, pw := io.Pipe()
+	go func() {
+		err := transform(pw, src)
+		if err != nil {
+			_ = pw.CloseWithError(err)
+			return
+		}
+		_ = pw.Close()
+	}()
+	resp.Body = pr
+	resp.ContentLength = -1
+	resp.Header.Del("Content-Length")
+}
+
 func maybeTransformOpenAIChatCompletionsGeminiResponse(adapter, model string, resp *http.Response) error {
 	if adapter != responseAdapterOpenAIChatCompletionsGemini || resp == nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil
@@ -724,18 +746,9 @@ func maybeTransformOpenAIChatCompletionsGeminiResponse(adapter, model string, re
 		if err != nil {
 			return err
 		}
-		pr, pw := io.Pipe()
-		go func() {
-			err := transformGeminiSSEToOpenAIChatCompletions(model, pw, src)
-			if err != nil {
-				_ = pw.CloseWithError(err)
-				return
-			}
-			_ = pw.Close()
-		}()
-		resp.Body = pr
-		resp.ContentLength = -1
-		resp.Header.Del("Content-Length")
+		replaceStreamingHTTPResponseBody(resp, src, func(dst io.Writer, stream io.ReadCloser) error {
+			return transformGeminiSSEToOpenAIChatCompletions(model, dst, stream)
+		})
 		return nil
 	}
 	raw, err := readMaybeGzipResponseBody(resp)
@@ -747,20 +760,14 @@ func maybeTransformOpenAIChatCompletionsGeminiResponse(adapter, model string, re
 		if err != nil {
 			return err
 		}
-		resp.Body = io.NopCloser(bytes.NewReader(out))
-		resp.ContentLength = int64(len(out))
-		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(out)))
-		resp.Header.Set("Content-Type", "text/event-stream")
+		replaceBufferedHTTPResponseBody(resp, "text/event-stream", out)
 		return nil
 	}
 	out, err := buildOpenAIChatCompletionsResponse(model, raw)
 	if err != nil {
 		return err
 	}
-	resp.Body = io.NopCloser(bytes.NewReader(out))
-	resp.ContentLength = int64(len(out))
-	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(out)))
-	resp.Header.Set("Content-Type", "application/json")
+	replaceBufferedHTTPResponseBody(resp, "application/json", out)
 	return nil
 }
 
@@ -782,24 +789,12 @@ func maybeTransformAnthropicMessagesGeminiResponse(adapter, model string, resp *
 			if err != nil {
 				return err
 			}
-			resp.Body = io.NopCloser(bytes.NewReader(out))
-			resp.ContentLength = int64(len(out))
-			resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(out)))
-			resp.Header.Set("Content-Type", "application/json")
+			replaceBufferedHTTPResponseBody(resp, "application/json", out)
 			return nil
 		}
-		pr, pw := io.Pipe()
-		go func() {
-			err := transformGeminiSSEToAnthropicMessages(model, pw, src)
-			if err != nil {
-				_ = pw.CloseWithError(err)
-				return
-			}
-			_ = pw.Close()
-		}()
-		resp.Body = pr
-		resp.ContentLength = -1
-		resp.Header.Del("Content-Length")
+		replaceStreamingHTTPResponseBody(resp, src, func(dst io.Writer, stream io.ReadCloser) error {
+			return transformGeminiSSEToAnthropicMessages(model, dst, stream)
+		})
 		return nil
 	}
 	raw, err := readMaybeGzipResponseBody(resp)
@@ -811,20 +806,14 @@ func maybeTransformAnthropicMessagesGeminiResponse(adapter, model string, resp *
 		if err != nil {
 			return err
 		}
-		resp.Body = io.NopCloser(bytes.NewReader(out))
-		resp.ContentLength = int64(len(out))
-		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(out)))
-		resp.Header.Set("Content-Type", "text/event-stream")
+		replaceBufferedHTTPResponseBody(resp, "text/event-stream", out)
 		return nil
 	}
 	out, err := buildAnthropicMessagesResponse(model, raw)
 	if err != nil {
 		return err
 	}
-	resp.Body = io.NopCloser(bytes.NewReader(out))
-	resp.ContentLength = int64(len(out))
-	resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(out)))
-	resp.Header.Set("Content-Type", "application/json")
+	replaceBufferedHTTPResponseBody(resp, "application/json", out)
 	return nil
 }
 
