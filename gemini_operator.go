@@ -1403,37 +1403,6 @@ func antigravityQuotaUnix(raw map[string]any, keys ...string) (int64, bool) {
 	return 0, false
 }
 
-func antigravityQuotaStringMap(raw map[string]any, keys ...string) map[string]string {
-	value := antigravityQuotaField(raw, keys...)
-	items, _ := value.(map[string]any)
-	if len(items) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(items))
-	for key, item := range items {
-		key = strings.TrimSpace(key)
-		if key == "" {
-			continue
-		}
-		switch typed := item.(type) {
-		case string:
-			typed = strings.TrimSpace(typed)
-			if typed != "" {
-				out[key] = typed
-			}
-		default:
-			str := strings.TrimSpace(fmt.Sprintf("%v", typed))
-			if str != "" {
-				out[key] = str
-			}
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
 func antigravityQuotaBoolMap(raw map[string]any, keys ...string) map[string]bool {
 	value := antigravityQuotaField(raw, keys...)
 	items, _ := value.(map[string]any)

@@ -10,8 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
-	"sync"
 	"time"
 
 	utls "github.com/refraction-networking/utls"
@@ -173,50 +171,3 @@ func (d *rustlsDialer) DialTLSContext(ctx context.Context, network, addr string)
 
 	return &rustlsConn{UConn: uConn}, nil
 }
-
-// createRustlsTransport creates an http.Transport with rustls-like TLS fingerprint
-func createRustlsTransport() *http.Transport {
-	dialer := newRustlsDialer()
-
-	return &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   30 * time.Second,
-			KeepAlive: 30 * time.Second,
-		}).DialContext,
-		DialTLSContext:        dialer.DialTLSContext,
-		TLSHandshakeTimeout:   10 * time.Second,
-		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: 0,
-		ExpectContinueTimeout: 5 * time.Second,
-		MaxIdleConns:          200,
-		MaxIdleConnsPerHost:   50,
-		ForceAttemptHTTP2:     false, // rustls uses HTTP/1.1
-	}
-}
-
-// rustlsHybridTransport uses rustls fingerprint for chatgpt.com, standard for others
-type rustlsHybridTransport struct {
-	rustls   *http.Transport
-	standard http.RoundTripper
-	mu       sync.Mutex
-}
-
-func newRustlsHybridTransport(standard http.RoundTripper) *rustlsHybridTransport {
-	return &rustlsHybridTransport{
-		rustls:   createRustlsTransport(),
-		standard: standard,
-	}
-}
-
-func (h *rustlsHybridTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	host := strings.ToLower(req.URL.Hostname())
-	if host == "" {
-		host = strings.ToLower(req.URL.Host)
-	}
-	if host == "chatgpt.com" || strings.HasSuffix(host, ".chatgpt.com") || host == "auth.openai.com" {
-		return h.rustls.RoundTrip(req)
-	}
-	return h.standard.RoundTrip(req)
-}
-
-var _ http.RoundTripper = (*rustlsHybridTransport)(nil)

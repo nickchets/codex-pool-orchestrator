@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -114,6 +115,57 @@ func (w *claudePingTailWatcher) noteEvent(eventType string) error {
 	return nil
 }
 
+func applyLocalCodexSSEFailureLocked(acc *Account, reason string, now time.Time) {
+	if acc == nil {
+		return
+	}
+	until := earliestFutureTime(now, acc.Usage.PrimaryResetAt, acc.Usage.SecondaryResetAt)
+	if until.IsZero() {
+		until = now.Add(defaultRateLimitBackoff)
+	}
+	if acc.RateLimitUntil.Before(until) {
+		acc.RateLimitUntil = until.UTC()
+	}
+	acc.HealthStatus = "rate_limited"
+	acc.HealthError = sanitizeStatusMessage(firstNonEmpty(reason, "codex stream rate limited"))
+	acc.HealthCheckedAt = now.UTC()
+	acc.Penalty += 1.0
+}
+
+func (h *proxyHandler) handleCodexSSEFailureEvent(reqID string, acc *Account, data []byte, managedStreamFailed *bool, managedStreamFailureOnce *sync.Once) {
+	if acc == nil || acc.Type != AccountTypeCodex {
+		return
+	}
+	disposition, ok := classifyManagedOpenAIAPISSEError(data)
+	if !ok {
+		return
+	}
+
+	managedStreamFailureOnce.Do(func() {
+		*managedStreamFailed = true
+		now := time.Now().UTC()
+
+		switch {
+		case isManagedCodexAPIKeyAccount(acc):
+			applyManagedOpenAIAPIDisposition(acc, disposition, nil, now)
+		case isGitLabCodexAccount(acc):
+			gitlabDisposition := classifyManagedGitLabCodexError(managedGitLabCodexErrorSourceGatewayRequest, http.StatusTooManyRequests, nil, data)
+			applyManagedGitLabCodexDisposition(acc, gitlabDisposition, nil, now)
+		default:
+			acc.mu.Lock()
+			applyLocalCodexSSEFailureLocked(acc, disposition.Reason, now)
+			acc.mu.Unlock()
+		}
+
+		if strings.TrimSpace(acc.File) != "" {
+			if err := saveAccount(acc); err != nil {
+				log.Printf("[%s] warning: failed to save codex account %s stream failure: %v", reqID, acc.ID, err)
+			}
+		}
+		log.Printf("[%s] codex seat %s stream failure: reason=%s", reqID, acc.ID, disposition.Reason)
+	})
+}
+
 func (h *proxyHandler) wrapUsageInterceptWriter(
 	reqID string,
 	writer io.Writer,
@@ -147,21 +199,7 @@ func (h *proxyHandler) wrapUsageInterceptWriter(
 			if trace != nil {
 				trace.noteSSEEvent(data, false)
 			}
-			if !isManagedCodexAPIKeyAccount(acc) {
-				return
-			}
-			disposition, ok := classifyManagedOpenAIAPISSEError(data)
-			if !ok {
-				return
-			}
-			managedStreamFailureOnce.Do(func() {
-				*managedStreamFailed = true
-				applyManagedOpenAIAPIDisposition(acc, disposition, nil, time.Now())
-				if err := saveAccount(acc); err != nil {
-					log.Printf("[%s] warning: failed to save managed api key %s stream failure: %v", reqID, acc.ID, err)
-				}
-				log.Printf("[%s] managed api key %s stream failure: dead=%v rate_limited=%v reason=%s", reqID, acc.ID, disposition.MarkDead, disposition.RateLimit, disposition.Reason)
-			})
+			h.handleCodexSSEFailureEvent(reqID, acc, data, managedStreamFailed, managedStreamFailureOnce)
 		},
 		eventHook: func(eventType string, _ []byte) error {
 			if claudeTailWatcher == nil {

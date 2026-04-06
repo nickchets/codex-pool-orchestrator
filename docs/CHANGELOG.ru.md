@@ -8,6 +8,20 @@ Go-ядра: `darvell/codex-pool@4570f6b`.
 
 Правила версионирования описаны в [`VERSIONING.ru.md`](./VERSIONING.ru.md).
 
+## [0.10.3] - 2026-04-06
+
+### Добавлено
+- Для GitLab Claude shared-TPM recovery появился per-scope canary schedule, а dashboard и account-status теперь показывают последний canary result прямо в operator-visible surface.
+- Runtime metrics теперь считают именованные retry/recovery события и provider TTFB buckets, чтобы оператор мог отличать prestream retry churn от downstream latency.
+
+### Изменено
+- Fresh-выбор Codex seat'а теперь резервирует выбранный seat до старта caller work и предпочитает меньший inflight для новой работы, чтобы не было duplicate concurrent picks на одном seat'е.
+- Health rendering для GitLab Claude теперь очищает stale shared-cooldown noise, как только seat снова становится eligible, но сохраняет видимый recovery-canary state.
+
+### Исправлено
+- Local Codex streamed usage-limit failures теперь переходят в persist'ed cooldown state вместо того, чтобы оставлять seat ложно healthy после SSE failure event.
+- Managed OpenAI API usage-limit text теперь классифицируется как retryable rate-limit, а не схлопывается в dead-key style quota failure.
+
 ## [0.10.1] - 2026-03-30
 
 ### Изменено

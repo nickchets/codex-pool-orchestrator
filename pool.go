@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -383,6 +382,13 @@ type Account struct {
 	GitLabRateLimitResetAt    time.Time
 	GitLabQuotaExceededCount  int
 	GitLabLastQuotaExceededAt time.Time
+	GitLabCanaryModel         string
+	GitLabCanaryNextProbeAt   time.Time
+	GitLabCanaryLastAttemptAt time.Time
+	GitLabCanaryLastSuccessAt time.Time
+	GitLabCanaryLastFailureAt time.Time
+	GitLabCanaryLastResult    string
+	GitLabCanaryLastError     string
 
 	// Aggregated token counters (in-memory for now; persist later)
 	Totals AccountUsage
@@ -1383,58 +1389,12 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 	return accs, nil
 }
 
-// Note: Individual account loading functions are now in the provider files:
-// - provider_codex.go: CodexProvider.LoadAccount
-// - provider_claude.go: ClaudeProvider.LoadAccount
-// - provider_gemini.go: GeminiProvider.LoadAccount
-
-type jwtClaims struct {
-	ExpiresAt        time.Time
-	ChatGPTAccountID string
-	PlanType         string
-}
-
-func parseClaims(idToken string) jwtClaims {
-	var out jwtClaims
-	parts := strings.Split(idToken, ".")
-	if len(parts) < 2 {
-		return out
-	}
-	payloadB64 := parts[1]
-	payloadBytes, err := base64.RawURLEncoding.DecodeString(payloadB64)
-	if err != nil {
-		return out
-	}
-	var payload map[string]interface{}
-	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-		return out
-	}
-	if exp, ok := payload["exp"].(float64); ok {
-		out.ExpiresAt = time.Unix(int64(exp), 0)
-	}
-	// account id may live at top-level or under auth claim
-	if acc, ok := payload["chatgpt_account_id"].(string); ok {
-		out.ChatGPTAccountID = acc
-	}
-	if auth, ok := payload["https://api.openai.com/auth"].(map[string]interface{}); ok {
-		if acc, ok := auth["chatgpt_account_id"].(string); ok && acc != "" {
-			out.ChatGPTAccountID = acc
-		}
-		if plan, ok := auth["chatgpt_plan_type"].(string); ok {
-			out.PlanType = plan
-		}
-	}
-	if out.PlanType == "" {
-		out.PlanType = "pro"
-	}
-	return out
-}
-
 // poolState wraps accounts with a mutex.
 type poolState struct {
 	mu             sync.RWMutex
 	accounts       []*Account
 	convPin        map[string]string // conversation_id -> account ID
+	pendingClaims  map[string]int64
 	activeCodexID  string
 	activeAPIID    string
 	activeGeminiID string
@@ -1453,7 +1413,13 @@ type accountRuntimeState struct {
 }
 
 func newPoolState(accs []*Account, debug bool) *poolState {
-	return &poolState{accounts: accs, convPin: map[string]string{}, debug: debug, tierThreshold: 0.15}
+	return &poolState{
+		accounts:      accs,
+		convPin:       map[string]string{},
+		pendingClaims: map[string]int64{},
+		debug:         debug,
+		tierThreshold: 0.15,
+	}
 }
 
 // replace swaps the pool accounts (used on reload).
@@ -1462,6 +1428,7 @@ func (p *poolState) replace(accs []*Account) {
 	defer p.mu.Unlock()
 	p.accounts = accs
 	p.convPin = map[string]string{}
+	p.pendingClaims = map[string]int64{}
 	p.rr = 0
 }
 
@@ -1558,6 +1525,34 @@ func (p *poolState) candidate(conversationID string, exclude map[string]bool, ac
 	return p.candidateAtLocked(time.Now(), conversationID, exclude, accountType, requiredPlan, true)
 }
 
+func (p *poolState) claimCandidate(conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string) *Account {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	acc := p.candidateAtLocked(time.Now(), conversationID, exclude, accountType, requiredPlan, true)
+	if acc == nil {
+		return nil
+	}
+	p.pendingClaims[acc.ID]++
+	return acc
+}
+
+func (p *poolState) releaseClaim(accountID string) {
+	if p == nil || strings.TrimSpace(accountID) == "" {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	current := p.pendingClaims[accountID]
+	switch {
+	case current <= 1:
+		delete(p.pendingClaims, accountID)
+	default:
+		p.pendingClaims[accountID] = current - 1
+	}
+}
+
 func (p *poolState) peekCandidate(accountType AccountType, requiredPlan string) *Account {
 	return p.peekCandidateAt(time.Now(), accountType, requiredPlan)
 }
@@ -1583,6 +1578,13 @@ func (p *poolState) candidateAtLocked(now time.Time, conversationID string, excl
 		p.rememberSelectedSeatLocked(accountType, selected)
 	}
 	return selected
+}
+
+func (p *poolState) effectiveInflightLocked(a *Account) int64 {
+	if a == nil {
+		return 0
+	}
+	return atomic.LoadInt64(&a.Inflight) + p.pendingClaims[a.ID]
 }
 
 func (p *poolState) pinnedEligibleCandidateLocked(now time.Time, conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string) *Account {
@@ -1634,13 +1636,18 @@ func (p *poolState) pinnedEligibleCandidateLocked(now time.Time, conversationID 
 
 func (p *poolState) stickyEligibleCandidateLocked(now time.Time, exclude map[string]bool, accountType AccountType, requiredPlan string) *Account {
 	if accountType == AccountTypeCodex {
-		if acc := p.activeCodexCandidateLocked(now, exclude, requiredPlan, false); acc != nil {
-			return acc
-		}
-		if acc := p.stickyEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, func(a *Account) bool {
+		localCodex := func(a *Account) bool {
 			return codexAccountMatchesSelectionMode(a, requiredPlan, false)
-		}); acc != nil {
-			return acc
+		}
+		if acc := p.activeCodexCandidateLocked(now, exclude, requiredPlan, false); acc != nil {
+			if !p.codexStickySeatNeedsRotationLocked(now, acc, exclude, requiredPlan, localCodex) {
+				return acc
+			}
+		}
+		if acc := p.stickyEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, localCodex); acc != nil {
+			if !p.codexStickySeatNeedsRotationLocked(now, acc, exclude, requiredPlan, localCodex) {
+				return acc
+			}
 		}
 		if codexRequiresGitLabPlan(requiredPlan) {
 			return nil
@@ -1660,6 +1667,39 @@ func (p *poolState) stickyEligibleCandidateLocked(now time.Time, exclude map[str
 		})
 	}
 	return p.stickyEligibleCandidateMatchingLocked(now, exclude, accountType, requiredPlan, nil)
+}
+
+func (p *poolState) codexStickySeatNeedsRotationLocked(now time.Time, current *Account, exclude map[string]bool, requiredPlan string, include func(*Account) bool) bool {
+	if current == nil {
+		return false
+	}
+	currentInflight := p.effectiveInflightLocked(current)
+	if currentInflight <= 0 {
+		return false
+	}
+	for _, candidate := range p.accounts {
+		if candidate == nil || candidate.ID == current.ID {
+			continue
+		}
+		if include != nil && !include(candidate) {
+			continue
+		}
+		if exclude != nil && exclude[candidate.ID] {
+			continue
+		}
+
+		candidate.mu.Lock()
+		routing := routingStateLocked(candidate, now, AccountTypeCodex, requiredPlan)
+		eligible := routing.Eligible && !authExpiryBlocksStickySelectionLocked(candidate, now)
+		candidate.mu.Unlock()
+		if !eligible {
+			continue
+		}
+		if p.effectiveInflightLocked(candidate) < currentInflight {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *poolState) rememberSelectedSeatLocked(accountType AccountType, acc *Account) {
@@ -1834,6 +1874,11 @@ func (p *poolState) selectEligibleCandidateMatchingLocked(now time.Time, exclude
 				return candidate.lastUsed.Before(incumbent.lastUsed)
 			}
 		}
+		if accountType == AccountTypeCodex &&
+			(candidate.inflight > 0 || incumbent.inflight > 0) &&
+			candidate.inflight != incumbent.inflight {
+			return candidate.inflight < incumbent.inflight
+		}
 		if candidate.score != incumbent.score {
 			return candidate.score > incumbent.score
 		}
@@ -1878,7 +1923,7 @@ func (p *poolState) selectEligibleCandidateMatchingLocked(now time.Time, exclude
 		gitLabClaude := isGitLabClaudeAccount(a)
 		score := scoreAccountLocked(a, now)
 		a.mu.Unlock()
-		inflight := atomic.LoadInt64(&a.Inflight)
+		inflight := p.effectiveInflightLocked(a)
 		score -= float64(inflight) * 0.02
 		eligible = append(eligible, scoredAccount{
 			acc:          a,
@@ -2250,6 +2295,7 @@ func saveCodexAccount(a *Account) error {
 	setJSONField(root, "health_error", strings.TrimSpace(a.HealthError), strings.TrimSpace(a.HealthError) != "")
 	setJSONTimeField(root, "health_checked_at", a.HealthCheckedAt)
 	setJSONTimeField(root, "last_healthy_at", a.LastHealthyAt)
+	setJSONTimeField(root, "rate_limit_until", a.RateLimitUntil)
 
 	// Persist dead flag so accounts stay dead across restarts
 	if a.Dead {
@@ -2459,71 +2505,6 @@ func (p *poolState) getByID(id string) *Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	return p.getLocked(id)
-}
-
-// averageUsage produces a synthetic usage payload across all alive accounts.
-func (p *poolState) averageUsage() UsageSnapshot {
-	return p.averageUsageByType("")
-}
-
-// averageUsageByType produces a synthetic usage payload for accounts of a specific type.
-// If accountType is empty, averages across all accounts.
-func (p *poolState) averageUsageByType(accountType AccountType) UsageSnapshot {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	var totalP, totalS float64
-	var totalPW, totalSW float64
-	var nP, nS float64
-	var n float64
-	var latestPrimaryReset, latestSecondaryReset time.Time
-	for _, a := range p.accounts {
-		if a.Dead {
-			continue
-		}
-		if accountType != "" && a.Type != accountType {
-			continue
-		}
-		usedP := a.Usage.PrimaryUsedPercent
-		if usedP == 0 {
-			usedP = a.Usage.PrimaryUsed
-		}
-		usedS := a.Usage.SecondaryUsedPercent
-		if usedS == 0 {
-			usedS = a.Usage.SecondaryUsed
-		}
-		totalP += usedP
-		totalS += usedS
-		n += 1
-		if a.Usage.PrimaryWindowMinutes > 0 {
-			totalPW += float64(a.Usage.PrimaryWindowMinutes)
-			nP += 1
-		}
-		if a.Usage.SecondaryWindowMinutes > 0 {
-			totalSW += float64(a.Usage.SecondaryWindowMinutes)
-			nS += 1
-		}
-		// Track latest reset times
-		if !a.Usage.PrimaryResetAt.IsZero() && a.Usage.PrimaryResetAt.After(latestPrimaryReset) {
-			latestPrimaryReset = a.Usage.PrimaryResetAt
-		}
-		if !a.Usage.SecondaryResetAt.IsZero() && a.Usage.SecondaryResetAt.After(latestSecondaryReset) {
-			latestSecondaryReset = a.Usage.SecondaryResetAt
-		}
-	}
-	if n == 0 {
-		return UsageSnapshot{}
-	}
-	return UsageSnapshot{
-		PrimaryUsed:            totalP / n,
-		SecondaryUsed:          totalS / n,
-		PrimaryUsedPercent:     totalP / n,
-		SecondaryUsedPercent:   totalS / n,
-		PrimaryWindowMinutes:   int(totalPW / max(1, nP)),
-		SecondaryWindowMinutes: int(totalSW / max(1, nS)),
-		PrimaryResetAt:         latestPrimaryReset,
-		SecondaryResetAt:       latestSecondaryReset,
-		RetrievedAt:            time.Now(),
-	}
 }
 
 func max(a, b float64) float64 {
@@ -2745,19 +2726,6 @@ func (p *poolState) getPoolUtilization() []PoolUtilization {
 		results = append(results, pu)
 	}
 	return results
-}
-
-func earliestReset(a, b time.Time) time.Time {
-	if a.IsZero() {
-		return b
-	}
-	if b.IsZero() {
-		return a
-	}
-	if a.Before(b) {
-		return a
-	}
-	return b
 }
 
 // UsagePoolStats contains aggregate stats about the pool for the usage endpoint.
@@ -3045,16 +3013,6 @@ func (p *poolState) getPoolStats() UsagePoolStats {
 	return stats
 }
 
-// decayPenalty slowly reduces penalties over time to avoid permanent punishment.
-func decayPenalty(a *Account, now time.Time) {
-	if a == nil {
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	decayPenaltyLocked(a, now)
-}
-
 func decayPenaltyLocked(a *Account, now time.Time) {
 	if a.LastPenalty.IsZero() {
 		a.LastPenalty = now
@@ -3069,11 +3027,4 @@ func decayPenaltyLocked(a *Account, now time.Time) {
 		a.Penalty = 0
 	}
 	a.LastPenalty = now
-}
-
-func (p *poolState) debugf(format string, args ...any) {
-	if p == nil || !p.debug {
-		return
-	}
-	log.Printf(format, args...)
 }

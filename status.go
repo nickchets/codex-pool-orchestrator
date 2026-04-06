@@ -240,16 +240,45 @@ func managedOpenAIAPIProbeSummary(snapshot accountSnapshot, now time.Time) strin
 	}
 }
 
-func displayAccountHealthStatus(snapshot accountSnapshot, routing routingState) string {
+func displayAccountHealth(snapshot accountSnapshot, routing routingState) (string, string) {
 	healthStatus := strings.TrimSpace(snapshot.HealthStatus)
-	if snapshot.Type != AccountTypeGemini || snapshot.Dead || snapshot.Disabled {
-		return healthStatus
+	healthError := sanitizeStatusMessage(snapshot.HealthError)
+	if snapshot.Dead || snapshot.Disabled {
+		return healthStatus, healthError
 	}
-	if strings.TrimSpace(snapshot.GeminiOperationalState) == geminiOperationalTruthStateCooldown ||
-		strings.TrimSpace(routing.BlockReason) == "rate_limited" {
-		return geminiOperationalTruthStateCooldown
+	if snapshot.Type == AccountTypeGemini {
+		if strings.TrimSpace(snapshot.GeminiOperationalState) == geminiOperationalTruthStateCooldown ||
+			strings.TrimSpace(routing.BlockReason) == "rate_limited" {
+			return geminiOperationalTruthStateCooldown, healthError
+		}
+		return healthStatus, healthError
 	}
+	if snapshot.GitLabClaude {
+		if strings.TrimSpace(routing.BlockReason) == "rate_limited" {
+			switch healthStatus {
+			case "", "healthy":
+				healthStatus = "rate_limited"
+			}
+			return healthStatus, healthError
+		}
+		if routing.Eligible {
+			switch healthStatus {
+			case "", "healthy", "rate_limited", "gateway_rejected":
+				return "healthy", ""
+			}
+		}
+	}
+	return healthStatus, healthError
+}
+
+func displayAccountHealthStatus(snapshot accountSnapshot, routing routingState) string {
+	healthStatus, _ := displayAccountHealth(snapshot, routing)
 	return healthStatus
+}
+
+func displayAccountHealthError(snapshot accountSnapshot, routing routingState) string {
+	_, healthError := displayAccountHealth(snapshot, routing)
+	return healthError
 }
 
 func managedOpenAIAPIPoolStatusNote(pool OpenAIAPIPoolStatus) string {
@@ -405,6 +434,13 @@ type AccountStatus struct {
 	GitLabRateLimitResetIn    string                        `json:"gitlab_rate_limit_reset_in,omitempty"`
 	GitLabQuotaExceededCount  int                           `json:"gitlab_quota_exceeded_count,omitempty"`
 	GitLabQuotaProbeIn        string                        `json:"gitlab_quota_probe_in,omitempty"`
+	GitLabCanaryModel         string                        `json:"gitlab_canary_model,omitempty"`
+	GitLabCanaryProbeAt       string                        `json:"gitlab_canary_probe_at,omitempty"`
+	GitLabCanaryProbeIn       string                        `json:"gitlab_canary_probe_in,omitempty"`
+	GitLabCanaryLastAttemptAt string                        `json:"gitlab_canary_last_attempt_at,omitempty"`
+	GitLabCanaryLastSuccessAt string                        `json:"gitlab_canary_last_success_at,omitempty"`
+	GitLabCanaryLastResult    string                        `json:"gitlab_canary_last_result,omitempty"`
+	GitLabCanaryLastError     string                        `json:"gitlab_canary_last_error,omitempty"`
 	Penalty                   float64                       `json:"penalty,omitempty"`
 	Score                     float64                       `json:"score"`
 	Inflight                  int64                         `json:"inflight"`
@@ -1135,7 +1171,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 			status.DeadSince = snapshot.DeadSince.UTC().Format(time.RFC3339)
 		}
 		status.HealthStatus = displayAccountHealthStatus(snapshot, routing)
-		status.HealthError = sanitizeStatusMessage(snapshot.HealthError)
+		status.HealthError = displayAccountHealthError(snapshot, routing)
 		status.Penalty = snapshot.Penalty
 		if snapshot.FallbackOnly {
 			status.ProbeState = managedOpenAIAPIProbeState(snapshot, now)
@@ -1177,6 +1213,23 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 			if snapshot.GitLabQuotaExceededCount > 0 && !snapshot.RateLimitUntil.IsZero() && snapshot.RateLimitUntil.After(now) {
 				status.GitLabQuotaProbeIn = formatDuration(snapshot.RateLimitUntil.Sub(now))
 			}
+			status.GitLabCanaryModel = strings.TrimSpace(snapshot.GitLabCanaryModel)
+			if !snapshot.GitLabCanaryNextProbeAt.IsZero() {
+				status.GitLabCanaryProbeAt = snapshot.GitLabCanaryNextProbeAt.UTC().Format(time.RFC3339)
+				if snapshot.GitLabCanaryNextProbeAt.After(now) {
+					status.GitLabCanaryProbeIn = formatDuration(snapshot.GitLabCanaryNextProbeAt.Sub(now))
+				} else {
+					status.GitLabCanaryProbeIn = "due now"
+				}
+			}
+			if !snapshot.GitLabCanaryLastAttemptAt.IsZero() {
+				status.GitLabCanaryLastAttemptAt = snapshot.GitLabCanaryLastAttemptAt.UTC().Format(time.RFC3339)
+			}
+			if !snapshot.GitLabCanaryLastSuccessAt.IsZero() {
+				status.GitLabCanaryLastSuccessAt = snapshot.GitLabCanaryLastSuccessAt.UTC().Format(time.RFC3339)
+			}
+			status.GitLabCanaryLastResult = strings.TrimSpace(snapshot.GitLabCanaryLastResult)
+			status.GitLabCanaryLastError = sanitizeStatusMessage(snapshot.GitLabCanaryLastError)
 			if status.UsageObserved == "" {
 				status.UsageObserved = "local totals only · GitLab quota hidden"
 			}
@@ -2034,6 +2087,7 @@ const statusHTML = `<!DOCTYPE html>
                 {{if .UsageObserved}}<br><small class="detail-line">usage {{.UsageObserved}}</small>{{end}}
                 {{if .GitLabRateLimitName}}<br><small class="detail-line" title="{{.GitLabRateLimitName}}{{if .GitLabRateLimitResetAt}} · reset {{.GitLabRateLimitResetAt}}{{end}}">gitlab api {{.GitLabRateLimitRemaining}}/{{.GitLabRateLimitLimit}}{{if .GitLabRateLimitResetIn}} · resets in {{.GitLabRateLimitResetIn}}{{end}}</small>{{end}}
                 {{if .GitLabQuotaExceededCount}}<br><small class="detail-line">quota backoff ×{{.GitLabQuotaExceededCount}}{{if .GitLabQuotaProbeIn}} · next probe {{.GitLabQuotaProbeIn}}{{end}}</small>{{end}}
+                {{if or .GitLabCanaryProbeIn .GitLabCanaryLastResult .GitLabCanaryLastSuccessAt}}<br><small class="detail-line">recovery canary{{if .GitLabCanaryProbeIn}} {{.GitLabCanaryProbeIn}}{{end}}{{if .GitLabCanaryModel}} · model {{.GitLabCanaryModel}}{{end}}{{if .GitLabCanaryLastResult}} · last {{.GitLabCanaryLastResult}}{{end}}{{if .GitLabCanaryLastSuccessAt}} · success {{.GitLabCanaryLastSuccessAt}}{{end}}{{if .GitLabCanaryLastError}} · {{clip (sanitize .GitLabCanaryLastError) 72}}{{end}}</small>{{end}}
                 {{if or .HealthStatus .HealthError}}<br><small class="detail-line" title="{{sanitize .HealthError}}">health {{if .HealthStatus}}{{.HealthStatus}}{{else}}unknown{{end}}{{if .HealthError}} · {{clip (sanitize .HealthError) 88}}{{end}}</small>{{end}}
                 {{if and (eq .Type "gemini") .ProviderTruth}}<br><small class="detail-line">provider {{if .ProviderTruth.State}}{{.ProviderTruth.State}}{{else if .ProviderTruth.Ready}}ready{{else}}unknown{{end}}{{if .ProviderTruth.Stale}} · stale{{end}}{{if .ProviderTruth.ProjectID}} · project <span class="mono" title="{{.ProviderTruth.ProjectID}}">{{clipOpaque .ProviderTruth.ProjectID}}</span>{{end}}</small>{{end}}
                 {{if and (eq .Type "gemini") .OperationalTruth}}<br><small class="detail-line">operational {{if .OperationalTruth.State}}{{.OperationalTruth.State}}{{else}}unknown{{end}}{{if .OperationalTruth.Reason}} · {{clip .OperationalTruth.Reason 88}}{{end}}{{if .OperationalTruth.CheckedAt}} · checked {{.OperationalTruth.CheckedAt}}{{end}}</small>{{end}}

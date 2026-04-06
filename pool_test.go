@@ -332,6 +332,153 @@ func TestGitLabClaudeCandidatePrefersLowerInflightBeforeRecency(t *testing.T) {
 	}
 }
 
+func TestCandidateBypassesBusyActiveCodexSeatForFreshWork(t *testing.T) {
+	now := time.Now()
+	busyActive := &Account{
+		ID:       "busy-active",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.10,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+		Inflight: 1,
+	}
+	idle := &Account{
+		ID:       "idle",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.12,
+			SecondaryUsedPercent: 0.12,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{busyActive, idle}, false)
+	p.activeCodexID = busyActive.ID
+
+	got := p.candidate("", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != idle.ID {
+		t.Fatalf("expected fresh work to bypass busy active codex seat, got %+v", got)
+	}
+	if p.activeCodexID != idle.ID {
+		t.Fatalf("expected active codex seat to move to idle seat, got %q", p.activeCodexID)
+	}
+}
+
+func TestCandidateBypassesBusyMostRecentlyUsedCodexSeat(t *testing.T) {
+	now := time.Now()
+	busySticky := &Account{
+		ID:       "busy-sticky",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		LastUsed: now.Add(-5 * time.Second),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.10,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+		Inflight: 2,
+	}
+	idle := &Account{
+		ID:       "idle",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		LastUsed: now.Add(-time.Minute),
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.12,
+			SecondaryUsedPercent: 0.12,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{busySticky, idle}, false)
+
+	got := p.candidate("", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != idle.ID {
+		t.Fatalf("expected busy sticky codex seat to be bypassed, got %+v", got)
+	}
+	if p.activeCodexID != idle.ID {
+		t.Fatalf("expected selected idle seat to become active, got %q", p.activeCodexID)
+	}
+}
+
+func TestCodexCandidatePrefersLowerInflightWhenScoringFreshSeats(t *testing.T) {
+	now := time.Now()
+	busy := &Account{
+		ID:       "busy",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.05,
+			SecondaryUsedPercent: 0.05,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+		Inflight: 2,
+	}
+	idle := &Account{
+		ID:       "idle",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.20,
+			SecondaryUsedPercent: 0.20,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{busy, idle}, false)
+
+	got := p.peekCandidateAt(now, AccountTypeCodex, "")
+	if got == nil || got.ID != idle.ID {
+		t.Fatalf("expected lower inflight codex seat to win scored selection, got %+v", got)
+	}
+}
+
+func TestClaimCandidateReservesSeatForNextConcurrentSelection(t *testing.T) {
+	now := time.Now()
+	first := &Account{
+		ID:       "a-seat",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.10,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	second := &Account{
+		ID:       "b-seat",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.10,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{first, second}, false)
+
+	claimedOne := p.claimCandidate("", nil, AccountTypeCodex, "")
+	if claimedOne == nil || claimedOne.ID != "a-seat" {
+		t.Fatalf("expected first claim to pick a-seat, got %+v", claimedOne)
+	}
+	claimedTwo := p.claimCandidate("", nil, AccountTypeCodex, "")
+	if claimedTwo == nil || claimedTwo.ID != "b-seat" {
+		t.Fatalf("expected second claim to avoid reserved seat, got %+v", claimedTwo)
+	}
+
+	p.releaseClaim(claimedOne.ID)
+	p.releaseClaim(claimedTwo.ID)
+}
+
 func TestRoutingStateDoesNotBlockGitLabHeaderSnapshotAlone(t *testing.T) {
 	now := time.Now()
 	acc := &Account{

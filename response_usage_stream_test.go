@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"errors"
 	"net/url"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -117,6 +119,75 @@ func TestWrapUsageInterceptWriterRecordsTraceEvents(t *testing.T) {
 	}
 	if trace.usageEvents != 1 {
 		t.Fatalf("usage_events=%d", trace.usageEvents)
+	}
+}
+
+func TestWrapUsageInterceptWriterMarksLocalCodexUsageLimitAsStreamFailure(t *testing.T) {
+	baseURL, err := url.Parse("https://example.com")
+	if err != nil {
+		t.Fatalf("parse base url: %v", err)
+	}
+
+	accFile := filepath.Join(t.TempDir(), "codex_oauth.json")
+	if err := os.WriteFile(accFile, []byte(`{"tokens":{"access_token":"seed-access","refresh_token":"seed-refresh"}}`), 0o600); err != nil {
+		t.Fatalf("write auth file: %v", err)
+	}
+
+	resetAt := time.Now().UTC().Add(45 * time.Minute).Truncate(time.Second)
+	h := &proxyHandler{}
+	provider := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	acc := &Account{
+		ID:           "seat-a",
+		Type:         AccountTypeCodex,
+		File:         accFile,
+		AccessToken:  "seed-access",
+		RefreshToken: "seed-refresh",
+		PlanType:     "team",
+		Usage: UsageSnapshot{
+			PrimaryResetAt: resetAt,
+		},
+	}
+	managedStreamFailed := false
+	var managedStreamFailureOnce sync.Once
+	var forwarded bytes.Buffer
+
+	writer := h.wrapUsageInterceptWriter(
+		"req-codex-usage-limit",
+		&forwarded,
+		provider,
+		acc,
+		"user-1",
+		nil,
+		0,
+		0,
+		&managedStreamFailed,
+		&managedStreamFailureOnce,
+	)
+
+	chunk := []byte("event: error\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"You've hit your usage limit. To get more access now, send a request to your admin or try again at 4:56 PM.\"}}}\n\n")
+	if _, err := writer.Write(chunk); err != nil {
+		t.Fatalf("write sse chunk: %v", err)
+	}
+
+	if !managedStreamFailed {
+		t.Fatal("expected local Codex usage-limit event to mark the stream as failed")
+	}
+	if acc.HealthStatus != "rate_limited" {
+		t.Fatalf("health_status=%q", acc.HealthStatus)
+	}
+	if !acc.RateLimitUntil.Equal(resetAt) {
+		t.Fatalf("rate_limit_until=%v want %v", acc.RateLimitUntil, resetAt)
+	}
+	if !strings.Contains(strings.ToLower(acc.HealthError), "usage limit") {
+		t.Fatalf("health_error=%q", acc.HealthError)
+	}
+
+	saved, err := os.ReadFile(accFile)
+	if err != nil {
+		t.Fatalf("read auth file: %v", err)
+	}
+	if !strings.Contains(string(saved), "\"rate_limit_until\"") {
+		t.Fatalf("expected persisted cooldown in auth file: %s", string(saved))
 	}
 }
 

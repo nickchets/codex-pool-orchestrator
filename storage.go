@@ -554,22 +554,6 @@ func (s *usageStore) loadAllAccountRuntime() (map[string]persistedAccountRuntime
 	return out, err
 }
 
-// loadPlanCapacity returns capacity analysis for a plan type.
-func (s *usageStore) loadPlanCapacity(planType string) (TokenCapacity, error) {
-	var out TokenCapacity
-	if s == nil || s.db == nil {
-		return out, nil
-	}
-	err := s.db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(bucketPlanCapacity))
-		if raw := b.Get([]byte(planType)); raw != nil {
-			return json.Unmarshal(raw, &out)
-		}
-		return nil
-	})
-	return out, err
-}
-
 // loadAllPlanCapacity returns capacity analysis for all plan types.
 func (s *usageStore) loadAllPlanCapacity() (map[string]TokenCapacity, error) {
 	out := make(map[string]TokenCapacity)
@@ -683,28 +667,6 @@ func (s *usageStore) getRecentSamples(limit int) ([]CapacitySample, error) {
 		return nil
 	})
 	return samples, err
-}
-
-// getUserUsage returns aggregate usage for a specific user.
-func (s *usageStore) getUserUsage(userID string) (*UserUsage, error) {
-	if s == nil || s.db == nil {
-		return nil, nil
-	}
-	var out UserUsage
-	err := s.db.View(func(tx *bbolt.Tx) error {
-		b := tx.Bucket([]byte(bucketUserUsage))
-		if raw := b.Get([]byte(userID)); raw != nil {
-			return json.Unmarshal(raw, &out)
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	if out.UserID == "" {
-		return nil, nil
-	}
-	return &out, nil
 }
 
 // getAllUserUsage returns usage for all users, sorted by total billable tokens descending.

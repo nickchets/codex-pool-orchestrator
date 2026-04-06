@@ -9,6 +9,20 @@ It does not preserve upstream git ancestry. The documented imported Go-core base
 The format is loosely based on Keep a Changelog. Versioning rules are defined in
 [`VERSIONING.md`](./VERSIONING.md).
 
+## [0.10.3] - 2026-04-06
+
+### Added
+- GitLab Claude shared-TPM recovery now keeps a per-scope canary schedule and surfaces the last canary result directly in dashboard and account-status output.
+- Runtime metrics now track named retry and recovery events plus provider TTFB buckets so operator troubleshooting can separate prestream retry churn from downstream latency.
+
+### Changed
+- Fresh Codex seat selection now reserves the chosen seat before caller work starts and prefers lower-inflight seats for new work, reducing duplicate concurrent picks on the same seat.
+- GitLab Claude dashboard health rendering now clears stale shared-cooldown noise once a seat becomes eligible again while preserving visible recovery-canary state.
+
+### Fixed
+- Local Codex streamed usage-limit failures now become persisted cooldown state instead of leaving the seat falsely healthy after the SSE failure event.
+- Managed OpenAI API usage-limit error text is now classified as a retryable rate-limit condition instead of collapsing into a dead-key style quota failure.
+
 ## [0.10.1] - 2026-03-30
 
 ### Changed

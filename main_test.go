@@ -950,6 +950,44 @@ func TestCandidateSupportingPathReturnsGitLabSharedTPMRateLimitError(t *testing.
 	}
 }
 
+func TestGitLabClaudeSharedTPMCooldownErrorIgnoresLaneWhenLiveSeatStillExists(t *testing.T) {
+	now := time.Now().UTC()
+	baseURL, _ := url.Parse(defaultGitLabClaudeGatewayURL)
+	provider := NewClaudeProvider(baseURL)
+
+	cooled := &Account{
+		ID:              "claude_gitlab_cooling",
+		Type:            AccountTypeClaude,
+		PlanType:        "gitlab_duo",
+		AuthMode:        accountAuthModeGitLab,
+		AccessToken:     "gateway-1",
+		RefreshToken:    "glpat-1",
+		SourceBaseURL:   defaultGitLabInstanceURL,
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders:    map[string]string{"X-Gitlab-Instance-Id": "inst-1"},
+		RateLimitUntil:  now.Add(45 * time.Second),
+		HealthStatus:    "rate_limited",
+		HealthError:     managedGitLabClaudeSharedOrgTPMHealthError("This request would exceed your organization's rate limit of 18,000,000 input tokens per minute"),
+	}
+	live := &Account{
+		ID:              "claude_gitlab_live",
+		Type:            AccountTypeClaude,
+		PlanType:        "gitlab_duo",
+		AuthMode:        accountAuthModeGitLab,
+		AccessToken:     "gateway-2",
+		RefreshToken:    "glpat-2",
+		SourceBaseURL:   defaultGitLabInstanceURL,
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders:    map[string]string{"X-Gitlab-Instance-Id": "inst-1"},
+		HealthStatus:    "healthy",
+	}
+	h := &proxyHandler{pool: newPoolState([]*Account{cooled, live}, false)}
+
+	if err := h.gitLabClaudeSharedTPMCooldownError(now, AccountTypeClaude, "gitlab_duo", provider, "/v1/messages"); err != nil {
+		t.Fatalf("expected no shared cooldown error while a live seat remains, got %v", err)
+	}
+}
+
 func TestCandidateSupportingPathStillUsesDirectClaudeWhenGitLabSharedTPMActive(t *testing.T) {
 	now := time.Now().UTC()
 	gitlab := &Account{
@@ -985,6 +1023,60 @@ func TestCandidateSupportingPathStillUsesDirectClaudeWhenGitLabSharedTPMActive(t
 	}
 }
 
+func TestCandidateSupportingPathClaimsCodexSeatBeforeCallerStartsWork(t *testing.T) {
+	baseURL, _ := url.Parse("https://example.com")
+	provider := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+
+	first := &Account{
+		ID:       "a-seat",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.10,
+			PrimaryResetAt:       time.Now().Add(2 * time.Hour),
+			SecondaryResetAt:     time.Now().Add(24 * time.Hour),
+		},
+	}
+	second := &Account{
+		ID:       "b-seat",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.10,
+			PrimaryResetAt:       time.Now().Add(2 * time.Hour),
+			SecondaryResetAt:     time.Now().Add(24 * time.Hour),
+		},
+	}
+	h := &proxyHandler{pool: newPoolState([]*Account{first, second}, false)}
+
+	claimedOne, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeCodex, "", provider, "/v1/responses", "", "")
+	if err != nil {
+		t.Fatalf("first claim err = %v", err)
+	}
+	if claimedOne == nil || claimedOne.ID != "a-seat" {
+		t.Fatalf("expected first claimed codex seat a-seat, got %+v", claimedOne)
+	}
+	if claimedOne.Inflight != 1 {
+		t.Fatalf("expected first claimed seat inflight=1, got %d", claimedOne.Inflight)
+	}
+
+	claimedTwo, err := h.candidateSupportingPath("", map[string]bool{}, AccountTypeCodex, "", provider, "/v1/responses", "", "")
+	if err != nil {
+		t.Fatalf("second claim err = %v", err)
+	}
+	if claimedTwo == nil || claimedTwo.ID != "b-seat" {
+		t.Fatalf("expected second claim to avoid already-claimed seat, got %+v", claimedTwo)
+	}
+	if claimedTwo.Inflight != 1 {
+		t.Fatalf("expected second claimed seat inflight=1, got %d", claimedTwo.Inflight)
+	}
+
+	claimedOne.Inflight--
+	claimedTwo.Inflight--
+}
+
 func TestPropagateManagedGitLabClaudeSharedTPMCooldownOnlyTouchesMatchingEntitlementScope(t *testing.T) {
 	now := time.Now().UTC()
 	trigger := &Account{
@@ -997,9 +1089,9 @@ func TestPropagateManagedGitLabClaudeSharedTPMCooldownOnlyTouchesMatchingEntitle
 		SourceBaseURL:   defaultGitLabInstanceURL,
 		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
 		ExtraHeaders: map[string]string{
-			"X-Gitlab-Instance-Id":                  "inst-1",
+			"X-Gitlab-Instance-Id":                      "inst-1",
 			"X-Gitlab-Feature-Enabled-By-Namespace-Ids": "100,200",
-			"X-Gitlab-User-Id":                      "42",
+			"X-Gitlab-User-Id":                          "42",
 		},
 	}
 	sameScope := &Account{
@@ -1012,9 +1104,9 @@ func TestPropagateManagedGitLabClaudeSharedTPMCooldownOnlyTouchesMatchingEntitle
 		SourceBaseURL:   defaultGitLabInstanceURL,
 		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
 		ExtraHeaders: map[string]string{
-			"X-Gitlab-Instance-Id":                  "inst-1",
+			"X-Gitlab-Instance-Id":                      "inst-1",
 			"X-Gitlab-Feature-Enabled-By-Namespace-Ids": "100,200",
-			"X-Gitlab-User-Id":                      "77",
+			"X-Gitlab-User-Id":                          "77",
 		},
 	}
 	otherScope := &Account{
@@ -1027,9 +1119,9 @@ func TestPropagateManagedGitLabClaudeSharedTPMCooldownOnlyTouchesMatchingEntitle
 		SourceBaseURL:   defaultGitLabInstanceURL,
 		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
 		ExtraHeaders: map[string]string{
-			"X-Gitlab-Instance-Id":                  "inst-1",
+			"X-Gitlab-Instance-Id":                      "inst-1",
 			"X-Gitlab-Feature-Enabled-By-Namespace-Ids": "300",
-			"X-Gitlab-User-Id":                      "42",
+			"X-Gitlab-User-Id":                          "42",
 		},
 	}
 	h := &proxyHandler{pool: newPoolState([]*Account{trigger, sameScope, otherScope}, false)}

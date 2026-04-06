@@ -67,6 +67,13 @@ type accountSnapshot struct {
 	GitLabRateLimitResetAt          time.Time
 	GitLabQuotaExceededCount        int
 	GitLabLastQuotaExceededAt       time.Time
+	GitLabCanaryModel               string
+	GitLabCanaryNextProbeAt         time.Time
+	GitLabCanaryLastAttemptAt       time.Time
+	GitLabCanaryLastSuccessAt       time.Time
+	GitLabCanaryLastFailureAt       time.Time
+	GitLabCanaryLastResult          string
+	GitLabCanaryLastError           string
 	FallbackOnly                    bool
 	GitLabClaude                    bool
 }
@@ -146,6 +153,13 @@ func snapshotAccountState(a *Account, now time.Time, accountType AccountType, re
 		GitLabRateLimitResetAt:          a.GitLabRateLimitResetAt,
 		GitLabQuotaExceededCount:        a.GitLabQuotaExceededCount,
 		GitLabLastQuotaExceededAt:       a.GitLabLastQuotaExceededAt,
+		GitLabCanaryModel:               strings.TrimSpace(a.GitLabCanaryModel),
+		GitLabCanaryNextProbeAt:         a.GitLabCanaryNextProbeAt,
+		GitLabCanaryLastAttemptAt:       a.GitLabCanaryLastAttemptAt,
+		GitLabCanaryLastSuccessAt:       a.GitLabCanaryLastSuccessAt,
+		GitLabCanaryLastFailureAt:       a.GitLabCanaryLastFailureAt,
+		GitLabCanaryLastResult:          strings.TrimSpace(a.GitLabCanaryLastResult),
+		GitLabCanaryLastError:           sanitizeStatusMessage(a.GitLabCanaryLastError),
 		FallbackOnly:                    a.Type == AccountTypeCodex && authMode == accountAuthModeAPIKey,
 		GitLabClaude:                    a.Type == AccountTypeClaude && authMode == accountAuthModeGitLab,
 	}

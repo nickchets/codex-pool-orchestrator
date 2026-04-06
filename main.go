@@ -324,6 +324,7 @@ func main() {
 	h.startUsagePoller()
 	h.startDeadAccountCleanupPoller()
 	h.startStaleAntigravityGeminiTruthPoller()
+	h.startGitLabClaudeSharedTPMRecoveryPoller()
 	go func() {
 		h.refreshStaleAntigravityGeminiTruthOnStartup()
 		h.hydrateMissingAntigravityGeminiQuotaOnStartup()
@@ -759,20 +760,6 @@ func removeConflictingProxyHeaders(h http.Header) {
 	h.Del("X-Real-Ip")
 	h.Del("Via")
 	h.Del("True-Client-Ip")
-}
-
-func normalizePath(basePath, incoming string) string {
-	if basePath == "" || basePath == "/" {
-		return incoming
-	}
-	if strings.HasPrefix(incoming, basePath) {
-		trimmed := strings.TrimPrefix(incoming, basePath)
-		if !strings.HasPrefix(trimmed, "/") {
-			trimmed = "/" + trimmed
-		}
-		return trimmed
-	}
-	return incoming
 }
 
 func singleJoin(basePath, reqPath string) string {
@@ -1275,6 +1262,20 @@ func bufferedRetryTraceReason(statusCode int, bodyText string) string {
 	}
 }
 
+func (h *proxyHandler) recordTransparentPrestreamRetry(acc *Account) {
+	if h == nil || h.metrics == nil {
+		return
+	}
+	h.metrics.incEvent("transparent_prestream_retry")
+	if acc == nil {
+		return
+	}
+	h.metrics.incEvent(string(acc.Type) + "_prestream_retry")
+	if isGitLabClaudeAccount(acc) {
+		h.metrics.incEvent("gitlab_claude_prestream_retry")
+	}
+}
+
 func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *requestTrace, acc *Account, resp *http.Response, refreshFailed bool, requestedModel, requestPath string, attempt, attempts int) (bool, error) {
 	var retryInspection bufferedRetryInspection
 	if needsBufferedRetryInspection(acc, resp.StatusCode) {
@@ -1287,6 +1288,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 		_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body, requestedModel, requestPath)
 		err := formatBufferedRetryStatusError(resp, retryInspection.Text)
 		h.recent.add(err.Error())
+		h.recordTransparentPrestreamRetry(acc)
 		if h.cfg.debug {
 			log.Printf("[%s] attempt %d/%d account=%s retryable status=%d refreshFailed=%v", reqID, attempt, attempts, acc.ID, resp.StatusCode, refreshFailed)
 		}
@@ -1296,6 +1298,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 
 	if isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusPaymentRequired) {
 		err := h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body, requestedModel, requestPath)
+		h.recordTransparentPrestreamRetry(acc)
 		trace.noteRetryDisposition(acc.Type, acc, attempt, attempts, resp.StatusCode, true, bufferedRetryTraceReason(resp.StatusCode, retryInspection.Text), refreshFailed)
 		return true, err
 	}
@@ -1306,6 +1309,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 			_ = h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body, requestedModel, requestPath)
 			err := formatBufferedRetryStatusError(resp, retryInspection.Text)
 			h.recent.add(err.Error())
+			h.recordTransparentPrestreamRetry(acc)
 			trace.noteRetryDisposition(acc.Type, acc, attempt, attempts, resp.StatusCode, true, bufferedRetryTraceReason(resp.StatusCode, retryInspection.Text), refreshFailed)
 			return true, err
 		}
@@ -1321,6 +1325,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 			}
 			err := fmt.Errorf("account deactivated: %s", retryInspection.Text)
 			h.recent.add(err.Error())
+			h.recordTransparentPrestreamRetry(acc)
 			trace.noteRetryDisposition(acc.Type, acc, attempt, attempts, resp.StatusCode, true, bufferedRetryTraceReason(resp.StatusCode, retryInspection.Text), refreshFailed)
 			return true, err
 		}
@@ -1332,6 +1337,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 			if h.cfg.debug {
 				log.Printf("[%s] attempt %d/%d account=%s retryable status=%d refreshFailed=%v", reqID, attempt, attempts, acc.ID, resp.StatusCode, refreshFailed)
 			}
+			h.recordTransparentPrestreamRetry(acc)
 			trace.noteRetryDisposition(acc.Type, acc, attempt, attempts, resp.StatusCode, true, bufferedRetryTraceReason(resp.StatusCode, retryInspection.Text), refreshFailed)
 			return true, err
 		}
@@ -1357,6 +1363,7 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 		if h.cfg.debug {
 			log.Printf("[%s] attempt %d/%d account=%s retryable status=%d refreshFailed=%v", reqID, attempt, attempts, acc.ID, resp.StatusCode, refreshFailed)
 		}
+		h.recordTransparentPrestreamRetry(acc)
 		trace.noteRetryDisposition(acc.Type, acc, attempt, attempts, resp.StatusCode, true, bufferedRetryTraceReason(resp.StatusCode, retryInspection.Text), refreshFailed)
 		return true, err
 	}
@@ -1401,7 +1408,6 @@ func (h *proxyHandler) runBufferedAttemptContour(
 			return nil, true
 		}
 
-		atomic.AddInt64(&acc.Inflight, 1)
 		atomic.AddInt64(&h.inflight, 1)
 		if trace != nil {
 			trace.noteRoute(routePlan, acc, routePlan.TargetBase, "buffered", attempt, attempts)
@@ -1456,6 +1462,7 @@ func (h *proxyHandler) candidateSupportingPath(conversationID string, exclude ma
 		if !providerSupportsPathForAccount(provider, path, acc) {
 			return nil, fmt.Errorf("debug Gemini seat %s does not support path %s", forcedGeminiSeatID, path)
 		}
+		atomic.AddInt64(&acc.Inflight, 1)
 		return acc, nil
 	}
 
@@ -1468,12 +1475,13 @@ func (h *proxyHandler) candidateSupportingPath(conversationID string, exclude ma
 
 	now := time.Now().UTC()
 	for attempt := 0; attempt < attempts; attempt++ {
-		acc := h.pool.candidate(conversationID, exclude, accountType, requiredPlan)
+		acc := h.pool.claimCandidate(conversationID, exclude, accountType, requiredPlan)
 		if acc == nil {
 			break
 		}
 		exclude[acc.ID] = true
 		if !providerSupportsPathForAccount(provider, path, acc) {
+			h.pool.releaseClaim(acc.ID)
 			continue
 		}
 		if acc.Type == AccountTypeGemini {
@@ -1481,9 +1489,12 @@ func (h *proxyHandler) candidateSupportingPath(conversationID string, exclude ma
 			until, _, limited := geminiRequestedModelRateLimitUntilLocked(acc, requestedModel, path, now)
 			acc.mu.Unlock()
 			if limited && until.After(now) {
+				h.pool.releaseClaim(acc.ID)
 				continue
 			}
 		}
+		atomic.AddInt64(&acc.Inflight, 1)
+		h.pool.releaseClaim(acc.ID)
 		return acc, nil
 	}
 
@@ -1532,6 +1543,9 @@ func (h *proxyHandler) propagateManagedGitLabClaudeSharedTPMCooldown(reqID strin
 			acc.RateLimitUntil = until
 			changed = true
 		}
+		if applyManagedGitLabClaudeSharedTPMRecoveryScheduleLocked(acc, now, until, requestedModel) {
+			changed = true
+		}
 		if acc.HealthStatus != "rate_limited" {
 			acc.HealthStatus = "rate_limited"
 			changed = true
@@ -1550,6 +1564,9 @@ func (h *proxyHandler) propagateManagedGitLabClaudeSharedTPMCooldown(reqID strin
 			continue
 		}
 		affected = append(affected, acc.ID)
+		if strings.TrimSpace(acc.File) == "" {
+			continue
+		}
 		if err := saveAccount(acc); err != nil {
 			log.Printf("[%s] warning: failed to persist shared gitlab claude cooldown for %s: %v", reqID, acc.ID, err)
 		}
@@ -1557,6 +1574,9 @@ func (h *proxyHandler) propagateManagedGitLabClaudeSharedTPMCooldown(reqID strin
 
 	if len(affected) == 0 {
 		return false
+	}
+	if h.metrics != nil {
+		h.metrics.incEvent("gitlab_claude_shared_tpm_activated")
 	}
 	log.Printf("[%s] gitlab claude shared org TPM cooldown activated scope=%s requested_model=%q until=%s seats=%s reason=%s", reqID, scopeKey, requestedModel, until.UTC().Format(time.RFC3339), strings.Join(affected, ","), stripManagedGitLabClaudeSharedOrgTPMHealthPrefix(sharedReason))
 	return true
@@ -1573,24 +1593,32 @@ func (h *proxyHandler) gitLabClaudeSharedTPMCooldownError(now time.Time, account
 
 	var until time.Time
 	reason := ""
+	relevant := 0
 	for _, acc := range accounts {
 		if acc == nil || !isGitLabClaudeAccount(acc) || !planMatchesRequired(acc.PlanType, requiredPlan) || !providerSupportsPathForAccount(provider, path, acc) {
 			continue
 		}
 		acc.mu.Lock()
+		disabled := acc.Disabled
+		dead := acc.Dead
+		missingGatewayState := missingGitLabClaudeGatewayState(acc)
 		rateLimitUntil := acc.RateLimitUntil
 		healthStatus := acc.HealthStatus
 		healthError := acc.HealthError
 		acc.mu.Unlock()
-		if !rateLimitUntil.After(now) || healthStatus != "rate_limited" || !isManagedGitLabClaudeSharedOrgTPMHealthError(healthError) {
+		if disabled || dead || missingGatewayState {
 			continue
+		}
+		relevant++
+		if !rateLimitUntil.After(now) || healthStatus != "rate_limited" || !isManagedGitLabClaudeSharedOrgTPMHealthError(healthError) {
+			return nil
 		}
 		if until.IsZero() || rateLimitUntil.Before(until) {
 			until = rateLimitUntil
 			reason = stripManagedGitLabClaudeSharedOrgTPMHealthPrefix(healthError)
 		}
 	}
-	if until.IsZero() {
+	if relevant == 0 || until.IsZero() {
 		return nil
 	}
 	return &rateLimitResponseError{
@@ -1681,6 +1709,9 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 	isSSE := provider.DetectsSSE(opts.requestPath, respContentType)
 	if trace != nil {
 		trace.noteResponse(resp.StatusCode, resp, isSSE)
+	}
+	if h.metrics != nil {
+		h.metrics.observeTTFB(provider.Type(), time.Since(start))
 	}
 	if opts.flushAfterWrite && !isSSE && flusher != nil {
 		flusher.Flush()
@@ -2009,7 +2040,6 @@ func (h *proxyHandler) proxyRequestWebSocket(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	atomic.AddInt64(&acc.Inflight, 1)
 	atomic.AddInt64(&h.inflight, 1)
 	defer func() {
 		atomic.AddInt64(&acc.Inflight, -1)
@@ -2319,7 +2349,6 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	atomic.AddInt64(&acc.Inflight, 1)
 	atomic.AddInt64(&h.inflight, 1)
 	defer func() {
 		atomic.AddInt64(&acc.Inflight, -1)
@@ -2624,6 +2653,12 @@ func (h *proxyHandler) finalizeProxyResponse(reqID string, provider Provider, ac
 		acc.RateLimitUntil = time.Time{}
 		acc.GitLabQuotaExceededCount = 0
 		acc.GitLabLastQuotaExceededAt = time.Time{}
+		acc.GitLabCanaryNextProbeAt = time.Time{}
+		acc.GitLabCanaryLastError = ""
+		if strings.TrimSpace(acc.GitLabCanaryLastResult) == "" || strings.TrimSpace(acc.GitLabCanaryLastResult) == "scheduled" || strings.TrimSpace(acc.GitLabCanaryLastResult) == "rate_limited" {
+			acc.GitLabCanaryLastResult = "success"
+			acc.GitLabCanaryLastSuccessAt = now
+		}
 	} else if acc.Type == AccountTypeGemini {
 		shouldPersistAccountState = shouldPersistHealthyGeminiStateLocked(acc)
 		persistLabel = "gemini"

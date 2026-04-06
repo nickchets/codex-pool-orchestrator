@@ -173,6 +173,12 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 		HealthError               string      `json:"health_error,omitempty"`
 		GitLabQuotaExceededCount  int         `json:"gitlab_quota_exceeded_count,omitempty"`
 		GitLabLastQuotaExceededAt *time.Time  `json:"gitlab_last_quota_exceeded_at,omitempty"`
+		GitLabCanaryModel         string      `json:"gitlab_canary_model,omitempty"`
+		GitLabCanaryNextProbeAt   *time.Time  `json:"gitlab_canary_next_probe_at,omitempty"`
+		GitLabCanaryLastAttemptAt *time.Time  `json:"gitlab_canary_last_attempt_at,omitempty"`
+		GitLabCanaryLastSuccessAt *time.Time  `json:"gitlab_canary_last_success_at,omitempty"`
+		GitLabCanaryLastResult    string      `json:"gitlab_canary_last_result,omitempty"`
+		GitLabCanaryLastError     string      `json:"gitlab_canary_last_error,omitempty"`
 		Disabled                  bool        `json:"disabled"`
 		Dead                      bool        `json:"dead"`
 		Inflight                  int64       `json:"inflight"`
@@ -200,9 +206,15 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 			AccountID:                 snapshot.AccountID,
 			IDTokenChatGPTAccountID:   snapshot.IDTokenChatGPTAccountID,
 			HealthStatus:              displayAccountHealthStatus(snapshot, snapshot.Routing),
-			HealthError:               snapshot.HealthError,
+			HealthError:               displayAccountHealthError(snapshot, snapshot.Routing),
 			GitLabQuotaExceededCount:  snapshot.GitLabQuotaExceededCount,
 			GitLabLastQuotaExceededAt: timePtrUTC(snapshot.GitLabLastQuotaExceededAt),
+			GitLabCanaryModel:         snapshot.GitLabCanaryModel,
+			GitLabCanaryNextProbeAt:   timePtrUTC(snapshot.GitLabCanaryNextProbeAt),
+			GitLabCanaryLastAttemptAt: timePtrUTC(snapshot.GitLabCanaryLastAttemptAt),
+			GitLabCanaryLastSuccessAt: timePtrUTC(snapshot.GitLabCanaryLastSuccessAt),
+			GitLabCanaryLastResult:    snapshot.GitLabCanaryLastResult,
+			GitLabCanaryLastError:     snapshot.GitLabCanaryLastError,
 			Disabled:                  snapshot.Disabled,
 			Dead:                      snapshot.Dead,
 			Inflight:                  snapshot.Inflight,
@@ -672,8 +684,8 @@ func (h *proxyHandler) handleAggregatedUsage(w http.ResponseWriter, reqID string
 	poolStats := h.pool.getPoolStats()
 
 	resp := map[string]any{
-		"plan_type": "pro", // Keep a client-compatible value; the pool shape lives under "pool".
-		"is_pooled": true,
+		"plan_type":      "pro", // Keep a client-compatible value; the pool shape lives under "pool".
+		"is_pooled":      true,
 		"pool_plan_type": "pool",
 		"rate_limit": map[string]any{
 			"allowed":       poolStats.HealthyCount > 0,

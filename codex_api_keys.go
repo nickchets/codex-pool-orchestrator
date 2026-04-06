@@ -424,6 +424,9 @@ func classifyManagedOpenAIAPIErrorStrings(message, errType, code string) managed
 	if containsAny("insufficient_quota", "billing_hard_limit_reached", "credits exhausted", "credit balance", "quota exceeded") {
 		return managedOpenAIAPIErrorDisposition{Retry: true, MarkDead: true, Reason: reason}
 	}
+	if containsAny("usage limit", "hit your usage limit", "try again at") {
+		return managedOpenAIAPIErrorDisposition{Retry: true, RateLimit: true, Reason: reason}
+	}
 	if containsAny("rate_limit", "rate limited", "too many requests") {
 		return managedOpenAIAPIErrorDisposition{Retry: true, RateLimit: true, Reason: reason}
 	}

@@ -8,10 +8,12 @@ rm -rf "$out_dir"
 mkdir -p "$out_dir"
 
 rsync -a \
+  --exclude='.git' \
   --exclude='.git/' \
   --exclude='codex-pool-proxy' \
   --exclude='tests/' \
   --exclude='screenshots/' \
+  --exclude='docs/internal/' \
   --exclude='__pycache__/' \
   --exclude='*.pyc' \
   --exclude='*.pyo' \
@@ -43,6 +45,7 @@ declare -a forbidden_paths=(
   codex-pool-proxy
   tests
   screenshots
+  docs/internal
 )
 
 for rel in "${forbidden_paths[@]}"; do

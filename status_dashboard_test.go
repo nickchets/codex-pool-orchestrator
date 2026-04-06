@@ -367,6 +367,44 @@ func TestBuildPoolDashboardDataShowsGitLabDirectAccessSignals(t *testing.T) {
 	}
 }
 
+func TestBuildPoolDashboardDataDerivesHealthyGitLabClaudeStatusAfterCooldownExpiry(t *testing.T) {
+	now := time.Date(2026, 3, 30, 17, 0, 0, 0, time.UTC)
+	gitlabClaude := &Account{
+		ID:              "claude_gitlab_recovered",
+		Type:            AccountTypeClaude,
+		PlanType:        "gitlab_duo",
+		AuthMode:        accountAuthModeGitLab,
+		AccessToken:     "gateway-live",
+		RefreshToken:    "glpat-live",
+		SourceBaseURL:   defaultGitLabInstanceURL,
+		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
+		ExtraHeaders:    map[string]string{"X-Gitlab-Instance-Id": "inst-1"},
+		HealthStatus:    "rate_limited",
+		HealthError:     managedGitLabClaudeSharedOrgTPMHealthError("This request would exceed your organization's rate limit of 18,000,000 input tokens per minute"),
+		RateLimitUntil:  now.Add(-2 * time.Minute),
+	}
+
+	h := &proxyHandler{
+		pool:      newPoolState([]*Account{gitlabClaude}, false),
+		startTime: now.Add(-time.Hour),
+	}
+
+	data := h.buildPoolDashboardData(now)
+	if len(data.Accounts) != 1 {
+		t.Fatalf("accounts=%d", len(data.Accounts))
+	}
+	status := data.Accounts[0]
+	if status.HealthStatus != "healthy" {
+		t.Fatalf("health_status=%q", status.HealthStatus)
+	}
+	if status.HealthError != "" {
+		t.Fatalf("health_error=%q", status.HealthError)
+	}
+	if !status.Routing.Eligible {
+		t.Fatalf("routing=%+v", status.Routing)
+	}
+}
+
 func TestBuildPoolDashboardDataSeparatesGeminiOperatorLanes(t *testing.T) {
 	setGeminiOAuthTestProfiles(t)
 
@@ -1113,7 +1151,7 @@ func TestBuildPoolDashboardDataBlocksGitLabTokensMissingGatewayState(t *testing.
 	}
 }
 
-func TestBuildPoolDashboardDataSelectsCurrentSeatFromInflightAndLastUsed(t *testing.T) {
+func TestBuildPoolDashboardDataShowsLowerInflightBestEligibleWhenActiveSeatIsBusy(t *testing.T) {
 	now := time.Date(2026, 3, 19, 13, 0, 0, 0, time.UTC)
 	current := &Account{
 		ID:        "current-seat",
@@ -1168,8 +1206,14 @@ func TestBuildPoolDashboardDataSelectsCurrentSeatFromInflightAndLastUsed(t *test
 	if data.LastUsedSeat != nil {
 		t.Fatalf("expected last_used_seat to be omitted when it matches active_seat, got %+v", data.LastUsedSeat)
 	}
-	if data.BestEligibleSeat != nil {
-		t.Fatalf("expected best_eligible_seat to be omitted when it matches active_seat, got %+v", data.BestEligibleSeat)
+	if data.BestEligibleSeat == nil || data.BestEligibleSeat.ID != "older-seat" {
+		t.Fatalf("best_eligible_seat=%+v", data.BestEligibleSeat)
+	}
+	if data.BestEligibleSeat.Inflight != 0 {
+		t.Fatalf("expected best eligible inflight=0, got %+v", data.BestEligibleSeat)
+	}
+	if !strings.Contains(data.BestEligibleSeat.Basis, "new unpinned request") {
+		t.Fatalf("expected next-seat basis, got %+v", data.BestEligibleSeat)
 	}
 }
 
@@ -2039,7 +2083,7 @@ func TestLocalOperatorGeminiSeatAddMarksUnauthorizedSeatDead(t *testing.T) {
 	}
 }
 
-func TestLocalOperatorGeminiSeatAddMarksMissingProjectIDAsProbeFailure(t *testing.T) {
+func TestLocalOperatorGeminiSeatAddUsesFallbackProjectWhenProviderProjectMissing(t *testing.T) {
 	setGeminiOAuthTestProfiles(t)
 
 	apiBase, err := url.Parse("https://api.example.com")
@@ -2072,37 +2116,43 @@ func TestLocalOperatorGeminiSeatAddMarksMissingProjectIDAsProbeFailure(t *testin
 
 	authJSON := `{"access_token":"seed-token","refresh_token":"refresh-token","expiry_date":1774353600000}`
 	outcome := addGeminiSeatFromAuthJSONForTest(t, h, authJSON)
-	if outcome.ProbeOK {
-		t.Fatalf("expected probe_ok=false, got %+v", outcome)
+	if !outcome.ProbeOK {
+		t.Fatalf("expected probe_ok=true once fallback project is available, got %+v", outcome)
 	}
-	if outcome.HealthStatus != "missing_project_id" {
+	if outcome.HealthStatus != "healthy" {
 		t.Fatalf("unexpected health_status: %+v", outcome)
 	}
-	if outcome.ProviderTruthReady {
+	if !outcome.ProviderTruthReady {
 		t.Fatalf("unexpected provider_truth_ready: %+v", outcome)
 	}
-	if outcome.ProviderTruthState != geminiProviderTruthStateMissingProjectID {
+	if outcome.ProviderTruthState != geminiProviderTruthStateReady {
 		t.Fatalf("unexpected provider_truth_state: %+v", outcome)
 	}
 	if outcome.Dead {
 		t.Fatalf("expected dead=false, got %+v", outcome)
 	}
-	if !strings.Contains(outcome.ProbeError, "missing_project_id") {
-		t.Fatalf("expected missing_project_id probe_error, got %+v", outcome)
+	if outcome.ProviderProjectID != antigravityGeminiFallbackProject {
+		t.Fatalf("expected fallback provider project, got %+v", outcome)
+	}
+	if outcome.ProbeError != "" {
+		t.Fatalf("expected empty probe_error, got %+v", outcome)
 	}
 
 	root := readGeminiSeatRootForTest(t, poolDir, outcome.AccountID)
-	if root["health_status"] != "missing_project_id" {
+	if root["health_status"] != "healthy" {
 		t.Fatalf("saved health_status=%#v", root["health_status"])
 	}
-	if root["gemini_provider_truth_ready"] != false {
+	if root["gemini_provider_truth_ready"] != true {
 		t.Fatalf("saved gemini_provider_truth_ready=%#v", root["gemini_provider_truth_ready"])
 	}
-	if root["gemini_provider_truth_state"] != geminiProviderTruthStateMissingProjectID {
+	if root["gemini_provider_truth_state"] != geminiProviderTruthStateReady {
 		t.Fatalf("saved gemini_provider_truth_state=%#v", root["gemini_provider_truth_state"])
 	}
 	if _, ok := root["gemini_provider_checked_at"]; !ok {
 		t.Fatalf("expected gemini_provider_checked_at to be persisted: %#v", root)
+	}
+	if root["antigravity_project_id"] != antigravityGeminiFallbackProject {
+		t.Fatalf("expected saved fallback antigravity_project_id, got %#v", root["antigravity_project_id"])
 	}
 }
 
@@ -2926,8 +2976,8 @@ func TestLocalOperatorGeminiAntigravityOAuthCallbackStoresValidationBlockedSeat(
 	if root["gemini_validation_reason_code"] != "UNSUPPORTED_LOCATION" {
 		t.Fatalf("saved gemini_validation_reason_code=%#v", root["gemini_validation_reason_code"])
 	}
-	if _, ok := root["antigravity_project_id"]; ok {
-		t.Fatalf("expected antigravity_project_id to stay absent: %#v", root["antigravity_project_id"])
+	if root["antigravity_project_id"] != antigravityGeminiFallbackProject {
+		t.Fatalf("expected fallback antigravity_project_id to be retained: %#v", root["antigravity_project_id"])
 	}
 	if _, ok := root["gemini_provider_checked_at"]; !ok {
 		t.Fatalf("expected gemini_provider_checked_at to be persisted: %#v", root)
@@ -2941,8 +2991,8 @@ func TestLocalOperatorGeminiAntigravityOAuthCallbackStoresValidationBlockedSeat(
 	if len(fetchPayloads) != 1 {
 		t.Fatalf("fetchAvailableModels payloads=%v", fetchPayloads)
 	}
-	if len(fetchPayloads[0]) != 0 {
-		t.Fatalf("expected empty fetchAvailableModels payload for validation-blocked seat, got %#v", fetchPayloads[0])
+	if fetchPayloads[0]["project"] != antigravityGeminiFallbackProject {
+		t.Fatalf("expected fallback project fetchAvailableModels payload for validation-blocked seat, got %#v", fetchPayloads[0])
 	}
 	quotaModels, _ := root["gemini_quota_models"].([]any)
 	if len(quotaModels) != 1 {
@@ -2961,7 +3011,7 @@ func TestLocalOperatorGeminiAntigravityOAuthCallbackStoresValidationBlockedSeat(
 	}
 }
 
-func TestLocalOperatorGeminiAntigravityOAuthCallbackStoresMissingProjectSeat(t *testing.T) {
+func TestLocalOperatorGeminiAntigravityOAuthCallbackUsesFallbackProjectWhenProviderProjectMissing(t *testing.T) {
 	resetAntigravityGeminiOAuthSessions()
 	t.Cleanup(resetAntigravityGeminiOAuthSessions)
 
@@ -3043,7 +3093,7 @@ func TestLocalOperatorGeminiAntigravityOAuthCallbackStoresMissingProjectSeat(t *
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if !strings.Contains(rr.Body.String(), "Gemini seat saved with provider block") {
+	if !strings.Contains(rr.Body.String(), "Gemini seat added") {
 		t.Fatalf("unexpected body=%s", rr.Body.String())
 	}
 	if h.pool.count() != 1 {
@@ -3066,26 +3116,26 @@ func TestLocalOperatorGeminiAntigravityOAuthCallbackStoresMissingProjectSeat(t *
 	if err := json.Unmarshal(saved, &root); err != nil {
 		t.Fatalf("decode saved seat: %v", err)
 	}
-	if root["health_status"] != "missing_project_id" {
+	if root["health_status"] != "healthy" {
 		t.Fatalf("saved health_status=%#v", root["health_status"])
 	}
-	if root["gemini_provider_truth_ready"] != false {
+	if root["gemini_provider_truth_ready"] != true {
 		t.Fatalf("saved gemini_provider_truth_ready=%#v", root["gemini_provider_truth_ready"])
 	}
-	if root["gemini_provider_truth_state"] != geminiProviderTruthStateMissingProjectID {
+	if root["gemini_provider_truth_state"] != geminiProviderTruthStateReady {
 		t.Fatalf("saved gemini_provider_truth_state=%#v", root["gemini_provider_truth_state"])
 	}
 	if _, ok := root["gemini_provider_checked_at"]; !ok {
 		t.Fatalf("expected gemini_provider_checked_at to be persisted: %#v", root)
 	}
-	if _, ok := root["antigravity_project_id"]; ok {
-		t.Fatalf("expected antigravity_project_id to stay absent: %#v", root["antigravity_project_id"])
+	if root["antigravity_project_id"] != antigravityGeminiFallbackProject {
+		t.Fatalf("expected fallback antigravity_project_id to be saved: %#v", root["antigravity_project_id"])
 	}
 	if len(fetchPayloads) != 1 {
 		t.Fatalf("fetchAvailableModels payloads=%v", fetchPayloads)
 	}
-	if len(fetchPayloads[0]) != 0 {
-		t.Fatalf("expected empty fetchAvailableModels payload for missing-project seat, got %#v", fetchPayloads[0])
+	if fetchPayloads[0]["project"] != antigravityGeminiFallbackProject {
+		t.Fatalf("expected fallback project fetchAvailableModels payload for missing-project seat, got %#v", fetchPayloads[0])
 	}
 	quotaModels, _ := root["gemini_quota_models"].([]any)
 	if len(quotaModels) != 1 {
@@ -3096,10 +3146,10 @@ func TestLocalOperatorGeminiAntigravityOAuthCallbackStoresMissingProjectSeat(t *
 	if !ok {
 		t.Fatalf("snapshotAccountByID(%q) missing", accountID)
 	}
-	if snapshot.HealthStatus != "missing_project_id" {
+	if snapshot.HealthStatus != "healthy" {
 		t.Fatalf("health_status=%q", snapshot.HealthStatus)
 	}
-	if snapshot.GeminiProviderTruthState != geminiProviderTruthStateMissingProjectID {
+	if snapshot.GeminiProviderTruthState != geminiProviderTruthStateReady {
 		t.Fatalf("provider_truth_state=%q", snapshot.GeminiProviderTruthState)
 	}
 }

@@ -28,6 +28,21 @@ func TestClassifyManagedOpenAIAPISSEErrorMarksQuotaExhaustedKeyDead(t *testing.T
 	}
 }
 
+func TestClassifyManagedOpenAIAPISSEErrorTreatsUsageLimitMessageAsRateLimit(t *testing.T) {
+	data := []byte(`{"type":"response.failed","response":{"status":"failed","error":{"message":"You've hit your usage limit. To get more access now, send a request to your admin or try again at 4:56 PM."}}}`)
+
+	disposition, ok := classifyManagedOpenAIAPISSEError(data)
+	if !ok {
+		t.Fatal("expected usage-limit failure to be classified as retryable")
+	}
+	if !disposition.RateLimit {
+		t.Fatalf("expected usage-limit failure to be treated as rate-limited, got %+v", disposition)
+	}
+	if disposition.MarkDead {
+		t.Fatalf("expected usage-limit failure to avoid dead disposition, got %+v", disposition)
+	}
+}
+
 func TestClassifyManagedOpenAIAPISSEErrorIgnoresUnsupportedParameter(t *testing.T) {
 	data := []byte(`{"type":"error","error":{"message":"Unsupported parameter: 'max_output_tokens' is not supported with this model.","type":"invalid_request_error","code":"unsupported_parameter"}}`)
 

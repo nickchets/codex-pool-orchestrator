@@ -388,11 +388,6 @@ func readUsedPercentMap(rl map[string]any, key string) float64 {
 	return readFloat64(obj, "used_percent") / 100.0
 }
 
-// parseTokenCountEvent extracts usage from Codex token_count SSE events.
-func parseTokenCountEvent(obj map[string]any) *RequestUsage {
-	return parseTokenCountUsageDelta(obj).Usage
-}
-
 func (h *proxyHandler) recordUsage(a *Account, ru RequestUsage) {
 	if a == nil {
 		return
