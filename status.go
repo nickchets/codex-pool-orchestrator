@@ -986,6 +986,79 @@ func accumulateSpecialPoolStatus(data *StatusData, snapshot accountSnapshot, rou
 	}
 }
 
+func recordGeminiOperatorCounts(status *GeminiOperatorStatus, snapshot accountSnapshot, operatorSource string) {
+	if status == nil || snapshot.Type != AccountTypeGemini {
+		return
+	}
+	switch operatorSource {
+	case geminiOperatorSourceManagedOAuth:
+		status.ManagedSeatCount++
+	case geminiOperatorSourceAntigravityImport:
+		status.ImportedSeatCount++
+		status.AntigravitySeatCount++
+	case geminiOperatorSourceManualImport, geminiOperatorSourceManualImportLegacy:
+		status.ImportedSeatCount++
+		status.LegacySeatCount++
+	}
+}
+
+func enrichCommonDashboardStatus(status *AccountStatus, snapshot accountSnapshot, routing routingState, claims codexJWTClaims, now time.Time) {
+	if status == nil {
+		return
+	}
+	if !snapshot.Usage.PrimaryResetAt.IsZero() && snapshot.Usage.PrimaryResetAt.After(now) {
+		status.PrimaryResetIn = formatDuration(snapshot.Usage.PrimaryResetAt.Sub(now))
+	} else if snapshot.Usage.PrimaryWindowMinutes > 0 {
+		status.PrimaryResetIn = fmt.Sprintf("~%dm", snapshot.Usage.PrimaryWindowMinutes)
+	}
+	if !snapshot.Usage.SecondaryResetAt.IsZero() && snapshot.Usage.SecondaryResetAt.After(now) {
+		status.SecondaryResetIn = formatDuration(snapshot.Usage.SecondaryResetAt.Sub(now))
+	} else if snapshot.Usage.SecondaryWindowMinutes > 0 {
+		status.SecondaryResetIn = fmt.Sprintf("~%dd", snapshot.Usage.SecondaryWindowMinutes/60/24)
+	}
+	if !snapshot.LastRefresh.IsZero() {
+		status.LastRefreshAt = snapshot.LastRefresh.UTC().Format(time.RFC3339)
+	}
+	if !snapshot.HealthCheckedAt.IsZero() {
+		status.HealthCheckedAt = snapshot.HealthCheckedAt.UTC().Format(time.RFC3339)
+	}
+	if !snapshot.LastHealthyAt.IsZero() {
+		status.LastHealthyAt = snapshot.LastHealthyAt.UTC().Format(time.RFC3339)
+	}
+	if !snapshot.DeadSince.IsZero() {
+		status.DeadSince = snapshot.DeadSince.UTC().Format(time.RFC3339)
+	}
+	status.HealthStatus = displayAccountHealthStatus(snapshot, routing)
+	status.HealthError = displayAccountHealthError(snapshot, routing)
+	status.Penalty = snapshot.Penalty
+	if snapshot.FallbackOnly {
+		status.ProbeState = managedOpenAIAPIProbeState(snapshot, now)
+		status.ProbeSummary = managedOpenAIAPIProbeSummary(snapshot, now)
+	}
+	authExpiresAt := snapshot.ExpiresAt
+	if authExpiresAt.IsZero() && !claims.ExpiresAt.IsZero() {
+		authExpiresAt = claims.ExpiresAt
+	}
+	if !authExpiresAt.IsZero() {
+		status.AuthExpiresAt = authExpiresAt.UTC().Format(time.RFC3339)
+		if authExpiresAt.Before(now) {
+			status.AuthExpiresIn = "EXPIRED"
+		} else {
+			status.AuthExpiresIn = formatDuration(authExpiresAt.Sub(now))
+		}
+	}
+	if !snapshot.LastUsed.IsZero() {
+		status.LocalLastUsed = formatDuration(now.Sub(snapshot.LastUsed)) + " ago"
+	} else {
+		status.LocalLastUsed = "never"
+	}
+	if !snapshot.Usage.RetrievedAt.IsZero() {
+		status.UsageObserved = firstNonEmpty(snapshot.Usage.Source, "usage") + " · " + formatDuration(now.Sub(snapshot.Usage.RetrievedAt)) + " ago"
+	} else if strings.TrimSpace(snapshot.Usage.Source) != "" {
+		status.UsageObserved = strings.TrimSpace(snapshot.Usage.Source)
+	}
+}
+
 func enrichGeminiDashboardStatus(status *AccountStatus, snapshot accountSnapshot, routing routingState, now time.Time, geminiPool *GeminiPoolStatus) {
 	if status == nil || geminiPool == nil || snapshot.Type != AccountTypeGemini {
 		return
@@ -1327,71 +1400,10 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		if routingRow.RecoveryAt != "" {
 			status.RecoveryAt = routingRow.RecoveryAt
 		}
-		if !snapshot.Usage.PrimaryResetAt.IsZero() && snapshot.Usage.PrimaryResetAt.After(now) {
-			status.PrimaryResetIn = formatDuration(snapshot.Usage.PrimaryResetAt.Sub(now))
-		} else if snapshot.Usage.PrimaryWindowMinutes > 0 {
-			status.PrimaryResetIn = fmt.Sprintf("~%dm", snapshot.Usage.PrimaryWindowMinutes)
-		}
-		if !snapshot.Usage.SecondaryResetAt.IsZero() && snapshot.Usage.SecondaryResetAt.After(now) {
-			status.SecondaryResetIn = formatDuration(snapshot.Usage.SecondaryResetAt.Sub(now))
-		} else if snapshot.Usage.SecondaryWindowMinutes > 0 {
-			status.SecondaryResetIn = fmt.Sprintf("~%dd", snapshot.Usage.SecondaryWindowMinutes/60/24)
-		}
-		if !snapshot.LastRefresh.IsZero() {
-			status.LastRefreshAt = snapshot.LastRefresh.UTC().Format(time.RFC3339)
-		}
-		if !snapshot.HealthCheckedAt.IsZero() {
-			status.HealthCheckedAt = snapshot.HealthCheckedAt.UTC().Format(time.RFC3339)
-		}
-		if !snapshot.LastHealthyAt.IsZero() {
-			status.LastHealthyAt = snapshot.LastHealthyAt.UTC().Format(time.RFC3339)
-		}
+		enrichCommonDashboardStatus(&status, snapshot, routing, claims, now)
 		enrichGeminiDashboardStatus(&status, snapshot, routing, now, &geminiPool)
-		if !snapshot.DeadSince.IsZero() {
-			status.DeadSince = snapshot.DeadSince.UTC().Format(time.RFC3339)
-		}
-		status.HealthStatus = displayAccountHealthStatus(snapshot, routing)
-		status.HealthError = displayAccountHealthError(snapshot, routing)
-		status.Penalty = snapshot.Penalty
-		if snapshot.FallbackOnly {
-			status.ProbeState = managedOpenAIAPIProbeState(snapshot, now)
-			status.ProbeSummary = managedOpenAIAPIProbeSummary(snapshot, now)
-		}
-		authExpiresAt := snapshot.ExpiresAt
-		if authExpiresAt.IsZero() && !claims.ExpiresAt.IsZero() {
-			authExpiresAt = claims.ExpiresAt
-		}
-		if !authExpiresAt.IsZero() {
-			status.AuthExpiresAt = authExpiresAt.UTC().Format(time.RFC3339)
-			if authExpiresAt.Before(now) {
-				status.AuthExpiresIn = "EXPIRED"
-			} else {
-				status.AuthExpiresIn = formatDuration(authExpiresAt.Sub(now))
-			}
-		}
-		if !snapshot.LastUsed.IsZero() {
-			status.LocalLastUsed = formatDuration(now.Sub(snapshot.LastUsed)) + " ago"
-		} else {
-			status.LocalLastUsed = "never"
-		}
-		if !snapshot.Usage.RetrievedAt.IsZero() {
-			status.UsageObserved = firstNonEmpty(snapshot.Usage.Source, "usage") + " · " + formatDuration(now.Sub(snapshot.Usage.RetrievedAt)) + " ago"
-		} else if strings.TrimSpace(snapshot.Usage.Source) != "" {
-			status.UsageObserved = strings.TrimSpace(snapshot.Usage.Source)
-		}
 		enrichGitLabClaudeDashboardStatus(&status, snapshot, now)
-		if snapshot.Type == AccountTypeGemini {
-			switch operatorSource {
-			case geminiOperatorSourceManagedOAuth:
-				data.GeminiOperator.ManagedSeatCount++
-			case geminiOperatorSourceAntigravityImport:
-				data.GeminiOperator.ImportedSeatCount++
-				data.GeminiOperator.AntigravitySeatCount++
-			case geminiOperatorSourceManualImport, geminiOperatorSourceManualImportLegacy:
-				data.GeminiOperator.ImportedSeatCount++
-				data.GeminiOperator.LegacySeatCount++
-			}
-		}
+		recordGeminiOperatorCounts(&data.GeminiOperator, snapshot, operatorSource)
 
 		recordProviderSummary(providerSummary, status.Type, routing.Eligible)
 		status.WorkspaceID = workspaceID
