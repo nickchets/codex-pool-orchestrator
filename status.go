@@ -946,6 +946,46 @@ func recordWorkspaceGroupSeat(workspaceGroups map[string]*poolWorkspaceAccumulat
 	}
 }
 
+func accumulateSpecialPoolStatus(data *StatusData, snapshot accountSnapshot, routing routingState, status AccountStatus, candidate currentSeatCandidate, nextOpenAIAPIKey, nextGitLabClaudeToken **currentSeatCandidate) {
+	if data == nil {
+		return
+	}
+	if status.FallbackOnly {
+		if status.Dead {
+			data.OpenAIAPIPool.DeadKeys++
+		}
+		if status.HealthStatus == "healthy" && !status.Dead && !status.Disabled {
+			data.OpenAIAPIPool.HealthyKeys++
+		}
+		if routing.Eligible {
+			data.OpenAIAPIPool.EligibleKeys++
+			if status.ProbeState != "healthy" {
+				data.OpenAIAPIPool.EligibleUnhealthyKeys++
+			}
+			if *nextOpenAIAPIKey == nil || prefersBestEligibleSeat(candidate, *nextOpenAIAPIKey) {
+				candidateCopy := candidate
+				*nextOpenAIAPIKey = &candidateCopy
+			}
+		}
+	}
+	if snapshot.GitLabClaude {
+		data.GitLabClaudePool.TotalTokens++
+		if status.Dead {
+			data.GitLabClaudePool.DeadTokens++
+		}
+		if status.HealthStatus == "healthy" && !status.Dead && !status.Disabled {
+			data.GitLabClaudePool.HealthyTokens++
+		}
+		if routing.Eligible {
+			data.GitLabClaudePool.EligibleTokens++
+			if *nextGitLabClaudeToken == nil || prefersBestEligibleSeat(candidate, *nextGitLabClaudeToken) {
+				candidateCopy := candidate
+				*nextGitLabClaudeToken = &candidateCopy
+			}
+		}
+	}
+}
+
 func enrichGeminiDashboardStatus(status *AccountStatus, snapshot accountSnapshot, routing routingState, now time.Time, geminiPool *GeminiPoolStatus) {
 	if status == nil || geminiPool == nil || snapshot.Type != AccountTypeGemini {
 		return
@@ -1375,40 +1415,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 			candidateCopy := candidate
 			lastUsedSeat = &candidateCopy
 		}
-		if status.FallbackOnly {
-			if status.Dead {
-				data.OpenAIAPIPool.DeadKeys++
-			}
-			if status.HealthStatus == "healthy" && !status.Dead && !status.Disabled {
-				data.OpenAIAPIPool.HealthyKeys++
-			}
-			if routing.Eligible {
-				data.OpenAIAPIPool.EligibleKeys++
-				if status.ProbeState != "healthy" {
-					data.OpenAIAPIPool.EligibleUnhealthyKeys++
-				}
-				if nextOpenAIAPIKey == nil || prefersBestEligibleSeat(candidate, nextOpenAIAPIKey) {
-					candidateCopy := candidate
-					nextOpenAIAPIKey = &candidateCopy
-				}
-			}
-		}
-		if snapshot.GitLabClaude {
-			data.GitLabClaudePool.TotalTokens++
-			if status.Dead {
-				data.GitLabClaudePool.DeadTokens++
-			}
-			if status.HealthStatus == "healthy" && !status.Dead && !status.Disabled {
-				data.GitLabClaudePool.HealthyTokens++
-			}
-			if routing.Eligible {
-				data.GitLabClaudePool.EligibleTokens++
-				if nextGitLabClaudeToken == nil || prefersBestEligibleSeat(candidate, nextGitLabClaudeToken) {
-					candidateCopy := candidate
-					nextGitLabClaudeToken = &candidateCopy
-				}
-			}
-		}
+		accumulateSpecialPoolStatus(&data, snapshot, routing, status, candidate, &nextOpenAIAPIKey, &nextGitLabClaudeToken)
 
 		data.Accounts = append(data.Accounts, status)
 	}

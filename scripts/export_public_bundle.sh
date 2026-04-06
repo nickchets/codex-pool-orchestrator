@@ -8,17 +8,18 @@ rm -rf "$out_dir"
 mkdir -p "$out_dir"
 
 # Source-only private repo artifacts stay tracked here but must not leak into the public bundle.
-rsync -a \
-  --exclude='.git' \
-  --exclude='.git/' \
-  --exclude='codex-pool-proxy' \
-  --exclude='tests/' \
-  --exclude='screenshots/' \
-  --exclude='docs/internal/' \
-  --exclude='__pycache__/' \
+tar -C "$repo_root" \
+  --exclude='./.git' \
+  --exclude='./codex-pool-proxy' \
+  --exclude='./tests' \
+  --exclude='./screenshots' \
+  --exclude='./docs/internal' \
+  --exclude='__pycache__' \
+  --exclude='*/__pycache__' \
   --exclude='*.pyc' \
   --exclude='*.pyo' \
-  "$repo_root/" "$out_dir/"
+  -cf - . \
+  | tar -C "$out_dir" -xf -
 
 for required in README.md go.mod main.go status.go templates/local_landing.html; do
   if [[ ! -e "$out_dir/$required" ]]; then

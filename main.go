@@ -2568,45 +2568,53 @@ func parseRetryAfter(h http.Header) (time.Duration, bool) {
 	return 0, false
 }
 
+func (h *proxyHandler) finalizeClaudePingTailCutoff(reqID string, trace *requestTrace, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte, start time.Time, debugLabel string, cutoff *claudePingTailCutoffError) bool {
+	h.finalizeProxyResponse(reqID, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample)
+	if h.metrics != nil {
+		h.metrics.inc(strconv.Itoa(statusCode), acc.ID)
+	}
+	if trace != nil {
+		trace.noteFinish(statusCode, isSSE, managedStreamFailed, nil)
+	}
+	log.Printf(
+		"[%s] claude gitlab ping-only tail cut off early (account=%s stalled_ms=%d timeout_ms=%d last_non_ping_type=%q)",
+		reqID,
+		acc.ID,
+		cutoff.stalledFor.Milliseconds(),
+		cutoff.timeout.Milliseconds(),
+		cutoff.lastNonPingType,
+	)
+	if h.cfg.debug {
+		log.Printf("[%s] %s status=%d account=%s duration_ms=%d", reqID, debugLabel, statusCode, acc.ID, time.Since(start).Milliseconds())
+	}
+	return true
+}
+
+func (h *proxyHandler) finalizeCopiedProxyCopyError(reqID string, trace *requestTrace, acc *Account, statusCode int, isSSE bool, managedStreamFailed bool, copyErr error, logStreamError bool) bool {
+	if h.recent != nil {
+		h.recent.add(copyErr.Error())
+	}
+	if h.metrics != nil {
+		h.metrics.inc("error", acc.ID)
+	}
+	if logStreamError {
+		log.Printf("[%s] SSE stream error (account=%s): %v", reqID, acc.ID, copyErr)
+	}
+	if trace != nil {
+		trace.noteFinish(statusCode, isSSE, managedStreamFailed, copyErr)
+	}
+	return false
+}
+
 func (h *proxyHandler) finalizeCopiedProxyResponse(reqID string, trace *requestTrace, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte, copyErr error, logStreamError bool, start time.Time, debugLabel string) bool {
 	if acc == nil {
 		return false
 	}
 	if copyErr != nil {
 		if cutoff, ok := matchClaudePingTailCutoff(copyErr, acc); ok {
-			h.finalizeProxyResponse(reqID, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample)
-			if h.metrics != nil {
-				h.metrics.inc(strconv.Itoa(statusCode), acc.ID)
-			}
-			if trace != nil {
-				trace.noteFinish(statusCode, isSSE, managedStreamFailed, nil)
-			}
-			log.Printf(
-				"[%s] claude gitlab ping-only tail cut off early (account=%s stalled_ms=%d timeout_ms=%d last_non_ping_type=%q)",
-				reqID,
-				acc.ID,
-				cutoff.stalledFor.Milliseconds(),
-				cutoff.timeout.Milliseconds(),
-				cutoff.lastNonPingType,
-			)
-			if h.cfg.debug {
-				log.Printf("[%s] %s status=%d account=%s duration_ms=%d", reqID, debugLabel, statusCode, acc.ID, time.Since(start).Milliseconds())
-			}
-			return true
+			return h.finalizeClaudePingTailCutoff(reqID, trace, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, start, debugLabel, cutoff)
 		}
-		if h.recent != nil {
-			h.recent.add(copyErr.Error())
-		}
-		if h.metrics != nil {
-			h.metrics.inc("error", acc.ID)
-		}
-		if logStreamError {
-			log.Printf("[%s] SSE stream error (account=%s): %v", reqID, acc.ID, copyErr)
-		}
-		if trace != nil {
-			trace.noteFinish(statusCode, isSSE, managedStreamFailed, copyErr)
-		}
-		return false
+		return h.finalizeCopiedProxyCopyError(reqID, trace, acc, statusCode, isSSE, managedStreamFailed, copyErr, logStreamError)
 	}
 
 	h.finalizeProxyResponse(reqID, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample)
