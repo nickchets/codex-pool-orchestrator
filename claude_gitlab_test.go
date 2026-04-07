@@ -112,6 +112,9 @@ func TestClaudeProviderSetAuthHeadersForGitLabManagedAccount(t *testing.T) {
 	if got := req.Header.Get("Authorization"); got != "Bearer gateway-token" {
 		t.Fatalf("authorization=%q", got)
 	}
+	if got := req.Header.Get("User-Agent"); got != gitLabClaudeGatewayUserAgent {
+		t.Fatalf("user-agent=%q", got)
+	}
 	if got := req.Header.Get("X-Gitlab-Instance-Id"); got != "inst-1" {
 		t.Fatalf("x-gitlab-instance-id=%q", got)
 	}
@@ -351,9 +354,9 @@ func TestGitLabClaudeScopeKeyPrefersEntitlementHeadersOverInstanceOnly(t *testin
 		SourceBaseURL:   defaultGitLabInstanceURL,
 		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
 		ExtraHeaders: map[string]string{
-			"X-Gitlab-Instance-Id":                  "inst-1",
+			"X-Gitlab-Instance-Id":                      "inst-1",
 			"X-Gitlab-Feature-Enabled-By-Namespace-Ids": "100,200",
-			"X-Gitlab-User-Id":                      "42",
+			"X-Gitlab-User-Id":                          "42",
 		},
 	}
 	sameEntitlement := &Account{
@@ -362,9 +365,9 @@ func TestGitLabClaudeScopeKeyPrefersEntitlementHeadersOverInstanceOnly(t *testin
 		SourceBaseURL:   defaultGitLabInstanceURL,
 		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
 		ExtraHeaders: map[string]string{
-			"X-Gitlab-Instance-Id":                  "inst-1",
+			"X-Gitlab-Instance-Id":                      "inst-1",
 			"X-Gitlab-Feature-Enabled-By-Namespace-Ids": "100,200",
-			"X-Gitlab-User-Id":                      "77",
+			"X-Gitlab-User-Id":                          "77",
 		},
 	}
 	differentEntitlement := &Account{
@@ -373,9 +376,9 @@ func TestGitLabClaudeScopeKeyPrefersEntitlementHeadersOverInstanceOnly(t *testin
 		SourceBaseURL:   defaultGitLabInstanceURL,
 		UpstreamBaseURL: defaultGitLabClaudeGatewayURL,
 		ExtraHeaders: map[string]string{
-			"X-Gitlab-Instance-Id":                  "inst-1",
+			"X-Gitlab-Instance-Id":                      "inst-1",
 			"X-Gitlab-Feature-Enabled-By-Namespace-Ids": "300",
-			"X-Gitlab-User-Id":                      "42",
+			"X-Gitlab-User-Id":                          "42",
 		},
 	}
 

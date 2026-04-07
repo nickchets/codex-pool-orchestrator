@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const gitLabClaudeGatewayUserAgent = "claude-cli/2.0.76 (external, cli)"
+
 // ClaudeProvider handles Anthropic Claude accounts.
 type ClaudeProvider struct {
 	claudeBase *url.URL
@@ -141,6 +143,10 @@ func (p *ClaudeProvider) LoadAccount(name, path string, data []byte) (*Account, 
 func (p *ClaudeProvider) SetAuthHeaders(req *http.Request, acc *Account) {
 	if isGitLabClaudeAccount(acc) {
 		req.Header.Set("Authorization", "Bearer "+acc.AccessToken)
+		// GitLab Claude gateway is sensitive to request identity shape; forcing the
+		// same UA that succeeds in direct probes keeps inference from degrading into
+		// Cloudflare HTML 403 responses.
+		req.Header.Set("User-Agent", gitLabClaudeGatewayUserAgent)
 		for key, value := range acc.ExtraHeaders {
 			if strings.TrimSpace(key) == "" || strings.TrimSpace(value) == "" {
 				continue
