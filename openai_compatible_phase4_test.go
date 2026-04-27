@@ -104,18 +104,20 @@ func TestPhase4PlanRouteMarksVirtualOpenAICompatibleEndpoints(t *testing.T) {
 	}
 
 	cases := []struct {
-		name string
-		path string
-		body []byte
+		name   string
+		method string
+		path   string
+		body   []byte
 	}{
-		{name: "responses", path: "/v1/responses", body: []byte(`{"model":"gpt-5-codex","input":"hi"}`)},
-		{name: "chat", path: "/v1/chat/completions", body: []byte(`{"model":"gpt-5-codex","messages":[{"role":"user","content":"hi"}]}`)},
-		{name: "models", path: "/v1/models", body: nil},
+		{name: "responses", method: http.MethodPost, path: "/v1/responses", body: []byte(`{"model":"gpt-5-codex","input":"hi"}`)},
+		{name: "chat", method: http.MethodPost, path: "/v1/chat/completions", body: []byte(`{"model":"gpt-5-codex","messages":[{"role":"user","content":"hi"}]}`)},
+		{name: "models", method: http.MethodGet, path: "/v1/models", body: nil},
+		{name: "response retrieval", method: http.MethodGet, path: "/v1/responses/resp_123", body: nil},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "http://pool.local"+tc.path, strings.NewReader(string(tc.body)))
+			req := httptest.NewRequest(tc.method, "http://pool.local"+tc.path, strings.NewReader(string(tc.body)))
 			shape := RequestShape{Path: tc.path}
 			if tc.body != nil {
 				shape = buildBufferedRequestShape(req, tc.body, tc.body)
@@ -148,6 +150,77 @@ func TestPhase4PlanRouteDoesNotMarkLegacyPoolUserAsOpenAICompatible(t *testing.T
 	}
 	if plan.SelectionMode != SelectionAnyPoolSeat {
 		t.Fatalf("selection_mode=%q", plan.SelectionMode)
+	}
+}
+
+func TestPhase4OpenAICompatibleEndpointPathAllowlistRejectsDotSegments(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{path: "/v1/models", want: true},
+		{path: "/v1/responses", want: true},
+		{path: "/v1/chat/completions", want: true},
+		{path: "/v1/responses/resp_123", want: true},
+		{path: "/v1/responses/resp-123_ABC", want: true},
+		{path: "/v1/responses/resp_123/cancel", want: true},
+		{path: "/v1/responses/resp_123/input_items", want: true},
+		{path: "/v1/responses/", want: false},
+		{path: "/v1/files", want: false},
+		{path: "/v1/responses/../../v1/files", want: false},
+		{path: "/v1/responses/../v1/files", want: false},
+		{path: "/v1/responses/./resp_123", want: false},
+		{path: "/v1/responses/%2e%2e/v1/files", want: false},
+		{path: "/v1/responses/resp.123", want: false},
+		{path: "/v1/responses/resp_123/../../v1/files", want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			if got := isOpenAICompatibleEndpointPath(tc.path); got != tc.want {
+				t.Fatalf("isOpenAICompatibleEndpointPath(%q)=%v want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPhase4VirtualKeyDotSegmentResponsesPathRejectsBeforeUpstream(t *testing.T) {
+	cases := []struct {
+		name    string
+		rawPath string
+	}{
+		{name: "raw dot segments", rawPath: "/v1/responses/../../v1/files"},
+		{name: "encoded dot segment", rawPath: "/v1/responses/%2e%2e/v1/files"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var upstreamCalls int
+			h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				upstreamCalls++
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"id":"should-not-happen"}`)),
+					Request:    req,
+				}, nil
+			}))
+
+			req := httptest.NewRequest(http.MethodPost, "http://pool.local"+tc.rawPath, strings.NewReader(`{"model":"gpt-5-codex","input":"hi"}`))
+			if strings.Contains(tc.rawPath, "%2e") && !strings.Contains(req.URL.Path, "..") {
+				t.Skipf("encoded dot segment is not exposed in URL.Path: path=%q raw_path=%q", req.URL.Path, req.URL.RawPath)
+			}
+			req.Header.Set("Authorization", "Bearer "+rawKey)
+			rr := httptest.NewRecorder()
+
+			h.proxyRequest(rr, req, "req-phase4-dot-segment")
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("status=%d body=%s path=%q raw_path=%q", rr.Code, rr.Body.String(), req.URL.Path, req.URL.RawPath)
+			}
+			if upstreamCalls != 0 {
+				t.Fatalf("upstream calls=%d", upstreamCalls)
+			}
+		})
 	}
 }
 

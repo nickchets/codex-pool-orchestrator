@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -46,17 +47,93 @@ func shouldForceBufferedOpenAICompatibleBody(admission AdmissionResult, path str
 }
 
 func isOpenAICompatibleEndpointPath(path string) bool {
-	path = strings.TrimSpace(path)
-	switch path {
-	case "/v1/responses", "/v1/chat/completions", "/v1/models":
-		return true
+	segments, ok := openAICompatiblePathSegments(path)
+	if !ok {
+		return false
 	}
-	return strings.HasPrefix(path, "/v1/responses/")
+	return isOpenAICompatibleModelsPathSegments(segments) ||
+		isOpenAICompatibleChatCompletionsPathSegments(segments) ||
+		isOpenAICompatibleResponsesPathSegments(segments)
 }
 
 func isOpenAICompatibleModelRequestPath(path string) bool {
-	path = strings.TrimSpace(path)
-	return path == "/v1/responses" || path == "/v1/chat/completions" || strings.HasPrefix(path, "/v1/responses/")
+	segments, ok := openAICompatiblePathSegments(path)
+	if !ok {
+		return false
+	}
+	return isOpenAICompatibleChatCompletionsPathSegments(segments) || isOpenAICompatibleResponsesPathSegments(segments)
+}
+
+func openAICompatiblePathSegments(rawPath string) ([]string, bool) {
+	path := strings.TrimSpace(rawPath)
+	if path == "" || !strings.HasPrefix(path, "/") {
+		return nil, false
+	}
+	decodedPath, err := url.PathUnescape(path)
+	if err != nil {
+		return nil, false
+	}
+	parts := strings.Split(decodedPath, "/")
+	if len(parts) < 2 || parts[0] != "" {
+		return nil, false
+	}
+	segments := parts[1:]
+	for _, segment := range segments {
+		if segment == "" || segment == "." || segment == ".." {
+			return nil, false
+		}
+	}
+	return segments, true
+}
+
+func isOpenAICompatibleModelsPathSegments(segments []string) bool {
+	return len(segments) == 2 && segments[0] == "v1" && segments[1] == "models"
+}
+
+func isOpenAICompatibleChatCompletionsPathSegments(segments []string) bool {
+	return len(segments) == 3 && segments[0] == "v1" && segments[1] == "chat" && segments[2] == "completions"
+}
+
+func isOpenAICompatibleResponsesPathSegments(segments []string) bool {
+	if len(segments) < 2 || segments[0] != "v1" || segments[1] != "responses" {
+		return false
+	}
+	if len(segments) == 2 {
+		return true
+	}
+	if !isSafeOpenAICompatibleResponsePathSegment(segments[2]) {
+		return false
+	}
+	if len(segments) == 3 {
+		return true
+	}
+	return len(segments) == 4 && isAllowedOpenAICompatibleResponseChildOperation(segments[3])
+}
+
+func isSafeOpenAICompatibleResponsePathSegment(segment string) bool {
+	if segment == "" {
+		return false
+	}
+	for _, r := range segment {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '_' || r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isAllowedOpenAICompatibleResponseChildOperation(segment string) bool {
+	switch segment {
+	case "cancel", "input_items":
+		return true
+	default:
+		return false
+	}
 }
 
 func poolAPITokenAllowsModel(allowedModels []string, requestedModel string) bool {
