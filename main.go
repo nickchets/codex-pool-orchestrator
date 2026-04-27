@@ -1748,6 +1748,8 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 		writer = fw
 	}
 	writer = newTraceWriter(writer, trace)
+	streamTracker := newStreamUsageTracker()
+	writer = &streamWriteTrackingWriter{w: writer, tracker: streamTracker}
 	managedStreamFailed := false
 	var managedStreamFailureOnce sync.Once
 
@@ -1769,7 +1771,7 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 	}
 
 	if isSSE {
-		writer = h.wrapUsageInterceptWriterWithAttribution(
+		writer = h.wrapUsageInterceptWriterWithAttributionAndTracker(
 			reqID,
 			writer,
 			provider,
@@ -1781,6 +1783,7 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 			&managedStreamFailed,
 			&managedStreamFailureOnce,
 			usageAttribution,
+			streamTracker,
 		)
 	}
 
@@ -1796,6 +1799,7 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 		idleReader = newIdleTimeoutReader(resp.Body, h.cfg.streamIdleTimeout, cancel, onIdleTimeout)
 		resp.Body = idleReader
 	}
+	resp.Body = &streamReadTrackingCloser{rc: resp.Body, tracker: streamTracker}
 
 	_, copyErr := io.Copy(writer, resp.Body)
 	if opts.closeBodyAfterCopy {
@@ -1809,7 +1813,7 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 	if sampleBuf != nil {
 		respSample = sampleBuf.Bytes()
 	}
-	return h.finalizeCopiedProxyResponseWithAttribution(reqID, trace, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, opts.initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, copyErr, idleReader != nil, start, opts.debugLabel, usageAttribution)
+	return h.finalizeCopiedProxyResponseWithAttribution(reqID, trace, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, opts.initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, copyErr, idleReader != nil, start, opts.debugLabel, usageAttribution, streamTracker)
 }
 
 func (h *proxyHandler) deliverBufferedAttemptSuccess(
@@ -2686,10 +2690,10 @@ func (h *proxyHandler) finalizeCopiedProxyCopyError(reqID string, trace *request
 }
 
 func (h *proxyHandler) finalizeCopiedProxyResponse(reqID string, trace *requestTrace, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte, copyErr error, logStreamError bool, start time.Time, debugLabel string) bool {
-	return h.finalizeCopiedProxyResponseWithAttribution(reqID, trace, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, copyErr, logStreamError, start, debugLabel, UsageAttribution{})
+	return h.finalizeCopiedProxyResponseWithAttribution(reqID, trace, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, copyErr, logStreamError, start, debugLabel, UsageAttribution{}, nil)
 }
 
-func (h *proxyHandler) finalizeCopiedProxyResponseWithAttribution(reqID string, trace *requestTrace, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte, copyErr error, logStreamError bool, start time.Time, debugLabel string, usageAttribution UsageAttribution) bool {
+func (h *proxyHandler) finalizeCopiedProxyResponseWithAttribution(reqID string, trace *requestTrace, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte, copyErr error, logStreamError bool, start time.Time, debugLabel string, usageAttribution UsageAttribution, streamTracker *streamUsageTracker) bool {
 	if acc == nil {
 		return false
 	}
@@ -2697,6 +2701,7 @@ func (h *proxyHandler) finalizeCopiedProxyResponseWithAttribution(reqID string, 
 		if cutoff, ok := matchClaudePingTailCutoff(copyErr, acc); ok {
 			return h.finalizeClaudePingTailCutoff(reqID, trace, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, start, debugLabel, usageAttribution, cutoff)
 		}
+		h.recordEstimatedPartialUsage(reqID, provider, acc, userID, statusCode, isSSE, headerPrimaryPct, headerSecondaryPct, copyErr, streamTracker, usageAttribution)
 		return h.finalizeCopiedProxyCopyError(reqID, trace, acc, statusCode, isSSE, managedStreamFailed, copyErr, logStreamError)
 	}
 

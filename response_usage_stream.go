@@ -206,6 +206,36 @@ func (h *proxyHandler) wrapUsageInterceptWriterWithAttribution(
 	managedStreamFailureOnce *sync.Once,
 	usageAttribution UsageAttribution,
 ) io.Writer {
+	return h.wrapUsageInterceptWriterWithAttributionAndTracker(
+		reqID,
+		writer,
+		provider,
+		acc,
+		userID,
+		trace,
+		headerPrimaryPct,
+		headerSecondaryPct,
+		managedStreamFailed,
+		managedStreamFailureOnce,
+		usageAttribution,
+		nil,
+	)
+}
+
+func (h *proxyHandler) wrapUsageInterceptWriterWithAttributionAndTracker(
+	reqID string,
+	writer io.Writer,
+	provider Provider,
+	acc *Account,
+	userID string,
+	trace *requestTrace,
+	headerPrimaryPct float64,
+	headerSecondaryPct float64,
+	managedStreamFailed *bool,
+	managedStreamFailureOnce *sync.Once,
+	usageAttribution UsageAttribution,
+	streamTracker *streamUsageTracker,
+) io.Writer {
 	var claudeAccum *RequestUsage
 	var claudeTailWatcher *claudePingTailWatcher
 	if acc != nil && acc.Type == AccountTypeClaude && isGitLabClaudeAccount(acc) {
@@ -226,6 +256,9 @@ func (h *proxyHandler) wrapUsageInterceptWriterWithAttribution(
 		eventCallback: func(data []byte) {
 			if trace != nil {
 				trace.noteSSEEvent(data, false)
+			}
+			if streamTracker != nil {
+				streamTracker.noteSSEEvent(data)
 			}
 			h.handleCodexSSEFailureEvent(reqID, acc, data, managedStreamFailed, managedStreamFailureOnce)
 		},
@@ -280,6 +313,9 @@ func (h *proxyHandler) wrapUsageInterceptWriterWithAttribution(
 			}
 			applyUsageAttribution(record, usageAttribution)
 			h.recordUsage(acc, *record)
+			if streamTracker != nil {
+				streamTracker.markAuthoritativeUsage()
+			}
 		},
 	}
 }

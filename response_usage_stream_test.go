@@ -3,6 +3,9 @@ package main
 import (
 	"bytes"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -246,6 +249,257 @@ func TestWrapUsageInterceptWriterMarksQuotaEventWithoutAbortingStream(t *testing
 	}
 	if !acc.RateLimitUntil.Equal(resetAt) {
 		t.Fatalf("rate_limit_until=%v want %v", acc.RateLimitUntil, resetAt)
+	}
+}
+
+type phase8FailingReadCloser struct {
+	reader *strings.Reader
+	err    error
+}
+
+func newPhase8FailingReadCloser(body string, err error) *phase8FailingReadCloser {
+	if err == nil {
+		err = io.ErrUnexpectedEOF
+	}
+	return &phase8FailingReadCloser{reader: strings.NewReader(body), err: err}
+}
+
+func (rc *phase8FailingReadCloser) Read(p []byte) (int, error) {
+	if rc.reader.Len() > 0 {
+		return rc.reader.Read(p)
+	}
+	return 0, rc.err
+}
+
+func (rc *phase8FailingReadCloser) Close() error { return nil }
+
+func phase8DeliverCopiedResponse(t *testing.T, h *proxyHandler, provider Provider, acc *Account, body, contentType string, attr UsageAttribution) *httptest.ResponseRecorder {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": []string{contentType}},
+		Body:       newPhase8FailingReadCloser(body, io.ErrUnexpectedEOF),
+	}
+	ok := h.deliverCopiedProxyResponse(
+		rr,
+		func() {},
+		"req-phase8",
+		nil,
+		provider,
+		acc,
+		"user-phase8",
+		resp,
+		time.Now(),
+		copiedProxyResponseDeliveryOptions{
+			requestPath:           attr.ClientEndpoint,
+			captureResponseSample: true,
+			usageAttribution:      attr,
+		},
+	)
+	if ok {
+		t.Fatal("expected copy error path to report unsuccessful delivery")
+	}
+	return rr
+}
+
+func TestPhase8RecordsEstimatedPartialUsageForMidStreamSSEFailure(t *testing.T) {
+	store := testUsageStore(t)
+	baseURL, err := url.Parse("https://example.com")
+	if err != nil {
+		t.Fatalf("parse base url: %v", err)
+	}
+	provider := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	acc := &Account{ID: "seat-phase8", Type: AccountTypeCodex, PlanType: "team"}
+	h := &proxyHandler{store: store, pool: newPoolState([]*Account{acc}, false), metrics: newMetrics(), recent: newRecentErrors(5)}
+	attr := buildUsageAttribution(AdmissionResult{
+		Kind:           AdmissionKindPoolUser,
+		UserID:         "user-phase8",
+		TokenID:        "tok-phase8",
+		TokenName:      "phase8 key",
+		CredentialKind: CredentialKindOpenAICompatiblePoolKey,
+	}, "/v1/responses", true)
+
+	body := "event: response.output_text.delta\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello partial stream\"}\n\n"
+	rr := phase8DeliverCopiedResponse(t, h, provider, acc, body, "text/event-stream", attr)
+
+	if !strings.Contains(rr.Body.String(), "Hello partial stream") {
+		t.Fatalf("client did not receive partial SSE content: %q", rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "[DONE]") {
+		t.Fatalf("should not synthesize successful [DONE]: %q", rr.Body.String())
+	}
+
+	rows := readStoredRequestUsageRows(t, store)
+	if len(rows) != 1 {
+		t.Fatalf("usage rows = %+v", rows)
+	}
+	row := rows[0]
+	if !row.Estimated {
+		t.Fatalf("expected estimated partial row, got %+v", row)
+	}
+	if row.ErrorClass != "upstream_unexpected_eof" {
+		t.Fatalf("error_class=%q row=%+v", row.ErrorClass, row)
+	}
+	if !row.Stream || row.Status != http.StatusOK || row.ClientEndpoint != "/v1/responses" {
+		t.Fatalf("request attribution = %+v", row)
+	}
+	if row.TokenID != "tok-phase8" || row.TokenName != "phase8 key" || row.CredentialKind != CredentialKindOpenAICompatiblePoolKey {
+		t.Fatalf("token attribution = %+v", row)
+	}
+	if row.OutputTokens <= 0 || row.BillableTokens != row.OutputTokens {
+		t.Fatalf("estimated tokens = %+v", row)
+	}
+	tok, err := store.getTokenUsage("tok-phase8")
+	if err != nil {
+		t.Fatalf("load token usage: %v", err)
+	}
+	if tok.TokenID != "tok-phase8" || tok.EstimatedRequestCount != 1 || tok.StreamRequestCount != 1 || tok.LastErrorClass != "upstream_unexpected_eof" {
+		t.Fatalf("token aggregate = %+v", tok)
+	}
+}
+
+func TestPhase8DoesNotRecordEstimatedDuplicateAfterAuthoritativeSSEUsage(t *testing.T) {
+	store := testUsageStore(t)
+	baseURL, err := url.Parse("https://example.com")
+	if err != nil {
+		t.Fatalf("parse base url: %v", err)
+	}
+	provider := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	acc := &Account{ID: "seat-phase8-final", Type: AccountTypeCodex, PlanType: "team"}
+	h := &proxyHandler{store: store, pool: newPoolState([]*Account{acc}, false), metrics: newMetrics(), recent: newRecentErrors(5)}
+	attr := buildUsageAttribution(AdmissionResult{
+		Kind:           AdmissionKindPoolUser,
+		UserID:         "user-phase8",
+		TokenID:        "tok-phase8-final",
+		TokenName:      "phase8 final key",
+		CredentialKind: CredentialKindOpenAICompatiblePoolKey,
+	}, "/v1/responses", true)
+
+	body := "event: response.output_text.delta\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hello final stream\"}\n\n" +
+		"event: response.completed\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":11,\"cached_input_tokens\":3,\"output_tokens\":7}}}\n\n"
+	_ = phase8DeliverCopiedResponse(t, h, provider, acc, body, "text/event-stream", attr)
+
+	rows := readStoredRequestUsageRows(t, store)
+	if len(rows) != 1 {
+		t.Fatalf("usage rows = %+v", rows)
+	}
+	row := rows[0]
+	if row.Estimated || row.ErrorClass != "" {
+		t.Fatalf("expected only authoritative usage row, got %+v", row)
+	}
+	if row.InputTokens != 11 || row.CachedInputTokens != 3 || row.OutputTokens != 7 || row.BillableTokens != 15 {
+		t.Fatalf("authoritative usage = %+v", row)
+	}
+}
+
+func TestPhase8PartialUsageWithoutTokenAttributionDoesNotCreateTokenAggregate(t *testing.T) {
+	store := testUsageStore(t)
+	baseURL, err := url.Parse("https://example.com")
+	if err != nil {
+		t.Fatalf("parse base url: %v", err)
+	}
+	provider := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	acc := &Account{ID: "seat-phase8-real-key", Type: AccountTypeCodex, PlanType: "team"}
+	h := &proxyHandler{store: store, pool: newPoolState([]*Account{acc}, false), metrics: newMetrics(), recent: newRecentErrors(5)}
+	attr := buildUsageAttribution(AdmissionResult{Kind: AdmissionKindPassthrough}, "/v1/responses", true)
+
+	body := "event: response.output_text.delta\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"real-key partial\"}\n\n"
+	_ = phase8DeliverCopiedResponse(t, h, provider, acc, body, "text/event-stream", attr)
+
+	rows := readStoredRequestUsageRows(t, store)
+	if len(rows) != 1 {
+		t.Fatalf("usage rows = %+v", rows)
+	}
+	if rows[0].TokenID != "" || rows[0].CredentialKind != "" {
+		t.Fatalf("unexpected token attribution for passthrough/real-key row: %+v", rows[0])
+	}
+	tokens, err := store.listTokenUsageByUser("user-phase8")
+	if err != nil {
+		t.Fatalf("list token usage: %v", err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("expected no token aggregate without token id, got %+v", tokens)
+	}
+}
+
+func TestPhase8RecordsEstimatedPartialUsageForNonSSECopyError(t *testing.T) {
+	store := testUsageStore(t)
+	baseURL, err := url.Parse("https://example.com")
+	if err != nil {
+		t.Fatalf("parse base url: %v", err)
+	}
+	provider := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	acc := &Account{ID: "seat-phase8-json", Type: AccountTypeCodex, PlanType: "team"}
+	h := &proxyHandler{store: store, pool: newPoolState([]*Account{acc}, false), metrics: newMetrics(), recent: newRecentErrors(5)}
+	attr := buildUsageAttribution(AdmissionResult{
+		Kind:           AdmissionKindPoolUser,
+		UserID:         "user-phase8",
+		TokenID:        "tok-phase8-json",
+		TokenName:      "phase8 json key",
+		CredentialKind: CredentialKindOpenAICompatiblePoolKey,
+	}, "/v1/responses", false)
+
+	_ = phase8DeliverCopiedResponse(t, h, provider, acc, `{"partial":"json body`, "application/json", attr)
+
+	rows := readStoredRequestUsageRows(t, store)
+	if len(rows) != 1 {
+		t.Fatalf("usage rows = %+v", rows)
+	}
+	row := rows[0]
+	if !row.Estimated || row.Stream {
+		t.Fatalf("expected estimated non-SSE partial row, got %+v", row)
+	}
+	if row.OutputTokens <= 0 || row.TokenID != "tok-phase8-json" {
+		t.Fatalf("estimated non-SSE row = %+v", row)
+	}
+}
+
+func TestPhase8PartialFailureKeepsExistingSSECooldownClassification(t *testing.T) {
+	store := testUsageStore(t)
+	baseURL, err := url.Parse("https://example.com")
+	if err != nil {
+		t.Fatalf("parse base url: %v", err)
+	}
+	provider := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	resetAt := time.Now().UTC().Add(30 * time.Minute).Truncate(time.Second)
+	acc := &Account{
+		ID:       "seat-phase8-cooldown",
+		Type:     AccountTypeCodex,
+		PlanType: "team",
+		Usage: UsageSnapshot{
+			PrimaryResetAt: resetAt,
+		},
+	}
+	h := &proxyHandler{store: store, pool: newPoolState([]*Account{acc}, false), metrics: newMetrics(), recent: newRecentErrors(5)}
+	attr := buildUsageAttribution(AdmissionResult{
+		Kind:           AdmissionKindPoolUser,
+		UserID:         "user-phase8",
+		TokenID:        "tok-phase8-cooldown",
+		TokenName:      "phase8 cooldown key",
+		CredentialKind: CredentialKindOpenAICompatiblePoolKey,
+	}, "/v1/responses", true)
+
+	body := "event: error\n" +
+		"data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"You've hit your usage limit. Try again later.\"}}}\n\n" +
+		"event: response.output_text.delta\n" +
+		"data: {\"type\":\"response.output_text.delta\",\"delta\":\"cooldown partial\"}\n\n"
+	_ = phase8DeliverCopiedResponse(t, h, provider, acc, body, "text/event-stream", attr)
+
+	if acc.HealthStatus != "rate_limited" {
+		t.Fatalf("health_status=%q", acc.HealthStatus)
+	}
+	if !acc.RateLimitUntil.Equal(resetAt) {
+		t.Fatalf("rate_limit_until=%v want %v", acc.RateLimitUntil, resetAt)
+	}
+	rows := readStoredRequestUsageRows(t, store)
+	if len(rows) != 1 || !rows[0].Estimated {
+		t.Fatalf("expected one estimated partial usage row, got %+v", rows)
 	}
 }
 
