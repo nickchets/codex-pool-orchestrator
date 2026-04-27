@@ -538,6 +538,11 @@ func TestLooksLikeProviderCredential(t *testing.T) {
 			wantProvider: AccountTypeClaude,
 		},
 		{
+			name:        "Pool OpenAI-compatible virtual key",
+			authHeader:  "Bearer sk-cpool-kid.secret",
+			wantIsValid: false,
+		},
+		{
 			name:         "OpenAI project key",
 			authHeader:   "Bearer sk-proj-abc123xyz",
 			wantIsValid:  true,

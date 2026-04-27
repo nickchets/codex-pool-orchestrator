@@ -2797,6 +2797,12 @@ func looksLikeProviderCredential(authHeader string) (bool, AccountType) {
 		return true, AccountTypeClaude
 	}
 
+	// Pool-generated OpenAI-compatible virtual keys should NOT be passed through.
+	// They identify pool users and are admitted before provider passthrough.
+	if strings.HasPrefix(token, poolAPIKeyPrefix) {
+		return false, ""
+	}
+
 	// OpenAI-style API keys: sk-proj-*, sk-* (but not sk-ant-)
 	if strings.HasPrefix(token, "sk-proj-") || (strings.HasPrefix(token, "sk-") && !strings.HasPrefix(token, "sk-ant-")) {
 		return true, AccountTypeCodex

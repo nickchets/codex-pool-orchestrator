@@ -10,18 +10,27 @@ import (
 
 type AdmissionKind string
 
+type CredentialKind string
+
 const (
 	AdmissionKindPoolUser    AdmissionKind = "pool_user"
 	AdmissionKindPassthrough AdmissionKind = "passthrough"
 	AdmissionKindRejected    AdmissionKind = "rejected"
 )
 
+const (
+	CredentialKindOpenAICompatiblePoolKey CredentialKind = "openai_compatible_pool_key"
+)
+
 type AdmissionResult struct {
-	Kind         AdmissionKind
-	UserID       string
-	ProviderType AccountType
-	StatusCode   int
-	Message      string
+	Kind           AdmissionKind
+	UserID         string
+	ProviderType   AccountType
+	TokenID        string
+	TokenName      string
+	CredentialKind CredentialKind
+	StatusCode     int
+	Message        string
 }
 
 type RequestShape struct {
@@ -54,6 +63,10 @@ func rejectedAdmission(statusCode int, message string) AdmissionResult {
 
 func (h *proxyHandler) resolveProxyAdmission(r *http.Request, reqID string) AdmissionResult {
 	authHeader := requestAuthHeader(r)
+	if admission, ok := h.admitPoolAPIToken(authHeader, reqID); ok {
+		return admission
+	}
+
 	secret := getPoolJWTSecret()
 
 	if secret != "" {
@@ -109,6 +122,64 @@ func (h *proxyHandler) resolvePoolUserAdmission(secret, authHeader string, r *ht
 	}
 
 	return AdmissionResult{}, false
+}
+
+func (h *proxyHandler) admitPoolAPIToken(authHeader, reqID string) (AdmissionResult, bool) {
+	raw, ok := poolAPITokenFromAuthHeader(authHeader)
+	if !ok {
+		return AdmissionResult{}, false
+	}
+	if h == nil || h.poolUsers == nil {
+		return rejectedAdmission(http.StatusUnauthorized, "unauthorized: valid pool API token required"), true
+	}
+	tok, user, err := h.poolUsers.ValidateAPIToken(raw)
+	if err != nil {
+		return rejectPoolAPITokenAdmission(err), true
+	}
+	if tok == nil || user == nil {
+		return rejectedAdmission(http.StatusUnauthorized, "unauthorized: invalid pool API token"), true
+	}
+	if tok.Disabled {
+		return rejectedAdmission(http.StatusForbidden, "pool API token disabled"), true
+	}
+	if user.Disabled {
+		return rejectedAdmission(http.StatusForbidden, "pool user disabled"), true
+	}
+	if h.cfg.debug {
+		log.Printf("[%s] openai-compatible pool key request: user_id=%s token_id=%s", reqID, user.ID, tok.ID)
+	}
+	return AdmissionResult{
+		Kind:           AdmissionKindPoolUser,
+		UserID:         user.ID,
+		TokenID:        tok.ID,
+		TokenName:      tok.Name,
+		CredentialKind: CredentialKindOpenAICompatiblePoolKey,
+	}, true
+}
+
+func poolAPITokenFromAuthHeader(authHeader string) (string, bool) {
+	authHeader = strings.TrimSpace(authHeader)
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		return "", false
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	if !strings.HasPrefix(token, poolAPIKeyPrefix) {
+		return "", false
+	}
+	return token, true
+}
+
+func rejectPoolAPITokenAdmission(err error) AdmissionResult {
+	if err != nil {
+		errText := strings.ToLower(err.Error())
+		if strings.Contains(errText, "disabled") {
+			if strings.Contains(errText, "user") {
+				return rejectedAdmission(http.StatusForbidden, "pool user disabled")
+			}
+			return rejectedAdmission(http.StatusForbidden, "pool API token disabled")
+		}
+	}
+	return rejectedAdmission(http.StatusUnauthorized, "unauthorized: invalid pool API token")
 }
 
 func (h *proxyHandler) admitPoolUser(userID, reqID, debugMessage string) AdmissionResult {
