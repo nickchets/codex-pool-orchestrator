@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,24 +26,64 @@ type PoolUser struct {
 	Disabled  bool      `json:"disabled"`
 }
 
+// PoolAPIToken represents a virtual OpenAI-compatible API key for a pool user.
+// Raw keys are returned only once at creation time and are never persisted.
+type PoolAPIToken struct {
+	ID                  string        `json:"id"`
+	KID                 string        `json:"kid"`
+	UserID              string        `json:"user_id"`
+	Name                string        `json:"name"`
+	Hash                string        `json:"hash"`
+	Prefix              string        `json:"prefix"`
+	Last4               string        `json:"last4"`
+	CreatedAt           time.Time     `json:"created_at"`
+	LastUsedAt          *time.Time    `json:"last_used_at,omitempty"`
+	Disabled            bool          `json:"disabled"`
+	AllowedModels       []string      `json:"allowed_models,omitempty"`
+	AllowedAccountTypes []AccountType `json:"allowed_account_types,omitempty"`
+	MaxRPM              int           `json:"max_rpm,omitempty"`
+	MaxTPM              int           `json:"max_tpm,omitempty"`
+	MaxConcurrency      int           `json:"max_concurrency,omitempty"`
+	DailyBudget         float64       `json:"daily_budget,omitempty"`
+	MonthlyBudget       float64       `json:"monthly_budget,omitempty"`
+	NoLog               bool          `json:"no_log"`
+}
+
 // PoolUserStore manages pool user persistence.
 type PoolUserStore struct {
-	mu    sync.RWMutex
-	path  string
-	users map[string]*PoolUser // keyed by ID
-	byTok map[string]*PoolUser // keyed by download token
+	mu              sync.RWMutex
+	path            string
+	apiTokenPath    string
+	users           map[string]*PoolUser     // keyed by ID
+	byTok           map[string]*PoolUser     // keyed by download token
+	apiTokens       map[string]*PoolAPIToken // keyed by token ID/KID
+	apiTokensByUser map[string]map[string]*PoolAPIToken
 }
 
 func newPoolUserStore(path string) (*PoolUserStore, error) {
 	s := &PoolUserStore{
-		path:  path,
-		users: make(map[string]*PoolUser),
-		byTok: make(map[string]*PoolUser),
+		path:            path,
+		apiTokenPath:    poolAPITokenStoragePath(path),
+		users:           make(map[string]*PoolUser),
+		byTok:           make(map[string]*PoolUser),
+		apiTokens:       make(map[string]*PoolAPIToken),
+		apiTokensByUser: make(map[string]map[string]*PoolAPIToken),
 	}
 	if err := s.load(); err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
 	return s, nil
+}
+
+func poolAPITokenStoragePath(usersPath string) string {
+	dir := filepath.Dir(usersPath)
+	base := filepath.Base(usersPath)
+	ext := filepath.Ext(base)
+	name := strings.TrimSuffix(base, ext)
+	if ext == "" {
+		ext = ".json"
+	}
+	return filepath.Join(dir, name+"_api_tokens"+ext)
 }
 
 func (s *PoolUserStore) load() error {
@@ -53,13 +95,30 @@ func (s *PoolUserStore) load() error {
 	if err := json.Unmarshal(data, &users); err != nil {
 		return err
 	}
+
+	var apiTokens []*PoolAPIToken
+	tokenData, err := os.ReadFile(s.apiTokenPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err == nil {
+		if err := json.Unmarshal(tokenData, &apiTokens); err != nil {
+			return err
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.users = make(map[string]*PoolUser, len(users))
 	s.byTok = make(map[string]*PoolUser, len(users))
+	s.apiTokens = make(map[string]*PoolAPIToken, len(apiTokens))
+	s.apiTokensByUser = make(map[string]map[string]*PoolAPIToken)
 	for _, u := range users {
 		s.users[u.ID] = u
 		s.byTok[u.Token] = u
+	}
+	for _, tok := range apiTokens {
+		s.indexAPITokenLocked(tok)
 	}
 	return nil
 }
@@ -74,6 +133,46 @@ func (s *PoolUserStore) save() error {
 		return err
 	}
 	return os.WriteFile(s.path, data, 0o600)
+}
+
+func (s *PoolUserStore) saveAPITokensLocked() error {
+	apiTokens := make([]*PoolAPIToken, 0, len(s.apiTokens))
+	for _, tok := range s.apiTokens {
+		apiTokens = append(apiTokens, tok)
+	}
+	sort.Slice(apiTokens, func(i, j int) bool {
+		if apiTokens[i].CreatedAt.Equal(apiTokens[j].CreatedAt) {
+			return apiTokens[i].ID < apiTokens[j].ID
+		}
+		return apiTokens[i].CreatedAt.Before(apiTokens[j].CreatedAt)
+	})
+	data, err := json.MarshalIndent(apiTokens, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.apiTokenPath, data, 0o600)
+}
+
+func (s *PoolUserStore) indexAPITokenLocked(tok *PoolAPIToken) {
+	if tok == nil {
+		return
+	}
+	if tok.KID == "" {
+		tok.KID = tok.ID
+	}
+	if tok.ID == "" {
+		tok.ID = tok.KID
+	}
+	if tok.ID == "" {
+		return
+	}
+	s.apiTokens[tok.ID] = tok
+	if tok.UserID != "" {
+		if s.apiTokensByUser[tok.UserID] == nil {
+			s.apiTokensByUser[tok.UserID] = make(map[string]*PoolAPIToken)
+		}
+		s.apiTokensByUser[tok.UserID][tok.ID] = tok
+	}
 }
 
 func (s *PoolUserStore) Create(u *PoolUser) error {
@@ -125,6 +224,207 @@ func (s *PoolUserStore) Disable(id string) error {
 		return s.save()
 	}
 	return fmt.Errorf("user not found: %s", id)
+}
+
+const poolAPIKeyPrefix = "sk-cpool-"
+
+// CreateAPIToken creates a virtual OpenAI-compatible API key for a pool user.
+// The raw key is returned only once and is never persisted.
+func (s *PoolUserStore) CreateAPIToken(userID, name string) (string, *PoolAPIToken, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user := s.users[userID]
+	if user == nil {
+		return "", nil, fmt.Errorf("user not found: %s", userID)
+	}
+	if user.Disabled {
+		return "", nil, fmt.Errorf("user disabled: %s", userID)
+	}
+
+	var kid string
+	for i := 0; i < 10; i++ {
+		kid = randomHex(8)
+		if _, exists := s.apiTokens[kid]; !exists {
+			break
+		}
+		kid = ""
+	}
+	if kid == "" {
+		return "", nil, fmt.Errorf("could not allocate API token id")
+	}
+
+	secret := randomHex(24)
+	raw := poolAPIKeyPrefix + kid + "." + secret
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "default"
+	}
+	now := time.Now().UTC()
+	meta := &PoolAPIToken{
+		ID:        kid,
+		KID:       kid,
+		UserID:    userID,
+		Name:      name,
+		Hash:      poolAPITokenHash(raw),
+		Prefix:    poolAPIKeyPrefix + kid,
+		Last4:     raw[len(raw)-4:],
+		CreatedAt: now,
+	}
+	s.indexAPITokenLocked(meta)
+	if err := s.saveAPITokensLocked(); err != nil {
+		delete(s.apiTokens, kid)
+		if byUser := s.apiTokensByUser[userID]; byUser != nil {
+			delete(byUser, kid)
+		}
+		return "", nil, err
+	}
+	return raw, meta, nil
+}
+
+// GenerateAPIToken is an alias for CreateAPIToken.
+func (s *PoolUserStore) GenerateAPIToken(userID, name string) (string, *PoolAPIToken, error) {
+	return s.CreateAPIToken(userID, name)
+}
+
+// CreatePoolAPIKey is an alias for CreateAPIToken.
+func (s *PoolUserStore) CreatePoolAPIKey(userID, name string) (string, *PoolAPIToken, error) {
+	return s.CreateAPIToken(userID, name)
+}
+
+// ValidateAPIToken validates a raw virtual pool API key and returns its token metadata and user.
+func (s *PoolUserStore) ValidateAPIToken(raw string) (*PoolAPIToken, *PoolUser, error) {
+	kid, err := parsePoolAPIKey(raw)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tok := s.apiTokens[kid]
+	if tok == nil {
+		return nil, nil, fmt.Errorf("unknown API token")
+	}
+	if tok.Disabled {
+		return nil, nil, fmt.Errorf("API token disabled")
+	}
+	if !poolAPITokenHashMatches(tok.Hash, raw) {
+		return nil, nil, fmt.Errorf("invalid API token")
+	}
+	user := s.users[tok.UserID]
+	if user == nil {
+		return nil, nil, fmt.Errorf("API token user not found")
+	}
+	if user.Disabled {
+		return nil, nil, fmt.Errorf("API token user disabled")
+	}
+	now := time.Now().UTC()
+	tok.LastUsedAt = &now
+	if err := s.saveAPITokensLocked(); err != nil {
+		return nil, nil, err
+	}
+	return tok, user, nil
+}
+
+// ValidatePoolAPIKey is an alias for ValidateAPIToken.
+func (s *PoolUserStore) ValidatePoolAPIKey(raw string) (*PoolAPIToken, *PoolUser, error) {
+	return s.ValidateAPIToken(raw)
+}
+
+// DisableAPIToken disables a virtual pool API key by ID/KID.
+func (s *PoolUserStore) DisableAPIToken(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tok := s.apiTokens[id]
+	if tok == nil {
+		return fmt.Errorf("API token not found: %s", id)
+	}
+	tok.Disabled = true
+	return s.saveAPITokensLocked()
+}
+
+// DisablePoolAPIToken is an alias for DisableAPIToken.
+func (s *PoolUserStore) DisablePoolAPIToken(id string) error {
+	return s.DisableAPIToken(id)
+}
+
+// ListAPITokens lists virtual pool API key metadata for a user. Raw keys are not stored.
+func (s *PoolUserStore) ListAPITokens(userID string) []*PoolAPIToken {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	byID := s.apiTokensByUser[userID]
+	out := make([]*PoolAPIToken, 0, len(byID))
+	for _, tok := range byID {
+		out = append(out, tok)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	return out
+}
+
+// ListPoolAPITokens is an alias for ListAPITokens.
+func (s *PoolUserStore) ListPoolAPITokens(userID string) []*PoolAPIToken {
+	return s.ListAPITokens(userID)
+}
+
+func parsePoolAPIKey(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "Bearer ") {
+		raw = strings.TrimSpace(strings.TrimPrefix(raw, "Bearer "))
+	}
+	if !strings.HasPrefix(raw, poolAPIKeyPrefix) {
+		return "", fmt.Errorf("invalid API token format")
+	}
+	rest := strings.TrimPrefix(raw, poolAPIKeyPrefix)
+	dot := strings.IndexByte(rest, '.')
+	if dot <= 0 || dot == len(rest)-1 {
+		return "", fmt.Errorf("invalid API token format")
+	}
+	kid := rest[:dot]
+	secret := rest[dot+1:]
+	if strings.Contains(kid, ".") || strings.Contains(secret, ".") {
+		return "", fmt.Errorf("invalid API token format")
+	}
+	return kid, nil
+}
+
+func poolAPITokenHash(raw string) string {
+	if secret := getPoolJWTSecret(); secret != "" {
+		return "hmac_sha256:" + hex.EncodeToString(hmacSign(secret, []byte(raw)))
+	}
+	sum := sha256.Sum256([]byte(raw))
+	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+func poolAPITokenHashMatches(storedHash, raw string) bool {
+	var expected string
+	switch {
+	case strings.HasPrefix(storedHash, "hmac_sha256:"):
+		secret := getPoolJWTSecret()
+		if secret == "" {
+			return false
+		}
+		expected = "hmac_sha256:" + hex.EncodeToString(hmacSign(secret, []byte(raw)))
+	case strings.HasPrefix(storedHash, "sha256:"):
+		sum := sha256.Sum256([]byte(raw))
+		expected = "sha256:" + hex.EncodeToString(sum[:])
+	default:
+		sum := sha256.Sum256([]byte(raw))
+		shaHash := hex.EncodeToString(sum[:])
+		if hmac.Equal([]byte(storedHash), []byte(shaHash)) {
+			return true
+		}
+		secret := getPoolJWTSecret()
+		if secret == "" {
+			return false
+		}
+		expected = hex.EncodeToString(hmacSign(secret, []byte(raw)))
+	}
+	return hmac.Equal([]byte(storedHash), []byte(expected))
 }
 
 // JWT generation
