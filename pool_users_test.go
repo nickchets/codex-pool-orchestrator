@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,6 +104,27 @@ func TestIsPoolUserTokenWrongIssuer(t *testing.T) {
 	}
 }
 
+func newTestPoolUserStoreWithUser(t *testing.T) (*PoolUserStore, *PoolUser, string) {
+	t.Helper()
+	dir := t.TempDir()
+	usersPath := filepath.Join(dir, "pool_users.json")
+	store, err := newPoolUserStore(usersPath)
+	if err != nil {
+		t.Fatalf("newPoolUserStore: %v", err)
+	}
+	user := &PoolUser{
+		ID:        "user1234567890abcdef",
+		Token:     "download-token",
+		Email:     "pool@example.com",
+		PlanType:  "pro",
+		CreatedAt: time.Now(),
+	}
+	if err := store.Create(user); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	return store, user, dir
+}
+
 func TestPoolAPITokenGenerateValidateAndPersistHashOnly(t *testing.T) {
 	dir := t.TempDir()
 	usersPath := filepath.Join(dir, "pool_users.json")
@@ -199,6 +221,114 @@ func TestPoolAPITokenGenerateValidateAndPersistHashOnly(t *testing.T) {
 	}
 	if reloadedToken == nil || reloadedToken.ID != meta.ID || reloadedUser == nil || reloadedUser.ID != user.ID {
 		t.Fatalf("reloaded validation got token=%#v user=%#v", reloadedToken, reloadedUser)
+	}
+}
+
+func TestPoolAPITokenValidateNormalizesBearerAndWhitespace(t *testing.T) {
+	store, user, _ := newTestPoolUserStoreWithUser(t)
+	raw, meta, err := store.CreateAPIToken(user.ID, "normalization")
+	if err != nil {
+		t.Fatalf("create api token: %v", err)
+	}
+
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{name: "bearer", input: "Bearer " + raw},
+		{name: "whitespace", input: " \t" + raw + "\n"},
+		{name: "bearer_with_whitespace", input: " \tBearer  " + raw + " \n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			validated, validatedUser, err := store.ValidateAPIToken(tt.input)
+			if err != nil {
+				t.Fatalf("validate api token %q: %v", tt.input, err)
+			}
+			if validated == nil || validated.ID != meta.ID {
+				t.Fatalf("validated token = %#v, want id %q", validated, meta.ID)
+			}
+			if validatedUser == nil || validatedUser.ID != user.ID {
+				t.Fatalf("validated user = %#v, want %q", validatedUser, user.ID)
+			}
+		})
+	}
+}
+
+func TestPoolAPITokenValidateSucceedsWhenLastUsedPersistenceFails(t *testing.T) {
+	store, user, dir := newTestPoolUserStoreWithUser(t)
+	raw, meta, err := store.CreateAPIToken(user.ID, "best effort")
+	if err != nil {
+		t.Fatalf("create api token: %v", err)
+	}
+
+	// Point token persistence at a directory so updating last_used_at cannot be written.
+	store.apiTokenPath = dir
+	validated, validatedUser, err := store.ValidateAPIToken(raw)
+	if err != nil {
+		t.Fatalf("valid api token should authenticate despite best-effort last_used_at persistence failure: %v", err)
+	}
+	if validated == nil || validated.ID != meta.ID {
+		t.Fatalf("validated token = %#v, want id %q", validated, meta.ID)
+	}
+	if validatedUser == nil || validatedUser.ID != user.ID {
+		t.Fatalf("validated user = %#v, want %q", validatedUser, user.ID)
+	}
+	if validated.LastUsedAt == nil {
+		t.Fatal("expected validation to still update in-memory last_used_at")
+	}
+}
+
+func TestPoolAPITokenMetadataReturnsCopies(t *testing.T) {
+	store, user, _ := newTestPoolUserStoreWithUser(t)
+	raw, meta, err := store.CreateAPIToken(user.ID, "copy check")
+	if err != nil {
+		t.Fatalf("create api token: %v", err)
+	}
+
+	meta.Name = "mutated create return"
+	listed := store.ListAPITokens(user.ID)
+	if len(listed) != 1 {
+		t.Fatalf("listed tokens = %#v, want one token", listed)
+	}
+	if listed[0].Name != "copy check" {
+		t.Fatalf("mutating CreateAPIToken metadata changed store: got name %q", listed[0].Name)
+	}
+
+	listed[0].Name = "mutated list return"
+	again := store.ListAPITokens(user.ID)
+	if len(again) != 1 || again[0].Name != "copy check" {
+		t.Fatalf("mutating ListAPITokens metadata changed store: %#v", again)
+	}
+
+	validated, _, err := store.ValidateAPIToken(raw)
+	if err != nil {
+		t.Fatalf("validate api token: %v", err)
+	}
+	validated.Disabled = true
+	validated.Name = "mutated validate return"
+	validatedAgain, _, err := store.ValidateAPIToken(raw)
+	if err != nil {
+		t.Fatalf("mutating ValidateAPIToken metadata should not disable stored token: %v", err)
+	}
+	if validatedAgain.Disabled || validatedAgain.Name != "copy check" {
+		t.Fatalf("mutating ValidateAPIToken metadata changed store: %#v", validatedAgain)
+	}
+}
+
+type failingRandomReader struct{}
+
+func (failingRandomReader) Read([]byte) (int, error) {
+	return 0, errors.New("csprng unavailable")
+}
+
+func TestRandomHexFromReaderFailsClosed(t *testing.T) {
+	got, err := randomHexFromReader(failingRandomReader{}, 8)
+	if err == nil {
+		t.Fatal("expected error from failing random reader")
+	}
+	if got != "" {
+		t.Fatalf("expected no random output on failure, got %q", got)
 	}
 }
 

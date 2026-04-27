@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -175,6 +176,24 @@ func (s *PoolUserStore) indexAPITokenLocked(tok *PoolAPIToken) {
 	}
 }
 
+func clonePoolAPIToken(tok *PoolAPIToken) *PoolAPIToken {
+	if tok == nil {
+		return nil
+	}
+	clone := *tok
+	if tok.LastUsedAt != nil {
+		lastUsedAt := *tok.LastUsedAt
+		clone.LastUsedAt = &lastUsedAt
+	}
+	if tok.AllowedModels != nil {
+		clone.AllowedModels = append([]string(nil), tok.AllowedModels...)
+	}
+	if tok.AllowedAccountTypes != nil {
+		clone.AllowedAccountTypes = append([]AccountType(nil), tok.AllowedAccountTypes...)
+	}
+	return &clone
+}
+
 func (s *PoolUserStore) Create(u *PoolUser) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -244,7 +263,11 @@ func (s *PoolUserStore) CreateAPIToken(userID, name string) (string, *PoolAPITok
 
 	var kid string
 	for i := 0; i < 10; i++ {
-		kid = randomHex(8)
+		candidate, err := secureRandomHex(8)
+		if err != nil {
+			return "", nil, fmt.Errorf("generate API token id: %w", err)
+		}
+		kid = candidate
 		if _, exists := s.apiTokens[kid]; !exists {
 			break
 		}
@@ -254,7 +277,10 @@ func (s *PoolUserStore) CreateAPIToken(userID, name string) (string, *PoolAPITok
 		return "", nil, fmt.Errorf("could not allocate API token id")
 	}
 
-	secret := randomHex(24)
+	secret, err := secureRandomHex(24)
+	if err != nil {
+		return "", nil, fmt.Errorf("generate API token secret: %w", err)
+	}
 	raw := poolAPIKeyPrefix + kid + "." + secret
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -279,7 +305,7 @@ func (s *PoolUserStore) CreateAPIToken(userID, name string) (string, *PoolAPITok
 		}
 		return "", nil, err
 	}
-	return raw, meta, nil
+	return raw, clonePoolAPIToken(meta), nil
 }
 
 // GenerateAPIToken is an alias for CreateAPIToken.
@@ -294,7 +320,7 @@ func (s *PoolUserStore) CreatePoolAPIKey(userID, name string) (string, *PoolAPIT
 
 // ValidateAPIToken validates a raw virtual pool API key and returns its token metadata and user.
 func (s *PoolUserStore) ValidateAPIToken(raw string) (*PoolAPIToken, *PoolUser, error) {
-	kid, err := parsePoolAPIKey(raw)
+	kid, normalizedRaw, err := parsePoolAPIKey(raw)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -308,7 +334,7 @@ func (s *PoolUserStore) ValidateAPIToken(raw string) (*PoolAPIToken, *PoolUser, 
 	if tok.Disabled {
 		return nil, nil, fmt.Errorf("API token disabled")
 	}
-	if !poolAPITokenHashMatches(tok.Hash, raw) {
+	if !poolAPITokenHashMatches(tok.Hash, normalizedRaw) {
 		return nil, nil, fmt.Errorf("invalid API token")
 	}
 	user := s.users[tok.UserID]
@@ -320,10 +346,9 @@ func (s *PoolUserStore) ValidateAPIToken(raw string) (*PoolAPIToken, *PoolUser, 
 	}
 	now := time.Now().UTC()
 	tok.LastUsedAt = &now
-	if err := s.saveAPITokensLocked(); err != nil {
-		return nil, nil, err
-	}
-	return tok, user, nil
+	// last_used_at persistence is best-effort; authentication succeeded above.
+	_ = s.saveAPITokensLocked()
+	return clonePoolAPIToken(tok), user, nil
 }
 
 // ValidatePoolAPIKey is an alias for ValidateAPIToken.
@@ -355,7 +380,7 @@ func (s *PoolUserStore) ListAPITokens(userID string) []*PoolAPIToken {
 	byID := s.apiTokensByUser[userID]
 	out := make([]*PoolAPIToken, 0, len(byID))
 	for _, tok := range byID {
-		out = append(out, tok)
+		out = append(out, clonePoolAPIToken(tok))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
@@ -371,25 +396,25 @@ func (s *PoolUserStore) ListPoolAPITokens(userID string) []*PoolAPIToken {
 	return s.ListAPITokens(userID)
 }
 
-func parsePoolAPIKey(raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
-	if strings.HasPrefix(raw, "Bearer ") {
-		raw = strings.TrimSpace(strings.TrimPrefix(raw, "Bearer "))
+func parsePoolAPIKey(raw string) (string, string, error) {
+	normalized := strings.TrimSpace(raw)
+	if strings.HasPrefix(normalized, "Bearer ") {
+		normalized = strings.TrimSpace(strings.TrimPrefix(normalized, "Bearer "))
 	}
-	if !strings.HasPrefix(raw, poolAPIKeyPrefix) {
-		return "", fmt.Errorf("invalid API token format")
+	if !strings.HasPrefix(normalized, poolAPIKeyPrefix) {
+		return "", "", fmt.Errorf("invalid API token format")
 	}
-	rest := strings.TrimPrefix(raw, poolAPIKeyPrefix)
+	rest := strings.TrimPrefix(normalized, poolAPIKeyPrefix)
 	dot := strings.IndexByte(rest, '.')
 	if dot <= 0 || dot == len(rest)-1 {
-		return "", fmt.Errorf("invalid API token format")
+		return "", "", fmt.Errorf("invalid API token format")
 	}
 	kid := rest[:dot]
 	secret := rest[dot+1:]
 	if strings.Contains(kid, ".") || strings.Contains(secret, ".") {
-		return "", fmt.Errorf("invalid API token format")
+		return "", "", fmt.Errorf("invalid API token format")
 	}
-	return kid, nil
+	return kid, normalized, nil
 }
 
 func poolAPITokenHash(raw string) string {
@@ -430,9 +455,26 @@ func poolAPITokenHashMatches(storedHash, raw string) bool {
 // JWT generation
 
 func randomHex(n int) string {
+	out, err := secureRandomHex(n)
+	if err != nil {
+		panic(fmt.Sprintf("secure random hex generation failed: %v", err))
+	}
+	return out
+}
+
+func secureRandomHex(n int) (string, error) {
+	return randomHexFromReader(rand.Reader, n)
+}
+
+func randomHexFromReader(r io.Reader, n int) (string, error) {
+	if n < 0 {
+		return "", fmt.Errorf("random byte count must be non-negative")
+	}
 	b := make([]byte, n)
-	rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := io.ReadFull(r, b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func signJWT(secret string, claims map[string]any) (string, error) {
