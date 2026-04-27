@@ -81,14 +81,46 @@ func readBodyForReplay(body io.ReadCloser, wantSample bool, sampleLimit int64) (
 	if err != nil {
 		return nil, nil, err
 	}
-	if wantSample && sampleLimit > 0 {
-		if int64(len(full)) > sampleLimit {
-			sample = full[:sampleLimit]
-		} else {
-			sample = full
-		}
+	return full, sampleBodyForLogging(full, wantSample, sampleLimit), nil
+}
+
+type requestBodyTooLargeError struct{}
+
+func (e *requestBodyTooLargeError) Error() string {
+	return "request body exceeds configured in-memory limit"
+}
+
+func isRequestBodyTooLargeError(err error) bool {
+	_, ok := err.(*requestBodyTooLargeError)
+	return ok
+}
+
+func readBodyForReplayBounded(body io.ReadCloser, wantSample bool, sampleLimit, maxBytes int64) (full []byte, sample []byte, err error) {
+	if body == nil {
+		return nil, nil, nil
 	}
-	return full, sample, nil
+	defer body.Close()
+	if maxBytes <= 0 {
+		return nil, nil, &requestBodyTooLargeError{}
+	}
+	full, err = io.ReadAll(io.LimitReader(body, maxBytes+1))
+	if err != nil {
+		return nil, nil, err
+	}
+	if int64(len(full)) > maxBytes {
+		return nil, nil, &requestBodyTooLargeError{}
+	}
+	return full, sampleBodyForLogging(full, wantSample, sampleLimit), nil
+}
+
+func sampleBodyForLogging(full []byte, wantSample bool, sampleLimit int64) []byte {
+	if !wantSample || sampleLimit <= 0 {
+		return nil
+	}
+	if int64(len(full)) > sampleLimit {
+		return full[:sampleLimit]
+	}
+	return full
 }
 
 func cloneHeader(h http.Header) http.Header {

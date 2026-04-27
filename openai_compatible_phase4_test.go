@@ -60,8 +60,9 @@ func newPhase4VirtualKeyHandler(t *testing.T, policy PoolAPITokenPolicy, transpo
 
 	return &proxyHandler{
 		cfg: config{
-			disableRefresh: true,
-			maxAttempts:    1,
+			disableRefresh:       true,
+			maxAttempts:          1,
+			maxInMemoryBodyBytes: 1024,
 		},
 		transport: transport,
 		pool:      newPoolState(accounts, false),
@@ -172,6 +173,209 @@ func TestPhase4VirtualKeyModelAllowlistRejectsBeforeUpstream(t *testing.T) {
 	}
 	if upstreamCalls != 0 {
 		t.Fatalf("upstream calls=%d", upstreamCalls)
+	}
+}
+
+func TestPhase4VirtualKeyChunkedDisallowedModelRejectsBeforeUpstream(t *testing.T) {
+	var upstreamCalls int
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{AllowedModels: []string{"gpt-4.1-mini"}}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		upstreamCalls++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"should-not-happen"}`)),
+			Request:    req,
+		}, nil
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "http://pool.local/v1/responses", strings.NewReader(`{"model":"gpt-5-codex","input":"hi"}`))
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	rr := httptest.NewRecorder()
+
+	h.proxyRequest(rr, req, "req-phase4-chunked-disallowed")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls=%d", upstreamCalls)
+	}
+}
+
+func TestPhase4VirtualKeyChunkedInvalidJSONWithRestrictiveAllowlistRejectsBeforeUpstream(t *testing.T) {
+	var upstreamCalls int
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{AllowedModels: []string{"gpt-4.1-mini"}}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		upstreamCalls++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"should-not-happen"}`)),
+			Request:    req,
+		}, nil
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "http://pool.local/v1/responses", strings.NewReader(`{"model":"gpt-4.1-mini","input":"unterminated`))
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	rr := httptest.NewRecorder()
+
+	h.proxyRequest(rr, req, "req-phase4-chunked-invalid-json")
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls=%d", upstreamCalls)
+	}
+}
+
+func TestPhase4VirtualKeyChunkedAllowedOrDefaultModelUsesBufferedPath(t *testing.T) {
+	cases := []struct {
+		name   string
+		policy PoolAPITokenPolicy
+		body   string
+	}{
+		{name: "allowed model", policy: PoolAPITokenPolicy{AllowedModels: []string{"gpt-4.1-mini"}}, body: `{"model":"gpt-4.1-mini","input":"hi"}`},
+		{name: "default policy", policy: PoolAPITokenPolicy{}, body: `{"model":"gpt-5-codex","input":"hi"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var upstreamCalls int
+			var upstreamBody string
+			var upstreamContentLength int64
+			h, rawKey := newPhase4VirtualKeyHandler(t, tc.policy, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				upstreamCalls++
+				upstreamContentLength = req.ContentLength
+				bodyBytes, err := io.ReadAll(req.Body)
+				if err != nil {
+					t.Fatalf("read upstream body: %v", err)
+				}
+				upstreamBody = string(bodyBytes)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": []string{"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"id":"ok","usage":{"input_tokens":3,"output_tokens":1}}`)),
+					Request:    req,
+				}, nil
+			}))
+
+			req := httptest.NewRequest(http.MethodPost, "http://pool.local/v1/responses", strings.NewReader(tc.body))
+			req.ContentLength = -1
+			req.TransferEncoding = []string{"chunked"}
+			req.Header.Set("Authorization", "Bearer "+rawKey)
+			rr := httptest.NewRecorder()
+
+			h.proxyRequest(rr, req, "req-phase4-chunked-allowed")
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			if upstreamCalls != 1 {
+				t.Fatalf("upstream calls=%d", upstreamCalls)
+			}
+			if upstreamBody != tc.body {
+				t.Fatalf("upstream body=%q want %q", upstreamBody, tc.body)
+			}
+			if upstreamContentLength != int64(len(tc.body)) {
+				t.Fatalf("upstream content length=%d want %d", upstreamContentLength, len(tc.body))
+			}
+		})
+	}
+}
+
+func TestPhase4VirtualKeyOversizedOpenAIRequestRejectsBeforeUpstream(t *testing.T) {
+	var upstreamCalls int
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{AllowedModels: []string{"gpt-4.1-mini"}}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		upstreamCalls++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"should-not-happen"}`)),
+			Request:    req,
+		}, nil
+	}))
+	h.cfg.maxInMemoryBodyBytes = 64
+
+	body := `{"model":"gpt-4.1-mini","input":"` + strings.Repeat("x", 128) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "http://pool.local/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	rr := httptest.NewRecorder()
+
+	h.proxyRequest(rr, req, "req-phase4-oversized")
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls=%d", upstreamCalls)
+	}
+}
+
+func TestPhase4VirtualKeyNonOpenAIRouteRejectsBeforeUpstream(t *testing.T) {
+	var upstreamCalls int
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		upstreamCalls++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"should-not-happen"}`)),
+			Request:    req,
+		}, nil
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "http://pool.local/backend-api/conversation", strings.NewReader(`{"model":"gpt-4.1-mini","input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	rr := httptest.NewRecorder()
+
+	h.proxyRequest(rr, req, "req-phase4-non-openai-route")
+	if rr.Code != http.StatusForbidden && rr.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls=%d", upstreamCalls)
+	}
+}
+
+func TestPhase4RealProviderPassthroughChunkedBodyNotAffected(t *testing.T) {
+	var upstreamCalls int
+	var upstreamBody string
+	var upstreamAuthorization string
+	h, _ := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		upstreamCalls++
+		upstreamAuthorization = req.Header.Get("Authorization")
+		bodyBytes, err := io.ReadAll(req.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		upstreamBody = string(bodyBytes)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"id":"ok"}`)),
+			Request:    req,
+		}, nil
+	}))
+	h.cfg.maxInMemoryBodyBytes = 16
+
+	body := `{"model":"gpt-5-codex","input":"` + strings.Repeat("x", 128) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "http://pool.local/v1/responses", strings.NewReader(body))
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+	req.Header.Set("Authorization", "Bearer sk-real-provider-key")
+	rr := httptest.NewRecorder()
+
+	h.proxyRequest(rr, req, "req-phase4-real-passthrough")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if upstreamCalls != 1 {
+		t.Fatalf("upstream calls=%d", upstreamCalls)
+	}
+	if upstreamBody != body {
+		t.Fatalf("upstream body=%q want %q", upstreamBody, body)
+	}
+	if upstreamAuthorization != "Bearer sk-real-provider-key" {
+		t.Fatalf("authorization=%q", upstreamAuthorization)
 	}
 }
 

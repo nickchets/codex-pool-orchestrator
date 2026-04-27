@@ -1877,6 +1877,10 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		http.Error(w, admission.Message, admission.StatusCode)
 		return
 	}
+	if err := validateOpenAICompatiblePoolKeyEndpoint(admission, r.URL.Path); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	if h.maybeServeCachedCodexModels(w, r, reqID, admission) {
 		return
 	}
@@ -1904,6 +1908,27 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	}
 
 	streamBody := shouldStreamBody(r, h.cfg.maxInMemoryBodyBytes)
+	var bodyBytes []byte
+	var bodySample []byte
+	bodyBufferedForInspection := false
+	if streamBody && shouldForceBufferedOpenAICompatibleBody(admission, r.URL.Path) {
+		if h.cfg.maxInMemoryBodyBytes <= 0 || r.ContentLength > h.cfg.maxInMemoryBodyBytes {
+			http.Error(w, (&requestBodyTooLargeError{}).Error(), http.StatusRequestEntityTooLarge)
+			return
+		}
+		var err error
+		bodyBytes, bodySample, err = readBodyForReplayBounded(r.Body, h.cfg.logBodies, h.cfg.bodyLogLimit, h.cfg.maxInMemoryBodyBytes)
+		if err != nil {
+			status := http.StatusBadRequest
+			if isRequestBodyTooLargeError(err) {
+				status = http.StatusRequestEntityTooLarge
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		bodyBufferedForInspection = true
+		streamBody = false
+	}
 	if streamBody {
 		shape := buildStreamedRequestShape(r)
 		routePlan, _, err := h.planRoute(admission, r, shape, nil)
@@ -1927,11 +1952,20 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		return
 	}
 
-	bodyBytes, bodySample, err := readBodyForReplay(r.Body, h.cfg.logBodies, h.cfg.bodyLogLimit)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	if !bodyBufferedForInspection {
+		var err error
+		bodyBytes, bodySample, err = readBodyForReplay(r.Body, h.cfg.logBodies, h.cfg.bodyLogLimit)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
+
+	requestInspect := bodyBytes
+	if len(requestInspect) == 0 {
+		requestInspect = bodySample
+	}
+	requestInspect = bodyForInspection(r, requestInspect)
 
 	shape := buildBufferedRequestShape(r, bodyBytes, bodySample)
 	routePlan, rewrittenBody, err := h.planRoute(admission, r, shape, bodyBytes)
@@ -1939,7 +1973,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	if err := validateOpenAICompatibleModelAllowlist(routePlan); err != nil {
+	if err := validateOpenAICompatibleModelAllowlist(routePlan, requestInspect); err != nil {
 		writeOpenAICompatibleModelAllowlistError(w, err)
 		return
 	}

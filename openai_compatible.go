@@ -31,6 +31,20 @@ func isOpenAICompatibleClientTraffic(admission AdmissionResult, path string) boo
 	return isOpenAICompatiblePoolKeyAdmission(admission) && isOpenAICompatibleEndpointPath(path)
 }
 
+func validateOpenAICompatiblePoolKeyEndpoint(admission AdmissionResult, path string) error {
+	if !isOpenAICompatiblePoolKeyAdmission(admission) {
+		return nil
+	}
+	if isOpenAICompatibleEndpointPath(path) {
+		return nil
+	}
+	return fmt.Errorf("openai-compatible pool API tokens are only valid for OpenAI-compatible endpoints")
+}
+
+func shouldForceBufferedOpenAICompatibleBody(admission AdmissionResult, path string) bool {
+	return isOpenAICompatiblePoolKeyAdmission(admission) && isOpenAICompatibleModelRequestPath(path)
+}
+
 func isOpenAICompatibleEndpointPath(path string) bool {
 	path = strings.TrimSpace(path)
 	switch path {
@@ -123,11 +137,19 @@ func wildcardModelMatch(pattern, model string) bool {
 	return true
 }
 
-func validateOpenAICompatibleModelAllowlist(routePlan RoutePlan) error {
+func hasRestrictiveOpenAICompatibleModelAllowlist(allowedModels []string) bool {
+	patterns := cleanModelAllowlist(allowedModels)
+	return len(patterns) > 0 && !allowlistContainsGlobalWildcard(patterns)
+}
+
+func validateOpenAICompatibleModelAllowlist(routePlan RoutePlan, requestBodyForInspection []byte) error {
 	if !routePlan.IsOpenAICompatibleClient || !isOpenAICompatibleModelRequestPath(routePlan.Shape.Path) {
 		return nil
 	}
 	model := strings.TrimSpace(routePlan.Shape.RequestedModel)
+	if model == "" && len(requestBodyForInspection) > 0 && hasRestrictiveOpenAICompatibleModelAllowlist(routePlan.Admission.TokenAllowedModels) {
+		return fmt.Errorf("request model could not be inspected for this pool API token")
+	}
 	if poolAPITokenAllowsModel(routePlan.Admission.TokenAllowedModels, model) {
 		return nil
 	}
