@@ -42,8 +42,10 @@ func validateOpenAICompatiblePoolKeyEndpoint(admission AdmissionResult, path str
 	return fmt.Errorf("openai-compatible pool API tokens are only valid for OpenAI-compatible endpoints")
 }
 
-func shouldForceBufferedOpenAICompatibleBody(admission AdmissionResult, path string) bool {
-	return isOpenAICompatiblePoolKeyAdmission(admission) && isOpenAICompatibleModelRequestPath(path)
+// Pool-user bodies must be replayable before selecting an upstream seat so
+// pre-first-byte upstream quota/auth failures can retry another account.
+func shouldForceBufferedPoolUserBody(admission AdmissionResult) bool {
+	return admission.Kind == AdmissionKindPoolUser
 }
 
 func isOpenAICompatibleEndpointPath(path string) bool {

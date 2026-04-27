@@ -15,6 +15,29 @@ import (
 	"time"
 )
 
+func newDirectStreamedProxyTestServer(h *proxyHandler, routePlan RoutePlan) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.proxyRequestStreamed(w, r, "req-direct-streamed", routePlan)
+	}))
+}
+
+func streamedRoutePlanForTest(provider Provider, targetBase *url.URL, path string, accountType AccountType, requestedModel string) RoutePlan {
+	return RoutePlan{
+		Admission: AdmissionResult{
+			Kind:   AdmissionKindPoolUser,
+			UserID: "streamed-test-user",
+		},
+		Shape: RequestShape{
+			Path:           path,
+			RequestedModel: requestedModel,
+		},
+		Provider:     provider,
+		TargetBase:   targetBase,
+		UpstreamPath: path,
+		AccountType:  accountType,
+	}
+}
+
 func TestProxyStreamedRequestClaude(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
 
@@ -55,7 +78,7 @@ func TestProxyStreamedRequestClaude(t *testing.T) {
 		recent:    newRecentErrors(5),
 	}
 
-	proxy := httptest.NewServer(h)
+	proxy := newDirectStreamedProxyTestServer(h, streamedRoutePlanForTest(claude, baseURL, "/v1/messages", AccountTypeClaude, ""))
 	defer proxy.Close()
 
 	body := bytes.Repeat([]byte("a"), 2048)
@@ -232,7 +255,7 @@ func TestProxyStreamedManagedAPI5xxPreservesFullErrorBody(t *testing.T) {
 		recent:    newRecentErrors(5),
 	}
 
-	proxy := httptest.NewServer(h)
+	proxy := newDirectStreamedProxyTestServer(h, streamedRoutePlanForTest(codex, baseURL, "/v1/responses", AccountTypeCodex, "gpt-4.1-mini"))
 	defer proxy.Close()
 
 	reqBody := []byte(`{"model":"gpt-4.1-mini","input":"` + strings.Repeat("a", 128) + `"}`)
@@ -331,7 +354,7 @@ func TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAndPreservesBody(t *
 		recent:    newRecentErrors(5),
 	}
 
-	proxy := httptest.NewServer(h)
+	proxy := newDirectStreamedProxyTestServer(h, streamedRoutePlanForTest(codex, baseURL, "/v1/responses", AccountTypeCodex, "gpt-4.1-mini"))
 	defer proxy.Close()
 
 	reqBody := []byte(`{"model":"gpt-4.1-mini","input":"` + strings.Repeat("a", 128) + `"}`)
@@ -466,7 +489,7 @@ func TestProxyStreamedManagedAPICompressed429DoesNotWaitForFullLargeBody(t *test
 		recent:    newRecentErrors(5),
 	}
 
-	proxy := httptest.NewServer(h)
+	proxy := newDirectStreamedProxyTestServer(h, streamedRoutePlanForTest(codex, baseURL, "/v1/responses", AccountTypeCodex, "gpt-4.1-mini"))
 	defer proxy.Close()
 
 	reqBody := []byte(`{"model":"gpt-4.1-mini","input":"` + strings.Repeat("a", 128) + `"}`)
@@ -573,7 +596,7 @@ func TestProxyStreamedManagedAPICompressed429ClassifiesQuotaAfterShortFirstReads
 		recent:    newRecentErrors(5),
 	}
 
-	proxy := httptest.NewServer(h)
+	proxy := newDirectStreamedProxyTestServer(h, streamedRoutePlanForTest(codex, baseURL, "/v1/responses", AccountTypeCodex, "gpt-4.1-mini"))
 	defer proxy.Close()
 
 	reqBody := []byte(`{"model":"gpt-4.1-mini","input":"` + strings.Repeat("a", 128) + `"}`)
@@ -688,7 +711,7 @@ func TestProxyStreamedManagedAPI5xxDoesNotWaitForFullLargeBody(t *testing.T) {
 		recent:    newRecentErrors(5),
 	}
 
-	proxy := httptest.NewServer(h)
+	proxy := newDirectStreamedProxyTestServer(h, streamedRoutePlanForTest(codex, baseURL, "/v1/responses", AccountTypeCodex, "gpt-4.1-mini"))
 	defer proxy.Close()
 
 	reqBody := []byte(`{"model":"gpt-4.1-mini","input":"` + strings.Repeat("a", 128) + `"}`)

@@ -413,9 +413,13 @@ func TestPhase4RealProviderPassthroughChunkedBodyNotAffected(t *testing.T) {
 	var upstreamCalls int
 	var upstreamBody string
 	var upstreamAuthorization string
+	var upstreamContentLength int64
+	var upstreamGetBodySet bool
 	h, _ := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		upstreamCalls++
 		upstreamAuthorization = req.Header.Get("Authorization")
+		upstreamContentLength = req.ContentLength
+		upstreamGetBodySet = req.GetBody != nil
 		bodyBytes, err := io.ReadAll(req.Body)
 		if err != nil {
 			t.Fatalf("read upstream body: %v", err)
@@ -449,6 +453,12 @@ func TestPhase4RealProviderPassthroughChunkedBodyNotAffected(t *testing.T) {
 	}
 	if upstreamAuthorization != "Bearer sk-real-provider-key" {
 		t.Fatalf("authorization=%q", upstreamAuthorization)
+	}
+	if upstreamContentLength > 0 {
+		t.Fatalf("passthrough chunked request should remain streamed, content length=%d", upstreamContentLength)
+	}
+	if upstreamGetBodySet {
+		t.Fatal("passthrough chunked request unexpectedly had replay GetBody set")
 	}
 }
 

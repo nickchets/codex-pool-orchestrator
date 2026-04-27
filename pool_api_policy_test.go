@@ -18,6 +18,13 @@ func newPhase6PolicyRequest(rawKey, body string) *http.Request {
 	return req
 }
 
+func newPhase6ChunkedPolicyRequest(rawKey, body string) *http.Request {
+	req := newPhase6PolicyRequest(rawKey, body)
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+	return req
+}
+
 func phase6OKResponse(req *http.Request, body string) *http.Response {
 	return &http.Response{
 		StatusCode: http.StatusOK,
@@ -81,7 +88,7 @@ func TestPhase6VirtualKeyOverConcurrencyRejectsBeforeUpstreamAndReleases(t *test
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
 		rr := httptest.NewRecorder()
-		h.proxyRequest(rr, newPhase6PolicyRequest(rawKey, body), "req-phase6-concurrency-1")
+		h.proxyRequest(rr, newPhase6ChunkedPolicyRequest(rawKey, body), "req-phase6-concurrency-1")
 		firstDone <- rr
 	}()
 
@@ -92,7 +99,7 @@ func TestPhase6VirtualKeyOverConcurrencyRejectsBeforeUpstreamAndReleases(t *test
 	}
 
 	second := httptest.NewRecorder()
-	h.proxyRequest(second, newPhase6PolicyRequest(rawKey, body), "req-phase6-concurrency-2")
+	h.proxyRequest(second, newPhase6ChunkedPolicyRequest(rawKey, body), "req-phase6-concurrency-2")
 	if second.Code != http.StatusTooManyRequests {
 		t.Fatalf("second status=%d body=%s", second.Code, second.Body.String())
 	}
@@ -112,7 +119,7 @@ func TestPhase6VirtualKeyOverConcurrencyRejectsBeforeUpstreamAndReleases(t *test
 	}
 
 	third := httptest.NewRecorder()
-	h.proxyRequest(third, newPhase6PolicyRequest(rawKey, body), "req-phase6-concurrency-3")
+	h.proxyRequest(third, newPhase6ChunkedPolicyRequest(rawKey, body), "req-phase6-concurrency-3")
 	if third.Code != http.StatusOK {
 		t.Fatalf("third status=%d body=%s", third.Code, third.Body.String())
 	}

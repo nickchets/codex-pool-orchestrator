@@ -1945,7 +1945,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 	var bodyBytes []byte
 	var bodySample []byte
 	bodyBufferedForInspection := false
-	if streamBody && shouldForceBufferedOpenAICompatibleBody(admission, r.URL.Path) {
+	if streamBody && shouldForceBufferedPoolUserBody(admission) {
 		if h.cfg.maxInMemoryBodyBytes <= 0 || r.ContentLength > h.cfg.maxInMemoryBodyBytes {
 			http.Error(w, (&requestBodyTooLargeError{}).Error(), http.StatusRequestEntityTooLarge)
 			return

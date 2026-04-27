@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -599,6 +600,134 @@ func TestProxyBufferedManagedAPI429RetriesNextSeatAfterQuotaFallback(t *testing.
 	}
 	if calls["Bearer sk-proj-live"] == nil || calls["Bearer sk-proj-live"].count != 2 {
 		t.Fatalf("live account calls = %+v", calls["Bearer sk-proj-live"])
+	}
+}
+
+func TestProxyPoolUserChunkedCodex429RetriesNextSeat(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	var firstCalls, secondCalls int
+	var firstBody, secondBody string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+
+		switch r.Header.Get("Authorization") {
+		case "Bearer first-seat-token":
+			firstCalls++
+			firstBody = string(bodyBytes)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"error":{"message":"quota exhausted","code":"rate_limit_exceeded"}}`)
+		case "Bearer second-seat-token":
+			secondCalls++
+			secondBody = string(bodyBytes)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"id":"resp_live","status":"completed"}`)
+		default:
+			t.Fatalf("unexpected auth header %q", r.Header.Get("Authorization"))
+		}
+	}))
+	defer upstream.Close()
+
+	firstSeat := &Account{
+		ID:           "codex_a_first",
+		Type:         AccountTypeCodex,
+		AccessToken:  "first-seat-token",
+		AccountID:    "acct-first",
+		PlanType:     "pro",
+		HealthStatus: "healthy",
+	}
+	secondSeat := &Account{
+		ID:           "codex_b_second",
+		Type:         AccountTypeCodex,
+		AccessToken:  "second-seat-token",
+		AccountID:    "acct-second",
+		PlanType:     "pro",
+		HealthStatus: "healthy",
+	}
+
+	h := newBufferedCodexProxyHandlerForTest(t, upstream.URL, []*Account{firstSeat, secondSeat})
+	h.cfg.disableRefresh = true
+
+	body := `{"model":"gpt-4.1-mini","input":"chunked fallback"}`
+	req := httptest.NewRequest(http.MethodPost, "http://pool.local/v1/responses", strings.NewReader(body))
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+	req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken(getPoolJWTSecret(), "chunked-pool-user"))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.proxyRequest(rr, req, "req-pool-user-chunked-429")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "resp_live") {
+		t.Fatalf("response body=%s", rr.Body.String())
+	}
+	if firstCalls != 1 || secondCalls != 1 {
+		t.Fatalf("firstCalls=%d secondCalls=%d", firstCalls, secondCalls)
+	}
+	if firstBody != body || secondBody != body {
+		t.Fatalf("upstream bodies first=%q second=%q want=%q", firstBody, secondBody, body)
+	}
+	if got := snapshotProxyTestAccount(firstSeat).Inflight; got != 0 {
+		t.Fatalf("first seat inflight=%d", got)
+	}
+	if got := snapshotProxyTestAccount(secondSeat).Inflight; got != 0 {
+		t.Fatalf("second seat inflight=%d", got)
+	}
+	if got := atomic.LoadInt64(&h.inflight); got != 0 {
+		t.Fatalf("handler inflight=%d", got)
+	}
+}
+
+func TestProxyPoolUserOversizedChunkedBodyRejectsBeforeUpstream(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	var upstreamCalls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"should-not-happen"}`)
+	}))
+	defer upstream.Close()
+
+	seat := &Account{
+		ID:           "codex_oversized",
+		Type:         AccountTypeCodex,
+		AccessToken:  "oversized-seat-token",
+		AccountID:    "acct-oversized",
+		PlanType:     "pro",
+		HealthStatus: "healthy",
+	}
+	h := newBufferedCodexProxyHandlerForTest(t, upstream.URL, []*Account{seat})
+	h.cfg.disableRefresh = true
+	h.cfg.maxInMemoryBodyBytes = 16
+
+	body := `{"model":"gpt-4.1-mini","input":"` + strings.Repeat("x", 128) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "http://pool.local/v1/responses", strings.NewReader(body))
+	req.ContentLength = -1
+	req.TransferEncoding = []string{"chunked"}
+	req.Header.Set("Authorization", "Bearer "+generateClaudePoolToken(getPoolJWTSecret(), "oversized-pool-user"))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	h.proxyRequest(rr, req, "req-pool-user-oversized-chunked")
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if upstreamCalls != 0 {
+		t.Fatalf("upstream calls=%d", upstreamCalls)
+	}
+	if got := snapshotProxyTestAccount(seat).Inflight; got != 0 {
+		t.Fatalf("seat inflight=%d", got)
+	}
+	if got := atomic.LoadInt64(&h.inflight); got != 0 {
+		t.Fatalf("handler inflight=%d", got)
 	}
 }
 
