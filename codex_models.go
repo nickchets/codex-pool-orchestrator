@@ -270,6 +270,14 @@ func (h *proxyHandler) maybeServeCachedCodexModels(w http.ResponseWriter, r *htt
 	}
 	trace := requestTraceFromContext(r.Context())
 
+	if isOpenAICompatibleClientTraffic(admission, r.URL.Path) && strings.TrimSpace(r.URL.Path) == "/v1/models" {
+		if trace != nil {
+			trace.noteCacheDecision(AccountTypeCodex, nil, "openai_compatible_synthetic", 0, 0, nil)
+		}
+		writeCodexModelsCacheResponse(w, buildOpenAICompatibleModelsEntry(admission.TokenAllowedModels), "openai-compatible-synthetic")
+		return true
+	}
+
 	shape := RequestShape{Path: r.URL.Path}
 	routePlan, _, err := h.planRoute(admission, r, shape, nil)
 	if err != nil {

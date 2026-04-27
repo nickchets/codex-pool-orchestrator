@@ -1939,6 +1939,10 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	if err := validateOpenAICompatibleModelAllowlist(routePlan); err != nil {
+		writeOpenAICompatibleModelAllowlistError(w, err)
+		return
+	}
 	statusCode := 0
 	if routePlan.DebugGeminiSeatID, statusCode, err = h.resolveDebugGeminiSeatOverride(r, routePlan.AccountType); err != nil {
 		http.Error(w, err.Error(), statusCode)

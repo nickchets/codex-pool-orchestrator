@@ -12,6 +12,8 @@ type AdmissionKind string
 
 type CredentialKind string
 
+type AccountSelectionMode string
+
 const (
 	AdmissionKindPoolUser    AdmissionKind = "pool_user"
 	AdmissionKindPassthrough AdmissionKind = "passthrough"
@@ -22,15 +24,23 @@ const (
 	CredentialKindOpenAICompatiblePoolKey CredentialKind = "openai_compatible_pool_key"
 )
 
+const (
+	SelectionAnyPoolSeat      AccountSelectionMode = "any_pool_seat"
+	SelectionOpenAICompatible AccountSelectionMode = "openai_compatible"
+	SelectionManagedOpenAIAPI AccountSelectionMode = "managed_openai_api"
+	SelectionCodexOAuth       AccountSelectionMode = "codex_oauth"
+)
+
 type AdmissionResult struct {
-	Kind           AdmissionKind
-	UserID         string
-	ProviderType   AccountType
-	TokenID        string
-	TokenName      string
-	CredentialKind CredentialKind
-	StatusCode     int
-	Message        string
+	Kind               AdmissionKind
+	UserID             string
+	ProviderType       AccountType
+	TokenID            string
+	TokenName          string
+	TokenAllowedModels []string
+	CredentialKind     CredentialKind
+	StatusCode         int
+	Message            string
 }
 
 type RequestShape struct {
@@ -40,15 +50,17 @@ type RequestShape struct {
 }
 
 type RoutePlan struct {
-	Admission         AdmissionResult
-	Shape             RequestShape
-	Provider          Provider
-	TargetBase        *url.URL
-	UpstreamPath      string
-	AccountType       AccountType
-	RequiredPlan      string
-	ResponseAdapter   string
-	DebugGeminiSeatID string
+	Admission                AdmissionResult
+	Shape                    RequestShape
+	Provider                 Provider
+	TargetBase               *url.URL
+	UpstreamPath             string
+	AccountType              AccountType
+	RequiredPlan             string
+	ResponseAdapter          string
+	DebugGeminiSeatID        string
+	SelectionMode            AccountSelectionMode
+	IsOpenAICompatibleClient bool
 }
 
 const debugGeminiSeatHeader = "X-Pool-Debug-Gemini-Seat"
@@ -149,11 +161,12 @@ func (h *proxyHandler) admitPoolAPIToken(authHeader, reqID string) (AdmissionRes
 		log.Printf("[%s] openai-compatible pool key request: user_id=%s token_id=%s", reqID, user.ID, tok.ID)
 	}
 	return AdmissionResult{
-		Kind:           AdmissionKindPoolUser,
-		UserID:         user.ID,
-		TokenID:        tok.ID,
-		TokenName:      tok.Name,
-		CredentialKind: CredentialKindOpenAICompatiblePoolKey,
+		Kind:               AdmissionKindPoolUser,
+		UserID:             user.ID,
+		TokenID:            tok.ID,
+		TokenName:          tok.Name,
+		TokenAllowedModels: append([]string(nil), tok.AllowedModels...),
+		CredentialKind:     CredentialKindOpenAICompatiblePoolKey,
 	}, true
 }
 
@@ -308,15 +321,23 @@ func (h *proxyHandler) planRoute(admission AdmissionResult, r *http.Request, sha
 		}
 	}
 
+	selectionMode := SelectionAnyPoolSeat
+	isOpenAICompatibleClient := isOpenAICompatibleClientTraffic(admission, shape.Path)
+	if isOpenAICompatibleClient {
+		selectionMode = SelectionOpenAICompatible
+	}
+
 	return RoutePlan{
-		Admission:       admission,
-		Shape:           shape,
-		Provider:        provider,
-		TargetBase:      targetBase,
-		UpstreamPath:    upstreamPath,
-		AccountType:     accountType,
-		RequiredPlan:    requiredPlan,
-		ResponseAdapter: responseAdapter,
+		Admission:                admission,
+		Shape:                    shape,
+		Provider:                 provider,
+		TargetBase:               targetBase,
+		UpstreamPath:             upstreamPath,
+		AccountType:              accountType,
+		RequiredPlan:             requiredPlan,
+		ResponseAdapter:          responseAdapter,
+		SelectionMode:            selectionMode,
+		IsOpenAICompatibleClient: isOpenAICompatibleClient,
 	}, rewrittenBody, nil
 }
 

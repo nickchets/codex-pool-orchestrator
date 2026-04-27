@@ -491,11 +491,17 @@ func (p *CodexProvider) SupportsAccountPath(path string, acc *Account) bool {
 }
 
 func (p *CodexProvider) DetectsSSE(path string, contentType string) bool {
-	// Responses paths are always SSE
-	if strings.HasPrefix(path, "/responses/") || strings.HasPrefix(path, "/v1/") {
+	contentType = strings.ToLower(contentType)
+	if strings.Contains(contentType, "text/event-stream") {
 		return true
 	}
-	return strings.Contains(strings.ToLower(contentType), "text/event-stream")
+	// Legacy Codex responses are commonly SSE. Keep that compatibility only when
+	// upstream did not declare a non-stream content type; JSON responses must use
+	// the buffered body usage parser instead of SSE interception.
+	if strings.TrimSpace(contentType) == "" {
+		return strings.HasPrefix(path, "/responses") || strings.HasPrefix(path, "/v1/responses")
+	}
+	return false
 }
 
 // parseCodexClaims extracts claims from a Codex JWT ID token.
