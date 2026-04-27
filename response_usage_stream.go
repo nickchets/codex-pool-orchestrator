@@ -178,6 +178,34 @@ func (h *proxyHandler) wrapUsageInterceptWriter(
 	managedStreamFailed *bool,
 	managedStreamFailureOnce *sync.Once,
 ) io.Writer {
+	return h.wrapUsageInterceptWriterWithAttribution(
+		reqID,
+		writer,
+		provider,
+		acc,
+		userID,
+		trace,
+		headerPrimaryPct,
+		headerSecondaryPct,
+		managedStreamFailed,
+		managedStreamFailureOnce,
+		UsageAttribution{},
+	)
+}
+
+func (h *proxyHandler) wrapUsageInterceptWriterWithAttribution(
+	reqID string,
+	writer io.Writer,
+	provider Provider,
+	acc *Account,
+	userID string,
+	trace *requestTrace,
+	headerPrimaryPct float64,
+	headerSecondaryPct float64,
+	managedStreamFailed *bool,
+	managedStreamFailureOnce *sync.Once,
+	usageAttribution UsageAttribution,
+) io.Writer {
 	var claudeAccum *RequestUsage
 	var claudeTailWatcher *claudePingTailWatcher
 	if acc != nil && acc.Type == AccountTypeClaude && isGitLabClaudeAccount(acc) {
@@ -246,7 +274,12 @@ func (h *proxyHandler) wrapUsageInterceptWriter(
 				claudeAccum = nil
 			}
 
-			h.recordUsage(acc, *enrichUsageRecord(acc, userID, ru, headerPrimaryPct, headerSecondaryPct))
+			record := enrichUsageRecord(acc, userID, ru, headerPrimaryPct, headerSecondaryPct)
+			if record == nil {
+				return
+			}
+			applyUsageAttribution(record, usageAttribution)
+			h.recordUsage(acc, *record)
 		},
 	}
 }

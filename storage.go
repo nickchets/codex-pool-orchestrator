@@ -21,6 +21,9 @@ const (
 	bucketUserDailyUsage     = "user_daily_usage"
 	bucketUserHourlyUsage    = "user_hourly_usage"
 	bucketGlobalHourlyUsage  = "global_hourly_usage"
+	bucketTokenUsage         = "token_usage"
+	bucketTokenDailyUsage    = "token_daily_usage"
+	bucketTokenHourlyUsage   = "token_hourly_usage"
 )
 
 // UserUsage tracks aggregate token usage per user.
@@ -63,6 +66,57 @@ type UserHourlyUsage struct {
 	ReasoningTokens int64  `json:"reasoning_tokens"`
 	BillableTokens  int64  `json:"billable_tokens"`
 	RequestCount    int64  `json:"request_count"`
+}
+
+// TokenUsage tracks aggregate token usage per virtual pool API key.
+type TokenUsage struct {
+	TokenID               string         `json:"token_id"`
+	TokenName             string         `json:"token_name,omitempty"`
+	UserID                string         `json:"user_id,omitempty"`
+	CredentialKind        CredentialKind `json:"credential_kind,omitempty"`
+	TotalInputTokens      int64          `json:"total_input_tokens"`
+	TotalCachedTokens     int64          `json:"total_cached_tokens"`
+	TotalOutputTokens     int64          `json:"total_output_tokens"`
+	TotalReasoningTokens  int64          `json:"total_reasoning_tokens"`
+	TotalBillableTokens   int64          `json:"total_billable_tokens"`
+	RequestCount          int64          `json:"request_count"`
+	StreamRequestCount    int64          `json:"stream_request_count"`
+	EstimatedRequestCount int64          `json:"estimated_request_count"`
+	FirstSeen             time.Time      `json:"first_seen"`
+	LastSeen              time.Time      `json:"last_seen"`
+	LastClientEndpoint    string         `json:"last_client_endpoint,omitempty"`
+	LastStatus            int            `json:"last_status,omitempty"`
+	LastErrorClass        string         `json:"last_error_class,omitempty"`
+}
+
+// TokenDailyUsage tracks per-day usage for a virtual pool API key.
+type TokenDailyUsage struct {
+	TokenID            string `json:"token_id"`
+	TokenName          string `json:"token_name,omitempty"`
+	UserID             string `json:"user_id,omitempty"`
+	Date               string `json:"date"`
+	BillableTokens     int64  `json:"billable_tokens"`
+	InputTokens        int64  `json:"input_tokens"`
+	OutputTokens       int64  `json:"output_tokens"`
+	CachedTokens       int64  `json:"cached_tokens"`
+	ReasoningTokens    int64  `json:"reasoning_tokens"`
+	RequestCount       int64  `json:"request_count"`
+	StreamRequestCount int64  `json:"stream_request_count"`
+}
+
+// TokenHourlyUsage tracks per-hour usage for a virtual pool API key.
+type TokenHourlyUsage struct {
+	TokenID            string `json:"token_id"`
+	TokenName          string `json:"token_name,omitempty"`
+	UserID             string `json:"user_id,omitempty"`
+	Hour               string `json:"hour"`
+	InputTokens        int64  `json:"input_tokens"`
+	CachedTokens       int64  `json:"cached_tokens"`
+	OutputTokens       int64  `json:"output_tokens"`
+	ReasoningTokens    int64  `json:"reasoning_tokens"`
+	BillableTokens     int64  `json:"billable_tokens"`
+	RequestCount       int64  `json:"request_count"`
+	StreamRequestCount int64  `json:"stream_request_count"`
 }
 
 type usageStore struct {
@@ -108,7 +162,7 @@ func newUsageStore(path string, retentionDays int) (*usageStore, error) {
 		return nil, err
 	}
 	if err := db.Update(func(tx *bbolt.Tx) error {
-		for _, bucket := range []string{bucketUsageRequests, bucketAccountUsage, bucketAccountUsageStates, bucketAccountRuntime, bucketPlanCapacity, bucketCapacitySamples, bucketUserUsage, bucketUserDailyUsage, bucketUserHourlyUsage, bucketGlobalHourlyUsage} {
+		for _, bucket := range []string{bucketUsageRequests, bucketAccountUsage, bucketAccountUsageStates, bucketAccountRuntime, bucketPlanCapacity, bucketCapacitySamples, bucketUserUsage, bucketUserDailyUsage, bucketUserHourlyUsage, bucketGlobalHourlyUsage, bucketTokenUsage, bucketTokenDailyUsage, bucketTokenHourlyUsage} {
 			if _, e := tx.CreateBucketIfNotExists([]byte(bucket)); e != nil {
 				return e
 			}
@@ -291,6 +345,12 @@ func (s *usageStore) record(u RequestUsage) error {
 			}
 		}
 
+		if strings.TrimSpace(u.TokenID) != "" {
+			if err := s.updateTokenUsage(tx, u); err != nil {
+				return err
+			}
+		}
+
 		// Store capacity sample if we have meaningful deltas
 		if u.BillableTokens > 0 && (primaryDelta > 0.001 || secondaryDelta > 0.001) {
 			sample := CapacitySample{
@@ -323,6 +383,115 @@ func (s *usageStore) record(u RequestUsage) error {
 		s.prune()
 	}
 	return nil
+}
+
+func (s *usageStore) updateTokenUsage(tx *bbolt.Tx, u RequestUsage) error {
+	tokenID := strings.TrimSpace(u.TokenID)
+	if tokenID == "" {
+		return nil
+	}
+
+	b := tx.Bucket([]byte(bucketTokenUsage))
+	var agg TokenUsage
+	if raw := b.Get([]byte(tokenID)); raw != nil {
+		_ = json.Unmarshal(raw, &agg)
+	}
+	if agg.FirstSeen.IsZero() {
+		agg.FirstSeen = u.Timestamp
+	}
+	agg.TokenID = tokenID
+	if strings.TrimSpace(u.TokenName) != "" {
+		agg.TokenName = strings.TrimSpace(u.TokenName)
+	}
+	if strings.TrimSpace(u.UserID) != "" {
+		agg.UserID = strings.TrimSpace(u.UserID)
+	}
+	if u.CredentialKind != "" {
+		agg.CredentialKind = u.CredentialKind
+	}
+	agg.TotalInputTokens += u.InputTokens
+	agg.TotalCachedTokens += u.CachedInputTokens
+	agg.TotalOutputTokens += u.OutputTokens
+	agg.TotalReasoningTokens += u.ReasoningTokens
+	agg.TotalBillableTokens += u.BillableTokens
+	agg.RequestCount++
+	if u.Stream {
+		agg.StreamRequestCount++
+	}
+	if u.Estimated {
+		agg.EstimatedRequestCount++
+	}
+	agg.LastSeen = u.Timestamp
+	if strings.TrimSpace(u.ClientEndpoint) != "" {
+		agg.LastClientEndpoint = strings.TrimSpace(u.ClientEndpoint)
+	}
+	if u.Status != 0 {
+		agg.LastStatus = u.Status
+	}
+	if strings.TrimSpace(u.ErrorClass) != "" {
+		agg.LastErrorClass = strings.TrimSpace(u.ErrorClass)
+	}
+	enc, err := json.Marshal(&agg)
+	if err != nil {
+		return err
+	}
+	if err := b.Put([]byte(tokenID), enc); err != nil {
+		return err
+	}
+
+	dateKey := u.Timestamp.Format("2006-01-02")
+	dailyBucket := tx.Bucket([]byte(bucketTokenDailyUsage))
+	dailyKey := fmt.Sprintf("%s|%s", tokenID, dateKey)
+	var daily TokenDailyUsage
+	if raw := dailyBucket.Get([]byte(dailyKey)); raw != nil {
+		_ = json.Unmarshal(raw, &daily)
+	}
+	daily.TokenID = tokenID
+	daily.TokenName = agg.TokenName
+	daily.UserID = agg.UserID
+	daily.Date = dateKey
+	daily.BillableTokens += u.BillableTokens
+	daily.InputTokens += u.InputTokens
+	daily.OutputTokens += u.OutputTokens
+	daily.CachedTokens += u.CachedInputTokens
+	daily.ReasoningTokens += u.ReasoningTokens
+	daily.RequestCount++
+	if u.Stream {
+		daily.StreamRequestCount++
+	}
+	enc, err = json.Marshal(&daily)
+	if err != nil {
+		return err
+	}
+	if err := dailyBucket.Put([]byte(dailyKey), enc); err != nil {
+		return err
+	}
+
+	hourKey := u.Timestamp.Format("2006-01-02T15")
+	hourlyBucket := tx.Bucket([]byte(bucketTokenHourlyUsage))
+	hourlyKey := fmt.Sprintf("%s|%s", tokenID, hourKey)
+	var hourly TokenHourlyUsage
+	if raw := hourlyBucket.Get([]byte(hourlyKey)); raw != nil {
+		_ = json.Unmarshal(raw, &hourly)
+	}
+	hourly.TokenID = tokenID
+	hourly.TokenName = agg.TokenName
+	hourly.UserID = agg.UserID
+	hourly.Hour = hourKey
+	hourly.InputTokens += u.InputTokens
+	hourly.CachedTokens += u.CachedInputTokens
+	hourly.OutputTokens += u.OutputTokens
+	hourly.ReasoningTokens += u.ReasoningTokens
+	hourly.BillableTokens += u.BillableTokens
+	hourly.RequestCount++
+	if u.Stream {
+		hourly.StreamRequestCount++
+	}
+	enc, err = json.Marshal(&hourly)
+	if err != nil {
+		return err
+	}
+	return hourlyBucket.Put([]byte(hourlyKey), enc)
 }
 
 func (s *usageStore) updatePlanCapacity(tx *bbolt.Tx, sample CapacitySample) {
@@ -697,6 +866,135 @@ func (s *usageStore) getAllUserUsage() ([]UserUsage, error) {
 		}
 	}
 	return users, nil
+}
+
+func (s *usageStore) getTokenUsage(tokenID string) (TokenUsage, error) {
+	var out TokenUsage
+	if s == nil || s.db == nil || strings.TrimSpace(tokenID) == "" {
+		return out, nil
+	}
+	tokenID = strings.TrimSpace(tokenID)
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(bucketTokenUsage))
+		if raw := b.Get([]byte(tokenID)); raw != nil {
+			return json.Unmarshal(raw, &out)
+		}
+		return nil
+	})
+	return out, err
+}
+
+func (s *usageStore) listTokenUsageByUser(userID string) ([]TokenUsage, error) {
+	var tokens []TokenUsage
+	if s == nil || s.db == nil || strings.TrimSpace(userID) == "" {
+		return tokens, nil
+	}
+	userID = strings.TrimSpace(userID)
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(bucketTokenUsage))
+		return b.ForEach(func(_, v []byte) error {
+			var u TokenUsage
+			if err := json.Unmarshal(v, &u); err == nil && u.UserID == userID {
+				tokens = append(tokens, u)
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i := 0; i < len(tokens); i++ {
+		for j := i + 1; j < len(tokens); j++ {
+			if tokens[j].TotalBillableTokens > tokens[i].TotalBillableTokens {
+				tokens[i], tokens[j] = tokens[j], tokens[i]
+			}
+		}
+	}
+	return tokens, nil
+}
+
+func (s *usageStore) getTokenDailyUsage(tokenID string, days int) ([]TokenDailyUsage, error) {
+	var daily []TokenDailyUsage
+	if s == nil || s.db == nil || strings.TrimSpace(tokenID) == "" {
+		return daily, nil
+	}
+	if days <= 0 {
+		days = 30
+	}
+	tokenID = strings.TrimSpace(tokenID)
+	today := time.Now()
+	dateKeys := make(map[string]bool)
+	for i := 0; i < days; i++ {
+		dateKeys[today.AddDate(0, 0, -i).Format("2006-01-02")] = true
+	}
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(bucketTokenDailyUsage))
+		prefix := []byte(tokenID + "|")
+		c := b.Cursor()
+		for k, v := c.Seek(prefix); k != nil && len(k) > len(prefix) && string(k[:len(prefix)]) == string(prefix); k, v = c.Next() {
+			dateStr := string(k[len(prefix):])
+			if dateKeys[dateStr] {
+				var d TokenDailyUsage
+				if err := json.Unmarshal(v, &d); err == nil {
+					daily = append(daily, d)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i := 0; i < len(daily); i++ {
+		for j := i + 1; j < len(daily); j++ {
+			if daily[j].Date > daily[i].Date {
+				daily[i], daily[j] = daily[j], daily[i]
+			}
+		}
+	}
+	return daily, nil
+}
+
+func (s *usageStore) getTokenHourlyUsage(tokenID string, hours int) ([]TokenHourlyUsage, error) {
+	var result []TokenHourlyUsage
+	if s == nil || s.db == nil || strings.TrimSpace(tokenID) == "" {
+		return result, nil
+	}
+	if hours <= 0 {
+		hours = 24
+	}
+	tokenID = strings.TrimSpace(tokenID)
+	now := time.Now()
+	hourKeys := make(map[string]bool)
+	for i := 0; i < hours; i++ {
+		hourKeys[now.Add(-time.Duration(i)*time.Hour).Format("2006-01-02T15")] = true
+	}
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(bucketTokenHourlyUsage))
+		prefix := []byte(tokenID + "|")
+		c := b.Cursor()
+		for k, v := c.Seek(prefix); k != nil && len(k) > len(prefix) && string(k[:len(prefix)]) == string(prefix); k, v = c.Next() {
+			hourStr := string(k[len(prefix):])
+			if hourKeys[hourStr] {
+				var h TokenHourlyUsage
+				if err := json.Unmarshal(v, &h); err == nil {
+					result = append(result, h)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i := 0; i < len(result); i++ {
+		for j := i + 1; j < len(result); j++ {
+			if result[j].Hour > result[i].Hour {
+				result[i], result[j] = result[j], result[i]
+			}
+		}
+	}
+	return result, nil
 }
 
 // purgeNonPoolUsers deletes all usage data for users not in the allowed set.

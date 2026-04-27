@@ -1175,6 +1175,7 @@ type copiedProxyResponseDeliveryOptions struct {
 	closeBodyAfterCopy    bool
 	captureResponseSample bool
 	existingSample        *bytes.Buffer
+	usageAttribution      UsageAttribution
 }
 
 type rateLimitResponseError struct {
@@ -1710,6 +1711,12 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 	respContentType := resp.Header.Get("Content-Type")
 	// Use provider's SSE detection logic.
 	isSSE := provider.DetectsSSE(opts.requestPath, respContentType)
+	usageAttribution := opts.usageAttribution
+	if usageAttribution.ClientEndpoint == "" {
+		usageAttribution.ClientEndpoint = opts.requestPath
+	}
+	usageAttribution.Stream = isSSE
+	usageAttribution.Status = resp.StatusCode
 	if trace != nil {
 		trace.noteResponse(resp.StatusCode, resp, isSSE)
 	}
@@ -1752,7 +1759,7 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 	}
 
 	if isSSE {
-		writer = h.wrapUsageInterceptWriter(
+		writer = h.wrapUsageInterceptWriterWithAttribution(
 			reqID,
 			writer,
 			provider,
@@ -1763,6 +1770,7 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 			headerSecondaryPct,
 			&managedStreamFailed,
 			&managedStreamFailureOnce,
+			usageAttribution,
 		)
 	}
 
@@ -1791,7 +1799,7 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 	if sampleBuf != nil {
 		respSample = sampleBuf.Bytes()
 	}
-	return h.finalizeCopiedProxyResponse(reqID, trace, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, opts.initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, copyErr, idleReader != nil, start, opts.debugLabel)
+	return h.finalizeCopiedProxyResponseWithAttribution(reqID, trace, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, opts.initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, copyErr, idleReader != nil, start, opts.debugLabel, usageAttribution)
 }
 
 func (h *proxyHandler) deliverBufferedAttemptSuccess(
@@ -1804,6 +1812,7 @@ func (h *proxyHandler) deliverBufferedAttemptSuccess(
 	requestPath string,
 	userID, conversationID string,
 	start time.Time,
+	usageAttribution UsageAttribution,
 ) bool {
 	if attemptSuccess == nil {
 		return false
@@ -1826,6 +1835,7 @@ func (h *proxyHandler) deliverBufferedAttemptSuccess(
 			logResponseDebug:      true,
 			closeBodyAfterCopy:    true,
 			existingSample:        attemptSuccess.sampleBuf,
+			usageAttribution:      usageAttribution,
 		},
 	)
 }
@@ -1842,6 +1852,7 @@ func (h *proxyHandler) deliverStreamedProxyResponse(
 	resp *http.Response,
 	needStatusBody bool,
 	start time.Time,
+	usageAttribution UsageAttribution,
 ) bool {
 	return h.deliverCopiedProxyResponse(
 		w,
@@ -1858,6 +1869,7 @@ func (h *proxyHandler) deliverStreamedProxyResponse(
 			debugLabel:            "streamed done",
 			flushAfterWrite:       needStatusBody,
 			captureResponseSample: true,
+			usageAttribution:      usageAttribution,
 		},
 	)
 }
@@ -2054,7 +2066,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		return
 	}
 
-	if !h.deliverBufferedAttemptSuccess(w, cancel, reqID, trace, provider, attemptSuccess, r.URL.Path, userID, conversationID, start) {
+	if !h.deliverBufferedAttemptSuccess(w, cancel, reqID, trace, provider, attemptSuccess, r.URL.Path, userID, conversationID, start, buildUsageAttribution(routePlan.Admission, r.URL.Path, false)) {
 		return
 	}
 	return
@@ -2534,7 +2546,7 @@ func (h *proxyHandler) proxyRequestStreamed(w http.ResponseWriter, r *http.Reque
 	if statusHandling.NeedStatusBody && !isManagedCodexAPIKeyAccount(acc) && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 		log.Printf("[%s] account %s got %d from %s, body=%s", reqID, acc.ID, resp.StatusCode, outReq.URL.Host, safeText(statusHandling.InspectedBody))
 	}
-	if !h.deliverStreamedProxyResponse(w, cancel, reqID, trace, r.URL.Path, provider, acc, userID, resp, statusHandling.NeedStatusBody, start) {
+	if !h.deliverStreamedProxyResponse(w, cancel, reqID, trace, r.URL.Path, provider, acc, userID, resp, statusHandling.NeedStatusBody, start, buildUsageAttribution(routePlan.Admission, r.URL.Path, false)) {
 		return
 	}
 }
@@ -2603,8 +2615,8 @@ func parseRetryAfter(h http.Header) (time.Duration, bool) {
 	return 0, false
 }
 
-func (h *proxyHandler) finalizeClaudePingTailCutoff(reqID string, trace *requestTrace, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte, start time.Time, debugLabel string, cutoff *claudePingTailCutoffError) bool {
-	h.finalizeProxyResponse(reqID, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample)
+func (h *proxyHandler) finalizeClaudePingTailCutoff(reqID string, trace *requestTrace, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte, start time.Time, debugLabel string, usageAttribution UsageAttribution, cutoff *claudePingTailCutoffError) bool {
+	h.finalizeProxyResponseWithAttribution(reqID, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, usageAttribution)
 	if h.metrics != nil {
 		h.metrics.inc(strconv.Itoa(statusCode), acc.ID)
 	}
@@ -2642,17 +2654,21 @@ func (h *proxyHandler) finalizeCopiedProxyCopyError(reqID string, trace *request
 }
 
 func (h *proxyHandler) finalizeCopiedProxyResponse(reqID string, trace *requestTrace, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte, copyErr error, logStreamError bool, start time.Time, debugLabel string) bool {
+	return h.finalizeCopiedProxyResponseWithAttribution(reqID, trace, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, copyErr, logStreamError, start, debugLabel, UsageAttribution{})
+}
+
+func (h *proxyHandler) finalizeCopiedProxyResponseWithAttribution(reqID string, trace *requestTrace, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte, copyErr error, logStreamError bool, start time.Time, debugLabel string, usageAttribution UsageAttribution) bool {
 	if acc == nil {
 		return false
 	}
 	if copyErr != nil {
 		if cutoff, ok := matchClaudePingTailCutoff(copyErr, acc); ok {
-			return h.finalizeClaudePingTailCutoff(reqID, trace, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, start, debugLabel, cutoff)
+			return h.finalizeClaudePingTailCutoff(reqID, trace, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, start, debugLabel, usageAttribution, cutoff)
 		}
 		return h.finalizeCopiedProxyCopyError(reqID, trace, acc, statusCode, isSSE, managedStreamFailed, copyErr, logStreamError)
 	}
 
-	h.finalizeProxyResponse(reqID, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample)
+	h.finalizeProxyResponseWithAttribution(reqID, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, usageAttribution)
 	if h.metrics != nil {
 		h.metrics.inc(strconv.Itoa(statusCode), acc.ID)
 	}
@@ -2666,14 +2682,22 @@ func (h *proxyHandler) finalizeCopiedProxyResponse(reqID string, trace *requestT
 }
 
 func (h *proxyHandler) finalizeProxyResponse(reqID string, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte) {
+	h.finalizeProxyResponseWithAttribution(reqID, provider, acc, userID, statusCode, isSSE, managedStreamFailed, initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, UsageAttribution{})
+}
+
+func (h *proxyHandler) finalizeProxyResponseWithAttribution(reqID string, provider Provider, acc *Account, userID string, statusCode int, isSSE bool, managedStreamFailed bool, initialConversationID string, headerPrimaryPct, headerSecondaryPct float64, respSample []byte, usageAttribution UsageAttribution) {
 	if acc == nil {
 		return
+	}
+	usageAttribution.Stream = isSSE
+	if usageAttribution.Status == 0 {
+		usageAttribution.Status = statusCode
 	}
 	if h.cfg.logBodies && len(respSample) > 0 {
 		log.Printf("[%s] response body sample (%d bytes): %s", reqID, len(respSample), safeText(respSample))
 	}
 	if !isSSE && len(respSample) > 0 {
-		h.updateUsageFromBody(provider, acc, userID, headerPrimaryPct, headerSecondaryPct, respSample)
+		h.updateUsageFromBodyWithAttribution(provider, acc, userID, headerPrimaryPct, headerSecondaryPct, respSample, usageAttribution)
 	}
 	if statusCode < 200 || statusCode >= 300 || managedStreamFailed {
 		return
@@ -3645,6 +3669,10 @@ func (h *proxyHandler) refreshAccountOnce(ctx context.Context, a *Account, force
 // - DailyBreakdownDay, fetchDailyBreakdownData, replaceUsageHeaders
 
 func (h *proxyHandler) updateUsageFromBody(provider Provider, a *Account, userID string, headerPrimaryPct, headerSecondaryPct float64, sample []byte) {
+	h.updateUsageFromBodyWithAttribution(provider, a, userID, headerPrimaryPct, headerSecondaryPct, sample, UsageAttribution{})
+}
+
+func (h *proxyHandler) updateUsageFromBodyWithAttribution(provider Provider, a *Account, userID string, headerPrimaryPct, headerSecondaryPct float64, sample []byte, usageAttribution UsageAttribution) {
 	if provider == nil || a == nil || len(sample) == 0 {
 		return
 	}
@@ -3674,7 +3702,12 @@ func (h *proxyHandler) updateUsageFromBody(provider Provider, a *Account, userID
 			persistUsageSnapshot(h.store, a)
 		}
 		if delta.Usage != nil {
-			h.recordUsage(a, *enrichUsageRecord(a, userID, delta.Usage, headerPrimaryPct, headerSecondaryPct))
+			record := enrichUsageRecord(a, userID, delta.Usage, headerPrimaryPct, headerSecondaryPct)
+			if record == nil {
+				continue
+			}
+			applyUsageAttribution(record, usageAttribution)
+			h.recordUsage(a, *record)
 		}
 	}
 }

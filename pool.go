@@ -497,6 +497,14 @@ type RequestUsage struct {
 	UserID            string
 	PromptCacheKey    string
 	RequestID         string
+	TokenID           string
+	TokenName         string
+	CredentialKind    CredentialKind
+	ClientEndpoint    string
+	Stream            bool
+	Status            int
+	Estimated         bool
+	ErrorClass        string
 	InputTokens       int64
 	CachedInputTokens int64
 	OutputTokens      int64
