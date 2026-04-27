@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -32,10 +33,10 @@ func TestGeminiProviderLoadAccountLoadsPersistedState(t *testing.T) {
 	rateLimitUntil := time.Date(2026, 3, 24, 12, 0, 0, 0, time.UTC)
 	healthCheckedAt := time.Date(2026, 3, 23, 11, 45, 0, 0, time.UTC)
 	lastHealthyAt := time.Date(2026, 3, 23, 10, 30, 0, 0, time.UTC)
-	modelResetAt := time.Date(2026, 4, 24, 16, 0, 0, 0, time.UTC)
-	raw := []byte(`{
-		"access_token": "access-token",
-		"refresh_token": "refresh-token",
+	modelResetAt := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
+	raw := []byte(fmt.Sprintf(`{
+		"access_token": "***",
+		"refresh_token": "***",
 		"client_id": "client-id",
 		"client_secret": "client-secret",
 		"operator_source": "manual_import",
@@ -44,7 +45,7 @@ func TestGeminiProviderLoadAccountLoadsPersistedState(t *testing.T) {
 		"last_refresh": "2026-03-23T10:00:00Z",
 		"rate_limit_until": "2026-03-24T12:00:00Z",
 		"gemini_model_rate_limit_reset_times": {
-			"gemini-3.1-pro-high": "2026-04-24T16:00:00Z"
+			"gemini-3.1-pro-high": %q
 		},
 		"health_status": "quota_exceeded",
 		"health_error": "quota",
@@ -52,7 +53,7 @@ func TestGeminiProviderLoadAccountLoadsPersistedState(t *testing.T) {
 		"last_healthy_at": "2026-03-23T10:30:00Z",
 		"disabled": true,
 		"dead": true
-	}`)
+	}`, modelResetAt.Format(time.RFC3339)))
 
 	acc, err := (&GeminiProvider{}).LoadAccount("gemini_test.json", "/tmp/gemini_test.json", raw)
 	if err != nil {
