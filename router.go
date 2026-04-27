@@ -37,6 +37,18 @@ func (h *proxyHandler) checkAdminAuth(w http.ResponseWriter, r *http.Request) bo
 	return true
 }
 
+// checkAdminOrLocalOperatorAuth accepts the normal admin token and, in local-only
+// deployments, the same trusted loopback operator posture used by /operator routes.
+func (h *proxyHandler) checkAdminOrLocalOperatorAuth(w http.ResponseWriter, r *http.Request) bool {
+	if h.matchesAdminToken(r) {
+		return true
+	}
+	if h.isTrustedLocalOperatorRequest(r) {
+		return true
+	}
+	return h.checkAdminAuth(w, r)
+}
+
 func (h *proxyHandler) matchesAdminToken(r *http.Request) bool {
 	if h == nil || h.cfg.adminToken == "" || r == nil {
 		return false
@@ -458,7 +470,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Pool user admin routes
 	if strings.HasPrefix(r.URL.Path, "/admin/pool-users") {
-		if !h.checkAdminAuth(w, r) {
+		if !h.checkAdminOrLocalOperatorAuth(w, r) {
 			return
 		}
 		h.servePoolUsersAdmin(w, r)

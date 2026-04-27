@@ -50,6 +50,20 @@ type PoolAPIToken struct {
 	NoLog               bool          `json:"no_log"`
 }
 
+// PoolAPITokenPolicy is the simple metadata policy attached to a virtual pool API key.
+// Enforcement is intentionally out of scope for Phase 3; this is persisted and exposed
+// to operators so future accounting/routing phases can consume it.
+type PoolAPITokenPolicy struct {
+	AllowedModels       []string      `json:"allowed_models,omitempty"`
+	AllowedAccountTypes []AccountType `json:"allowed_account_types,omitempty"`
+	MaxRPM              int           `json:"max_rpm,omitempty"`
+	MaxTPM              int           `json:"max_tpm,omitempty"`
+	MaxConcurrency      int           `json:"max_concurrency,omitempty"`
+	DailyBudget         float64       `json:"daily_budget,omitempty"`
+	MonthlyBudget       float64       `json:"monthly_budget,omitempty"`
+	NoLog               bool          `json:"no_log"`
+}
+
 // PoolUserStore manages pool user persistence.
 type PoolUserStore struct {
 	mu              sync.RWMutex
@@ -250,6 +264,12 @@ const poolAPIKeyPrefix = "sk-cpool-"
 // CreateAPIToken creates a virtual OpenAI-compatible API key for a pool user.
 // The raw key is returned only once and is never persisted.
 func (s *PoolUserStore) CreateAPIToken(userID, name string) (string, *PoolAPIToken, error) {
+	return s.CreateAPITokenWithPolicy(userID, name, PoolAPITokenPolicy{})
+}
+
+// CreateAPITokenWithPolicy creates a virtual OpenAI-compatible API key and persists
+// non-secret policy metadata. Policy enforcement is intentionally handled by later phases.
+func (s *PoolUserStore) CreateAPITokenWithPolicy(userID, name string, policy PoolAPITokenPolicy) (string, *PoolAPIToken, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -288,14 +308,22 @@ func (s *PoolUserStore) CreateAPIToken(userID, name string) (string, *PoolAPITok
 	}
 	now := time.Now().UTC()
 	meta := &PoolAPIToken{
-		ID:        kid,
-		KID:       kid,
-		UserID:    userID,
-		Name:      name,
-		Hash:      poolAPITokenHash(raw),
-		Prefix:    poolAPIKeyPrefix + kid,
-		Last4:     raw[len(raw)-4:],
-		CreatedAt: now,
+		ID:                  kid,
+		KID:                 kid,
+		UserID:              userID,
+		Name:                name,
+		Hash:                poolAPITokenHash(raw),
+		Prefix:              poolAPIKeyPrefix + kid,
+		Last4:               raw[len(raw)-4:],
+		CreatedAt:           now,
+		AllowedModels:       append([]string(nil), policy.AllowedModels...),
+		AllowedAccountTypes: append([]AccountType(nil), policy.AllowedAccountTypes...),
+		MaxRPM:              policy.MaxRPM,
+		MaxTPM:              policy.MaxTPM,
+		MaxConcurrency:      policy.MaxConcurrency,
+		DailyBudget:         policy.DailyBudget,
+		MonthlyBudget:       policy.MonthlyBudget,
+		NoLog:               policy.NoLog,
 	}
 	s.indexAPITokenLocked(meta)
 	if err := s.saveAPITokensLocked(); err != nil {

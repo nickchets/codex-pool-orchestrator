@@ -297,8 +297,9 @@ func main() {
 
 	// Initialize pool users store if configured
 	var poolUsers *PoolUserStore
-	// Pool users require a JWT secret. Admin token or friend code provides access control.
-	if (cfg.adminToken != "" || cfg.friendCode != "") && getPoolJWTSecret() != "" {
+	// Pool users require a JWT secret. Access is guarded by admin token,
+	// friend-code flows, or trusted loopback local-operator checks.
+	if getPoolJWTSecret() != "" {
 		poolUsersPath := getPoolUsersPath()
 		var err error
 		poolUsers, err = newPoolUserStore(poolUsersPath)

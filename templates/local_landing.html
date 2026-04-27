@@ -491,6 +491,7 @@
         }
 
         .input-row input,
+        .input-row select,
         .input-row textarea {
             flex: 1 1 220px;
             min-width: 0;
@@ -509,6 +510,7 @@
         }
 
         .input-row input:focus,
+        .input-row select:focus,
         .input-row textarea:focus {
             outline: 0;
             border-color: rgba(142, 197, 255, 0.4);
@@ -1113,6 +1115,41 @@
                                 </div>
                             </form>
                             <div id="openai-api-key-add-status" class="status-line"></div>
+                        </div>
+
+                        <div class="action-card" id="virtual-openai-api-key-manager">
+                            <p><strong>Virtual OpenAI API Keys</strong> issue pool-user-scoped <code>sk-cpool</code> keys for OpenAI-compatible clients. Raw keys are only displayed immediately after creation.</p>
+                            <form onsubmit="event.preventDefault(); createVirtualOpenAIAPIKey();">
+                                <div class="input-row">
+                                    <select id="pool-api-key-user-select" aria-label="Pool user"></select>
+                                    <input id="pool-api-key-name-input" type="text" placeholder="Key name (for example: laptop)" autocomplete="off" spellcheck="false">
+                                    <button id="pool-api-key-create-btn" class="action-btn" type="submit">Create API Key</button>
+                                </div>
+                            </form>
+                            <div id="pool-api-key-create-status" class="status-line"></div>
+                            <div id="pool-api-key-create-result" style="display: none; margin-top: 12px;">
+                                <div class="code-shell">
+                                    <button id="copy-created-pool-api-key" class="copy-btn" onclick="copyToClipboard('pool-api-key-created-value', this)">Copy</button>
+                                    <pre id="pool-api-key-created-value"></pre>
+                                </div>
+                                <div class="status-line">Copy this value now. It will not appear in lists or status payloads again.</div>
+                            </div>
+                            <div class="table-shell" style="margin-top: 12px;">
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>Name</th>
+                                            <th class="desktop-only">Prefix</th>
+                                            <th>Last4</th>
+                                            <th class="desktop-only">Last Used</th>
+                                            <th>State</th>
+                                            <th>Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="pool-api-keys-body"></tbody>
+                                </table>
+                            </div>
+                            <div id="pool-api-keys-empty" class="empty-state"></div>
                         </div>
                     </div>
                 </section>
@@ -3022,6 +3059,198 @@ python3 -m webbrowser '{{.BaseURL}}/'
             });
         }
 
+        async function fetchJSONWithTextError(url, options = {}) {
+            const response = await fetch(url, options);
+            const text = await response.text();
+            let payload = null;
+            try {
+                payload = text ? JSON.parse(text) : null;
+            } catch (error) {
+                payload = null;
+            }
+            if (!response.ok) {
+                throw new Error((payload && payload.error) || text || ('Request failed: ' + response.status));
+            }
+            return payload || {};
+        }
+
+        function selectedPoolUserIDForAPIKeys() {
+            const select = document.getElementById('pool-api-key-user-select');
+            return String(select && select.value || '').trim();
+        }
+
+        function renderVirtualOpenAIAPIKeys(userID, keys) {
+            const body = document.getElementById('pool-api-keys-body');
+            const empty = document.getElementById('pool-api-keys-empty');
+            if (!body || !empty) {
+                return;
+            }
+            const rows = Array.isArray(keys) ? keys : [];
+            if (!userID) {
+                body.innerHTML = '';
+                empty.textContent = 'No pool user selected. Create or select a pool user first.';
+                return;
+            }
+            if (rows.length === 0) {
+                body.innerHTML = '';
+                empty.textContent = 'No virtual OpenAI API keys yet for this pool user.';
+                return;
+            }
+            empty.textContent = '';
+            body.innerHTML = rows.map((key) => {
+                const disabled = Boolean(key && key.disabled);
+                const tokenID = String((key && key.id) || '');
+                return `
+                    <tr>
+                        <td>${escapeHTML((key && key.name) || 'default')}</td>
+                        <td class="desktop-only mono">${escapeHTML((key && key.prefix) || 'sk-cpool')}</td>
+                        <td class="mono">${escapeHTML((key && key.last4) || '')}</td>
+                        <td class="desktop-only">${key && key.last_used_at ? escapeHTML(formatDateTime(key.last_used_at)) : 'Never'}</td>
+                        <td><span class="badge tone-${disabled ? 'warning' : 'success'}">${disabled ? 'disabled' : 'active'}</span></td>
+                        <td>${disabled ? '—' : `<button class="inline-btn danger-inline" type="button" onclick="disableVirtualOpenAIAPIKey('${escapeHTML(userID)}', '${escapeHTML(tokenID)}', this)">Disable</button>`}</td>
+                    </tr>`;
+            }).join('');
+        }
+
+        async function loadVirtualOpenAIAPIKeys(userID) {
+            const status = document.getElementById('pool-api-key-create-status');
+            if (!userID) {
+                renderVirtualOpenAIAPIKeys('', []);
+                return;
+            }
+            try {
+                const payload = await fetchJSONWithTextError('/admin/pool-users/' + encodeURIComponent(userID) + '/api-keys', {
+                    headers: { 'Accept': 'application/json' },
+                });
+                renderVirtualOpenAIAPIKeys(userID, payload.api_keys || []);
+            } catch (error) {
+                renderVirtualOpenAIAPIKeys(userID, []);
+                if (status) {
+                    status.style.color = 'var(--warning)';
+                    status.textContent = 'Could not load virtual API keys: ' + (error && error.message ? error.message : error);
+                }
+            }
+        }
+
+        async function loadVirtualOpenAIAPIKeyManager() {
+            const select = document.getElementById('pool-api-key-user-select');
+            const status = document.getElementById('pool-api-key-create-status');
+            if (!select) {
+                return;
+            }
+            try {
+                const payload = await fetchJSONWithTextError('/admin/pool-users', {
+                    headers: { 'Accept': 'application/json' },
+                });
+                const users = Array.isArray(payload.users) ? payload.users : [];
+                select.innerHTML = users.map((user) => {
+                    const id = String((user && user.id) || '');
+                    const label = String((user && user.email) || id || 'pool user');
+                    return `<option value="${escapeHTML(id)}">${escapeHTML(label)} (${escapeHTML(clipOpaque(id))})</option>`;
+                }).join('');
+                if (users.length === 0) {
+                    select.innerHTML = '<option value="">No pool users</option>';
+                    renderVirtualOpenAIAPIKeys('', []);
+                    if (status) {
+                        status.style.color = 'var(--muted)';
+                        status.textContent = 'Create a pool user before issuing virtual OpenAI API keys.';
+                    }
+                    return;
+                }
+                if (status) {
+                    status.textContent = '';
+                }
+                select.onchange = () => void loadVirtualOpenAIAPIKeys(selectedPoolUserIDForAPIKeys());
+                await loadVirtualOpenAIAPIKeys(selectedPoolUserIDForAPIKeys());
+            } catch (error) {
+                select.innerHTML = '<option value="">Unavailable</option>';
+                renderVirtualOpenAIAPIKeys('', []);
+                if (status) {
+                    status.style.color = 'var(--warning)';
+                    status.textContent = 'Virtual API key manager needs local operator or admin access: ' + (error && error.message ? error.message : error);
+                }
+            }
+        }
+
+        async function createVirtualOpenAIAPIKey() {
+            const userID = selectedPoolUserIDForAPIKeys();
+            const nameInput = document.getElementById('pool-api-key-name-input');
+            const button = document.getElementById('pool-api-key-create-btn');
+            const status = document.getElementById('pool-api-key-create-status');
+            const result = document.getElementById('pool-api-key-create-result');
+            const createdValue = document.getElementById('pool-api-key-created-value');
+            if (!userID || !button || !status || !createdValue) {
+                if (status) {
+                    status.style.color = 'var(--danger)';
+                    status.textContent = 'Select a pool user first.';
+                }
+                return;
+            }
+            const name = String(nameInput && nameInput.value || '').trim() || 'default';
+            button.disabled = true;
+            status.style.color = 'var(--muted)';
+            status.textContent = 'Creating virtual OpenAI API key...';
+            if (result) {
+                result.style.display = 'none';
+            }
+            createdValue.textContent = '';
+            try {
+                const payload = await fetchJSONWithTextError('/admin/pool-users/' + encodeURIComponent(userID) + '/api-keys', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                    body: JSON.stringify({ name: name }),
+                });
+                createdValue.textContent = String(payload.api_key || '');
+                if (result) {
+                    result.style.display = payload.api_key ? 'block' : 'none';
+                }
+                if (nameInput) {
+                    nameInput.value = '';
+                }
+                status.style.color = 'var(--success)';
+                status.textContent = 'Created ' + String(payload.key && payload.key.prefix || 'sk-cpool') + '. Copy it now; it will not be shown again.';
+                await loadVirtualOpenAIAPIKeys(userID);
+            } catch (error) {
+                status.style.color = 'var(--danger)';
+                status.textContent = 'Failed to create virtual API key: ' + (error && error.message ? error.message : error);
+            } finally {
+                button.disabled = false;
+            }
+        }
+
+        async function disableVirtualOpenAIAPIKey(userID, tokenID, button) {
+            const status = document.getElementById('pool-api-key-create-status');
+            if (!userID || !tokenID) {
+                return;
+            }
+            if (button) {
+                button.disabled = true;
+            }
+            if (status) {
+                status.style.color = 'var(--muted)';
+                status.textContent = 'Disabling virtual API key...';
+            }
+            try {
+                await fetchJSONWithTextError('/admin/pool-users/' + encodeURIComponent(userID) + '/api-keys/' + encodeURIComponent(tokenID) + '/disable', {
+                    method: 'POST',
+                    headers: { 'Accept': 'application/json' },
+                });
+                if (status) {
+                    status.style.color = 'var(--success)';
+                    status.textContent = 'Disabled virtual API key ' + tokenID + '.';
+                }
+                await loadVirtualOpenAIAPIKeys(userID);
+            } catch (error) {
+                if (status) {
+                    status.style.color = 'var(--danger)';
+                    status.textContent = 'Failed to disable virtual API key: ' + (error && error.message ? error.message : error);
+                }
+                if (button) {
+                    button.disabled = false;
+                }
+            }
+        }
+
         function populateSetupSnippets() {
             document.getElementById('codex-one-liner').textContent =
 `mkdir -p ~/.codex && cat > ~/.codex/config.toml << 'EOF'
@@ -3921,6 +4150,7 @@ opencode run -m codex-pool/gemini-3.1-pro-high "Reply with exactly OK."
             switchProvider(readActiveProvider());
             setMobileSectionDefaults();
             populateSetupSnippets();
+            void loadVirtualOpenAIAPIKeyManager();
             void loadDashboard();
         });
     </script>
