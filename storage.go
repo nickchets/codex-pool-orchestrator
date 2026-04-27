@@ -1005,48 +1005,140 @@ func (s *usageStore) purgeNonPoolUsers(allowedUserIDs map[string]bool) (int, err
 	}
 	deleted := 0
 	err := s.db.Update(func(tx *bbolt.Tx) error {
-		// Purge from user_usage bucket (key = userID)
-		b := tx.Bucket([]byte(bucketUserUsage))
-		var toDelete [][]byte
-		_ = b.ForEach(func(k, v []byte) error {
-			if !allowedUserIDs[string(k)] {
-				toDelete = append(toDelete, append([]byte{}, k...))
+		isAllowed := func(userID string) bool {
+			userID = strings.TrimSpace(userID)
+			return userID != "" && allowedUserIDs[userID]
+		}
+		purgeBucket := func(bucket *bbolt.Bucket, shouldDelete func(k, v []byte) bool) error {
+			if bucket == nil {
+				return nil
+			}
+			var toDelete [][]byte
+			if err := bucket.ForEach(func(k, v []byte) error {
+				if shouldDelete(k, v) {
+					toDelete = append(toDelete, append([]byte{}, k...))
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			for _, k := range toDelete {
+				if err := bucket.Delete(k); err != nil {
+					return err
+				}
+				deleted++
 			}
 			return nil
-		})
-		for _, k := range toDelete {
-			_ = b.Delete(k)
-			deleted++
+		}
+
+		// Capture token ownership before deleting token_usage rows so legacy
+		// daily/hourly rows that omit user_id can still be attributed by token ID.
+		tokenOwners := make(map[string]string)
+		tokenUsageBucket := tx.Bucket([]byte(bucketTokenUsage))
+		if tokenUsageBucket != nil {
+			if err := tokenUsageBucket.ForEach(func(k, v []byte) error {
+				var usage TokenUsage
+				if err := json.Unmarshal(v, &usage); err != nil {
+					return nil
+				}
+				tokenID := strings.TrimSpace(usage.TokenID)
+				if tokenID == "" {
+					tokenID = string(k)
+				}
+				tokenOwners[tokenID] = strings.TrimSpace(usage.UserID)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+
+		userIDFromKey := func(k []byte) string {
+			parts := strings.SplitN(string(k), "|", 2)
+			if len(parts) == 0 {
+				return ""
+			}
+			return parts[0]
+		}
+		tokenIDFromKey := func(k []byte) string {
+			parts := strings.SplitN(string(k), "|", 2)
+			if len(parts) == 0 {
+				return ""
+			}
+			return parts[0]
+		}
+		tokenDailyOwner := func(k, v []byte) string {
+			var usage TokenDailyUsage
+			if err := json.Unmarshal(v, &usage); err == nil {
+				if userID := strings.TrimSpace(usage.UserID); userID != "" {
+					return userID
+				}
+				if tokenID := strings.TrimSpace(usage.TokenID); tokenID != "" {
+					return tokenOwners[tokenID]
+				}
+			}
+			return tokenOwners[tokenIDFromKey(k)]
+		}
+		tokenHourlyOwner := func(k, v []byte) string {
+			var usage TokenHourlyUsage
+			if err := json.Unmarshal(v, &usage); err == nil {
+				if userID := strings.TrimSpace(usage.UserID); userID != "" {
+					return userID
+				}
+				if tokenID := strings.TrimSpace(usage.TokenID); tokenID != "" {
+					return tokenOwners[tokenID]
+				}
+			}
+			return tokenOwners[tokenIDFromKey(k)]
+		}
+
+		// Purge from user_usage bucket (key = userID)
+		if err := purgeBucket(tx.Bucket([]byte(bucketUserUsage)), func(k, _ []byte) bool {
+			return !isAllowed(string(k))
+		}); err != nil {
+			return err
 		}
 
 		// Purge from user_daily_usage bucket (key = userID|date)
-		daily := tx.Bucket([]byte(bucketUserDailyUsage))
-		toDelete = toDelete[:0]
-		_ = daily.ForEach(func(k, v []byte) error {
-			parts := strings.SplitN(string(k), "|", 2)
-			if len(parts) >= 1 && !allowedUserIDs[parts[0]] {
-				toDelete = append(toDelete, append([]byte{}, k...))
-			}
-			return nil
-		})
-		for _, k := range toDelete {
-			_ = daily.Delete(k)
-			deleted++
+		if err := purgeBucket(tx.Bucket([]byte(bucketUserDailyUsage)), func(k, _ []byte) bool {
+			return !isAllowed(userIDFromKey(k))
+		}); err != nil {
+			return err
 		}
 
 		// Purge from user_hourly_usage bucket (key = userID|hour|type)
-		hourly := tx.Bucket([]byte(bucketUserHourlyUsage))
-		toDelete = toDelete[:0]
-		_ = hourly.ForEach(func(k, v []byte) error {
-			parts := strings.SplitN(string(k), "|", 2)
-			if len(parts) >= 1 && !allowedUserIDs[parts[0]] {
-				toDelete = append(toDelete, append([]byte{}, k...))
+		if err := purgeBucket(tx.Bucket([]byte(bucketUserHourlyUsage)), func(k, _ []byte) bool {
+			return !isAllowed(userIDFromKey(k))
+		}); err != nil {
+			return err
+		}
+
+		// Purge from token_usage bucket (key = tokenID, value includes user_id)
+		if err := purgeBucket(tokenUsageBucket, func(_, v []byte) bool {
+			var usage TokenUsage
+			if err := json.Unmarshal(v, &usage); err != nil {
+				return true
 			}
-			return nil
-		})
-		for _, k := range toDelete {
-			_ = hourly.Delete(k)
-			deleted++
+			return !isAllowed(usage.UserID)
+		}); err != nil {
+			return err
+		}
+
+		// Purge from token_daily_usage bucket (key = tokenID|date).
+		// Current rows include user_id in the value; legacy rows are inferred
+		// from token_usage ownership by token ID.
+		if err := purgeBucket(tx.Bucket([]byte(bucketTokenDailyUsage)), func(k, v []byte) bool {
+			return !isAllowed(tokenDailyOwner(k, v))
+		}); err != nil {
+			return err
+		}
+
+		// Purge from token_hourly_usage bucket (key = tokenID|hour).
+		// Current rows include user_id in the value; legacy rows are inferred
+		// from token_usage ownership by token ID.
+		if err := purgeBucket(tx.Bucket([]byte(bucketTokenHourlyUsage)), func(k, v []byte) bool {
+			return !isAllowed(tokenHourlyOwner(k, v))
+		}); err != nil {
+			return err
 		}
 
 		return nil
