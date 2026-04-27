@@ -50,9 +50,9 @@ type PoolAPIToken struct {
 	NoLog               bool          `json:"no_log"`
 }
 
-// PoolAPITokenPolicy is the simple metadata policy attached to a virtual pool API key.
-// Enforcement is intentionally out of scope for Phase 3; this is persisted and exposed
-// to operators so future accounting/routing phases can consume it.
+// PoolAPITokenPolicy is the metadata policy attached to a virtual pool API key.
+// OpenAI-compatible virtual-key request admission enforces these fields before
+// requests are sent upstream.
 type PoolAPITokenPolicy struct {
 	AllowedModels       []string      `json:"allowed_models,omitempty"`
 	AllowedAccountTypes []AccountType `json:"allowed_account_types,omitempty"`
@@ -268,7 +268,7 @@ func (s *PoolUserStore) CreateAPIToken(userID, name string) (string, *PoolAPITok
 }
 
 // CreateAPITokenWithPolicy creates a virtual OpenAI-compatible API key and persists
-// non-secret policy metadata. Policy enforcement is intentionally handled by later phases.
+// non-secret policy metadata for admission checks and operator visibility.
 func (s *PoolUserStore) CreateAPITokenWithPolicy(userID, name string, policy PoolAPITokenPolicy) (string, *PoolAPIToken, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

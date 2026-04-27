@@ -271,6 +271,15 @@ func (h *proxyHandler) maybeServeCachedCodexModels(w http.ResponseWriter, r *htt
 	trace := requestTraceFromContext(r.Context())
 
 	if isOpenAICompatibleClientTraffic(admission, r.URL.Path) && strings.TrimSpace(r.URL.Path) == "/v1/models" {
+		policyReservation, ok := h.reservePoolAPITokenPolicy(w, RoutePlan{
+			Admission:                admission,
+			Shape:                    RequestShape{Path: r.URL.Path},
+			IsOpenAICompatibleClient: true,
+		}, nil)
+		if !ok {
+			return true
+		}
+		defer policyReservation.Release()
 		if trace != nil {
 			trace.noteCacheDecision(AccountTypeCodex, nil, "openai_compatible_synthetic", 0, 0, nil)
 		}

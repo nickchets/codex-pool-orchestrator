@@ -41,29 +41,30 @@ type config struct {
 	disableRefresh  bool
 	refreshProxyURL string // HTTP proxy URL for refresh operations
 
-	debug                      bool
-	logBodies                  bool
-	bodyLogLimit               int64
-	traceRequests              bool
-	tracePackets               bool
-	tracePayloads              bool
-	tracePayloadLimit          int
-	traceStallGap              time.Duration
-	forceCodexRequiredPlan     string
-	gitLabCodexDiscoveryModels []string
-	maxInMemoryBodyBytes       int64
-	flushInterval              time.Duration
-	usageRefresh               time.Duration
-	maxAttempts                int
-	storePath                  string
-	retentionDays              int
-	friendCode                 string
-	adminToken                 string
-	requestTimeout             time.Duration // Timeout for non-streaming requests (0 = no timeout)
-	streamTimeout              time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
-	streamIdleTimeout          time.Duration // Kill SSE streams idle for this long (0 = no idle timeout)
-	claudePingTailTimeout      time.Duration // Cut GitLab Claude SSE tails that degrade into ping-only keepalives after useful output
-	tierThreshold              float64       // Secondary usage % at which we stop preferring a tier (default 0.15)
+	debug                         bool
+	logBodies                     bool
+	bodyLogLimit                  int64
+	traceRequests                 bool
+	tracePackets                  bool
+	tracePayloads                 bool
+	tracePayloadLimit             int
+	traceStallGap                 time.Duration
+	forceCodexRequiredPlan        string
+	gitLabCodexDiscoveryModels    []string
+	maxInMemoryBodyBytes          int64
+	flushInterval                 time.Duration
+	usageRefresh                  time.Duration
+	maxAttempts                   int
+	storePath                     string
+	retentionDays                 int
+	friendCode                    string
+	adminToken                    string
+	requestTimeout                time.Duration // Timeout for non-streaming requests (0 = no timeout)
+	streamTimeout                 time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
+	streamIdleTimeout             time.Duration // Kill SSE streams idle for this long (0 = no idle timeout)
+	claudePingTailTimeout         time.Duration // Cut GitLab Claude SSE tails that degrade into ping-only keepalives after useful output
+	tierThreshold                 float64       // Secondary usage % at which we stop preferring a tier (default 0.15)
+	poolAPIDefaultMaxOutputTokens int           // Default output-token reservation for virtual pool API key TPM policy
 }
 
 func getenv(key, def string) string {
@@ -150,6 +151,7 @@ func buildConfig() config {
 			cfg.maxInMemoryBodyBytes = n
 		}
 	}
+	cfg.poolAPIDefaultMaxOutputTokens = getConfigInt("PROXY_POOL_API_DEFAULT_MAX_OUTPUT_TOKENS", fileCfg.PoolAPIDefaultMaxOutputTokens, int(defaultPoolAPIMaxOutputReservation))
 	cfg.flushInterval = 200 * time.Millisecond
 	if v := getenv("PROXY_FLUSH_INTERVAL_MS", ""); v != "" {
 		if ms, err := parseInt64(v); err == nil && ms > 0 {
@@ -379,6 +381,8 @@ type proxyHandler struct {
 	startTime         time.Time
 	codexModels       codexModelsCache
 	gitlabCodexModels codexModelsCache
+	poolAPIPolicyMu   sync.Mutex
+	poolAPIPolicies   *poolAPIPolicyManager
 
 	// Rate limiting for token refresh operations
 	refreshMu       sync.Mutex
@@ -1912,6 +1916,11 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			http.Error(w, err.Error(), statusCode)
 			return
 		}
+		policyReservation, ok := h.reservePoolAPITokenPolicy(w, routePlan, nil)
+		if !ok {
+			return
+		}
+		defer policyReservation.Release()
 		if !h.ensureCodexRouteReady(w, reqID, routePlan, trace) {
 			return
 		}
@@ -1953,6 +1962,11 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 			http.Error(w, err.Error(), statusCode)
 			return
 		}
+		policyReservation, ok := h.reservePoolAPITokenPolicy(w, routePlan, nil)
+		if !ok {
+			return
+		}
+		defer policyReservation.Release()
 		if !h.ensureCodexRouteReady(w, reqID, routePlan, trace) {
 			return
 		}
@@ -1989,6 +2003,11 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		writeOpenAICompatibleModelAllowlistError(w, err)
 		return
 	}
+	policyReservation, ok := h.reservePoolAPITokenPolicy(w, routePlan, requestInspect)
+	if !ok {
+		return
+	}
+	defer policyReservation.Release()
 	statusCode := 0
 	if routePlan.DebugGeminiSeatID, statusCode, err = h.resolveDebugGeminiSeatOverride(r, routePlan.AccountType); err != nil {
 		http.Error(w, err.Error(), statusCode)

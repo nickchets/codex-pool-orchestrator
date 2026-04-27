@@ -38,6 +38,7 @@ type AdmissionResult struct {
 	TokenID            string
 	TokenName          string
 	TokenAllowedModels []string
+	TokenPolicy        PoolAPITokenPolicy
 	CredentialKind     CredentialKind
 	StatusCode         int
 	Message            string
@@ -166,6 +167,7 @@ func (h *proxyHandler) admitPoolAPIToken(authHeader, reqID string) (AdmissionRes
 		TokenID:            tok.ID,
 		TokenName:          tok.Name,
 		TokenAllowedModels: append([]string(nil), tok.AllowedModels...),
+		TokenPolicy:        poolAPITokenPolicyFromToken(tok),
 		CredentialKind:     CredentialKindOpenAICompatiblePoolKey,
 	}, true
 }
