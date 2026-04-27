@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -120,6 +121,11 @@ func phase9SSETextDelta(text string) string {
 		fmt.Sprintf("data: {\"type\":\"response.output_text.delta\",\"delta\":%q}\n\n", text)
 }
 
+func phase9SSEAudioDelta(audio string) string {
+	return "event: response.output_audio.delta\n" +
+		fmt.Sprintf("data: {\"type\":\"response.output_audio.delta\",\"delta\":%q}\n\n", audio)
+}
+
 func phase9SSEUsageDone(inputTokens, outputTokens int64) string {
 	return "event: response.completed\n" +
 		fmt.Sprintf("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":%d,\"output_tokens\":%d}}}\n\n", inputTokens, outputTokens) +
@@ -143,6 +149,29 @@ func phase9SSEFailureResponse(req *http.Request, body string) *http.Response {
 		Body:       newPhase8FailingReadCloser(body, io.ErrUnexpectedEOF),
 		Request:    req,
 	}
+}
+
+type phase9CancelOnErrorReadCloser struct {
+	rc     io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (rc *phase9CancelOnErrorReadCloser) Read(p []byte) (int, error) {
+	n, err := rc.rc.Read(p)
+	if err != nil && rc.cancel != nil {
+		rc.cancel()
+	}
+	return n, err
+}
+
+func (rc *phase9CancelOnErrorReadCloser) Close() error {
+	return rc.rc.Close()
+}
+
+func phase9SSECancelingFailureResponse(req *http.Request, body string, cancel context.CancelFunc) *http.Response {
+	resp := phase9SSEFailureResponse(req, body)
+	resp.Body = &phase9CancelOnErrorReadCloser{rc: resp.Body, cancel: cancel}
+	return resp
 }
 
 func phase9SSEOKResponse(req *http.Request, body string) *http.Response {
@@ -252,6 +281,167 @@ func TestPhase9PlainTextContinuationBridgesSecondSeatAndDeduplicatesPrefix(t *te
 	}
 	if rows[0].Estimated || !rows[0].ContinuationUsed || rows[0].SegmentCount != 2 || rows[0].AccountID != "seat-b" {
 		t.Fatalf("expected authoritative continuation usage on second seat, got %+v", rows[0])
+	}
+}
+
+func TestPhase9IncompleteSSEFrameDisablesContinuation(t *testing.T) {
+	store := testUsageStore(t)
+	seatA := newPhase9CodexContinuationAccount("seat-a", "token-a")
+	seatB := newPhase9CodexContinuationAccount("seat-b", "token-b")
+	var calls int64
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		call := atomic.AddInt64(&calls, 1)
+		if call != 1 {
+			t.Fatalf("incomplete SSE tail should not make continuation upstream call #%d", call)
+		}
+		body := phase9SSETextDelta("Hello ") + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial"
+		return phase9SSEFailureResponse(req, body), nil
+	}), seatA, seatB)
+	h.store = store
+	h.cfg.streamContinuation = streamContinuationModePlainTextOnly
+	h.cfg.streamContinuationMaxAttempts = 1
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, phase9StreamingRequest(t, rawKey, `{"model":"gpt-4.1-mini","input":"say hello","stream":true}`))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Hello ") || !strings.Contains(body, "\"delta\":\"partial") {
+		t.Fatalf("client did not receive first segment and partial frame: %q", body)
+	}
+	if strings.Contains(body, "continuation segment") {
+		t.Fatalf("incomplete SSE frame must not be followed by continuation comment: %q", body)
+	}
+	if got := atomic.LoadInt64(&calls); got != 1 {
+		t.Fatalf("upstream calls=%d want 1", got)
+	}
+
+	rows := readStoredRequestUsageRows(t, store)
+	if len(rows) != 1 || !rows[0].Estimated || rows[0].ContinuationUsed {
+		t.Fatalf("expected Phase8 partial usage without continuation, got %+v", rows)
+	}
+}
+
+func TestPhase9ContinuationUnsafeAudioEventDisablesContinuation(t *testing.T) {
+	store := testUsageStore(t)
+	seatA := newPhase9CodexContinuationAccount("seat-a", "token-a")
+	seatB := newPhase9CodexContinuationAccount("seat-b", "token-b")
+	var calls int64
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		call := atomic.AddInt64(&calls, 1)
+		if call != 1 {
+			t.Fatalf("unsafe audio event should not make continuation upstream call #%d", call)
+		}
+		return phase9SSEFailureResponse(req, phase9SSETextDelta("Hello ")+phase9SSEAudioDelta("AAAA")), nil
+	}), seatA, seatB)
+	h.store = store
+	h.cfg.streamContinuation = streamContinuationModePlainTextOnly
+	h.cfg.streamContinuationMaxAttempts = 1
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, phase9StreamingRequest(t, rawKey, `{"model":"gpt-4.1-mini","input":"say hello","stream":true}`))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "continuation segment") {
+		t.Fatalf("unsafe multimodal stream unexpectedly emitted continuation marker: %q", rr.Body.String())
+	}
+	if got := atomic.LoadInt64(&calls); got != 1 {
+		t.Fatalf("upstream calls=%d want 1", got)
+	}
+
+	rows := readStoredRequestUsageRows(t, store)
+	if len(rows) != 1 || !rows[0].Estimated || rows[0].ContinuationUsed {
+		t.Fatalf("expected Phase8 partial usage without continuation, got %+v", rows)
+	}
+}
+
+func TestPhase9CanceledContinuationContextFallsBackWithoutTryingNextSeat(t *testing.T) {
+	store := testUsageStore(t)
+	seatA := newPhase9CodexContinuationAccount("seat-a", "token-a")
+	seatB := newPhase9CodexContinuationAccount("seat-b", "token-b")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls int64
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		call := atomic.AddInt64(&calls, 1)
+		if call != 1 {
+			t.Fatalf("canceled continuation context should not make upstream call #%d", call)
+		}
+		return phase9SSECancelingFailureResponse(req, phase9SSETextDelta("Hello canceled"), cancel), nil
+	}), seatA, seatB)
+	h.store = store
+	h.cfg.streamContinuation = streamContinuationModePlainTextOnly
+	h.cfg.streamContinuationMaxAttempts = 1
+
+	req := phase9StreamingRequest(t, rawKey, `{"model":"gpt-4.1-mini","input":"say hello","stream":true}`).WithContext(ctx)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "continuation segment") {
+		t.Fatalf("canceled continuation context unexpectedly emitted continuation marker: %q", rr.Body.String())
+	}
+	if got := atomic.LoadInt64(&calls); got != 1 {
+		t.Fatalf("upstream calls=%d want 1", got)
+	}
+	snapB := snapshotProxyTestAccount(seatB)
+	if !snapB.RateLimitUntil.IsZero() || snapB.HealthStatus == "error" || snapB.Penalty != 0 || snapB.Inflight != 0 {
+		t.Fatalf("next seat was penalized despite canceled continuation context: %+v", snapB)
+	}
+
+	rows := readStoredRequestUsageRows(t, store)
+	if len(rows) != 1 || !rows[0].Estimated || rows[0].ContinuationUsed {
+		t.Fatalf("expected Phase8 partial usage without continuation, got %+v", rows)
+	}
+}
+
+func TestPhase9ContinuationTryOnceContextCanceledDoesNotDrainNextSeat(t *testing.T) {
+	store := testUsageStore(t)
+	seatA := newPhase9CodexContinuationAccount("seat-a", "token-a")
+	seatB := newPhase9CodexContinuationAccount("seat-b", "token-b")
+	var calls int64
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		call := atomic.AddInt64(&calls, 1)
+		switch call {
+		case 1:
+			return phase9SSEFailureResponse(req, phase9SSETextDelta("Hello canceled")), nil
+		case 2:
+			return nil, context.Canceled
+		default:
+			t.Fatalf("unexpected upstream call #%d", call)
+			return nil, nil
+		}
+	}), seatA, seatB)
+	h.store = store
+	h.cfg.streamContinuation = streamContinuationModePlainTextOnly
+	h.cfg.streamContinuationMaxAttempts = 1
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, phase9StreamingRequest(t, rawKey, `{"model":"gpt-4.1-mini","input":"say hello","stream":true}`))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "continuation segment") {
+		t.Fatalf("canceled continuation attempt unexpectedly emitted continuation marker: %q", rr.Body.String())
+	}
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Fatalf("upstream calls=%d want 2", got)
+	}
+	snapB := snapshotProxyTestAccount(seatB)
+	if !snapB.RateLimitUntil.IsZero() || snapB.HealthStatus == "error" || snapB.Penalty != 0 || snapB.Inflight != 0 {
+		t.Fatalf("next seat was penalized after context cancellation: %+v", snapB)
+	}
+
+	rows := readStoredRequestUsageRows(t, store)
+	if len(rows) != 1 || !rows[0].Estimated || rows[0].ContinuationUsed {
+		t.Fatalf("expected Phase8 partial usage without continuation, got %+v", rows)
 	}
 }
 

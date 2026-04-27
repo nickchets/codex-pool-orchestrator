@@ -133,6 +133,7 @@ type sseInterceptWriter struct {
 	callback      func(eventData []byte)
 	eventCallback func(eventData []byte)
 	eventHook     func(eventType string, eventData []byte) error
+	boundaryHook  func(safe bool)
 }
 
 func (sw *sseInterceptWriter) Write(p []byte) (int, error) {
@@ -145,12 +146,33 @@ func (sw *sseInterceptWriter) Write(p []byte) (int, error) {
 	// Append to our buffer for scanning
 	sw.buf = append(sw.buf, p[:n]...)
 
-	// Look for complete SSE events (separated by \n\n)
-	if scanErr := sw.scanForEvents(); scanErr != nil {
+	// Look for complete SSE events (separated by \n\n).
+	scanErr := sw.scanForEvents()
+	if sw.boundaryHook != nil {
+		sw.boundaryHook(sw.atSafeEventBoundary())
+	}
+	if scanErr != nil {
 		return n, scanErr
 	}
 
 	return n, err
+}
+
+func (sw *sseInterceptWriter) atSafeEventBoundary() bool {
+	if sw == nil || len(sw.buf) == 0 {
+		return true
+	}
+	// scanForEvents consumes every complete event delimiter. A non-empty buffer
+	// therefore means the upstream left bytes after the last complete event. It is
+	// only safe to append a new SSE event/comment when that tail is itself just
+	// blank line separators; any data/comment/event/id bytes would be extended by
+	// the appended continuation frame.
+	for _, b := range sw.buf {
+		if b != '\n' && b != '\r' {
+			return false
+		}
+	}
+	return true
 }
 
 func (sw *sseInterceptWriter) scanForEvents() error {

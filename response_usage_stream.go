@@ -255,6 +255,11 @@ func (h *proxyHandler) wrapUsageInterceptWriterWithAttributionAndTracker(
 
 	return &sseInterceptWriter{
 		w: writer,
+		boundaryHook: func(safe bool) {
+			if continuationTracker != nil {
+				continuationTracker.noteSSEBoundary(safe)
+			}
+		},
 		eventCallback: func(data []byte) {
 			if trace != nil {
 				trace.noteSSEEvent(data, false)

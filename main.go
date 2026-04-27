@@ -3421,9 +3421,11 @@ func (h *proxyHandler) tryOnce(
 			if trace != nil {
 				trace.noteTransportError("buffered_roundtrip", acc, err)
 			}
-			acc.mu.Lock()
-			acc.Penalty += 0.2
-			acc.mu.Unlock()
+			if !isContextCanceledOrDeadline(err) && contextDoneErr(ctx) == nil {
+				acc.mu.Lock()
+				acc.Penalty += 0.2
+				acc.mu.Unlock()
+			}
 			if facadeReq != nil && baseIdx+1 < len(targetBases) {
 				if trace != nil {
 					trace.noteEvent(
@@ -3470,9 +3472,11 @@ func (h *proxyHandler) tryOnce(
 						if trace != nil {
 							trace.noteTransportError("buffered_roundtrip_after_refresh", acc, err)
 						}
-						acc.mu.Lock()
-						acc.Penalty += 0.2
-						acc.mu.Unlock()
+						if !isContextCanceledOrDeadline(err) && contextDoneErr(ctx) == nil {
+							acc.mu.Lock()
+							acc.Penalty += 0.2
+							acc.mu.Unlock()
+						}
 						if facadeReq != nil && baseIdx+1 < len(targetBases) {
 							if trace != nil {
 								trace.noteEvent(

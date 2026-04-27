@@ -48,19 +48,29 @@ func streamContinuationEnabled(mode string) bool {
 }
 
 type streamContinuationTracker struct {
-	mu       sync.Mutex
-	maxBytes int
-	buf      strings.Builder
-	bytes    int
-	disabled bool
-	sawDone  bool
+	mu              sync.Mutex
+	maxBytes        int
+	buf             strings.Builder
+	bytes           int
+	disabled        bool
+	sawDone         bool
+	sseBoundarySafe bool
 }
 
 func newStreamContinuationTracker(maxBytes int) *streamContinuationTracker {
 	if maxBytes <= 0 {
 		maxBytes = streamContinuationMaxBufferedTextBytes
 	}
-	return &streamContinuationTracker{maxBytes: maxBytes}
+	return &streamContinuationTracker{maxBytes: maxBytes, sseBoundarySafe: true}
+}
+
+func (t *streamContinuationTracker) noteSSEBoundary(safe bool) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	t.sseBoundarySafe = safe
+	t.mu.Unlock()
 }
 
 func (t *streamContinuationTracker) noteSSEEvent(data []byte) {
@@ -109,7 +119,7 @@ func (t *streamContinuationTracker) canAttempt(snapshot streamUsageSnapshot, man
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.disabled || t.sawDone || t.bytes <= 0 || strings.TrimSpace(t.buf.String()) == "" {
+	if t.disabled || t.sawDone || !t.sseBoundarySafe || t.bytes <= 0 || strings.TrimSpace(t.buf.String()) == "" {
 		return false
 	}
 	if snapshot.AuthoritativeUsageRecorded || snapshot.BytesWritten <= 0 || snapshot.ReadErr == nil {
@@ -184,15 +194,14 @@ func plainTextContinuationValueUnsafe(v any) bool {
 	switch t := v.(type) {
 	case map[string]any:
 		if contentType, ok := t["type"].(string); ok {
-			lt := strings.ToLower(strings.TrimSpace(contentType))
-			if strings.Contains(lt, "image") || strings.Contains(lt, "audio") || strings.Contains(lt, "file") || strings.Contains(lt, "tool") || strings.Contains(lt, "function") || strings.Contains(lt, "json") {
+			if streamContinuationTypeUnsafe(contentType) {
 				return true
 			}
 		}
 		for k, child := range t {
 			lk := strings.ToLower(strings.TrimSpace(k))
 			switch lk {
-			case "tools", "tool_choice", "parallel_tool_calls", "functions", "function_call", "response_format", "json_schema", "schema", "modalities", "audio", "image", "image_url", "input_image", "input_audio", "file", "files":
+			case "tools", "tool_choice", "parallel_tool_calls", "functions", "function_call", "response_format", "json_schema", "schema", "modalities", "audio", "image", "image_url", "input_image", "input_audio", "file", "files", "video", "videos", "input_video", "multimodal":
 				return true
 			}
 			if plainTextContinuationValueUnsafe(child) {
@@ -217,19 +226,47 @@ func streamContinuationEventUnsafe(data []byte) bool {
 	return streamContinuationEventValueUnsafe(v)
 }
 
+func streamContinuationTypeUnsafe(name string) bool {
+	l := strings.ToLower(strings.TrimSpace(name))
+	if l == "" {
+		return false
+	}
+	for _, needle := range []string{"tool", "function", "json", "image", "audio", "file", "video", "multimodal"} {
+		if strings.Contains(l, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func streamContinuationMultimodalFieldUnsafe(name string) bool {
+	l := strings.ToLower(strings.TrimSpace(name))
+	if l == "" {
+		return false
+	}
+	for _, needle := range []string{"image", "audio", "file", "video", "multimodal"} {
+		if strings.Contains(l, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 func streamContinuationEventValueUnsafe(v any) bool {
 	switch t := v.(type) {
 	case map[string]any:
 		if typ, ok := t["type"].(string); ok {
-			lt := strings.ToLower(typ)
-			if strings.Contains(lt, "tool") || strings.Contains(lt, "function") || strings.Contains(lt, "json") {
+			if streamContinuationTypeUnsafe(typ) {
 				return true
 			}
 		}
 		for k, child := range t {
 			lk := strings.ToLower(strings.TrimSpace(k))
+			if streamContinuationMultimodalFieldUnsafe(lk) {
+				return true
+			}
 			switch lk {
-			case "tool_calls", "function_call", "function", "arguments", "partial_json", "json_schema", "schema", "input_image", "image_url", "input_audio", "audio", "file":
+			case "tool_calls", "function_call", "function", "arguments", "partial_json", "json_schema", "schema":
 				return true
 			}
 			if streamContinuationEventValueUnsafe(child) {
@@ -324,45 +361,60 @@ func markStreamContinuationSeatFailed(acc *Account, reason string) {
 	acc.mu.Unlock()
 }
 
+func isContextCanceledOrDeadline(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+func contextDoneErr(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Err()
+}
+
 type plainTextOverlapDeduper struct {
-	active    bool
-	remaining string
+	active bool
+	prior  string
 }
 
 func newPlainTextOverlapDeduper(prior string) *plainTextOverlapDeduper {
 	prior = lastValidUTF8Suffix(prior, streamContinuationDedupWindowBytes)
-	return &plainTextOverlapDeduper{active: prior != "", remaining: prior}
+	return &plainTextOverlapDeduper{active: prior != "", prior: prior}
 }
 
 func (d *plainTextOverlapDeduper) trim(text string) string {
 	if d == nil || !d.active || text == "" {
 		return text
 	}
-	if d.remaining == "" {
+	if d.prior == "" {
 		d.active = false
 		return text
 	}
-	if strings.HasPrefix(d.remaining, text) {
-		d.remaining = strings.TrimPrefix(d.remaining, text)
-		return ""
+	d.active = false
+	overlapBytes := longestRuneSuffixPrefixOverlap(d.prior, text)
+	if overlapBytes <= 0 {
+		return text
 	}
-	max := len(text)
-	if len(d.remaining) < max {
-		max = len(d.remaining)
+	return text[overlapBytes:]
+}
+
+func longestRuneSuffixPrefixOverlap(prior, text string) int {
+	if prior == "" || text == "" || !utf8.ValidString(prior) || !utf8.ValidString(text) {
+		return 0
+	}
+	priorRunes := []rune(prior)
+	textRunes := []rune(text)
+	max := len(priorRunes)
+	if len(textRunes) < max {
+		max = len(textRunes)
 	}
 	for n := max; n > 0; n-- {
-		prefix := text[:n]
-		if strings.HasPrefix(d.remaining, prefix) {
-			d.remaining = strings.TrimPrefix(d.remaining, prefix)
-			if n < len(text) {
-				d.active = false
-				return text[n:]
-			}
-			return ""
+		prefix := string(textRunes[:n])
+		if string(priorRunes[len(priorRunes)-n:]) == prefix {
+			return len(prefix)
 		}
 	}
-	d.active = false
-	return text
+	return 0
 }
 
 func lastValidUTF8Suffix(s string, maxBytes int) string {
@@ -619,6 +671,9 @@ func (h *proxyHandler) tryPlainTextStreamContinuation(
 	if err != nil {
 		return false, false
 	}
+	if err := contextDoneErr(continuation.ctx); err != nil {
+		return false, false
+	}
 
 	markStreamContinuationSeatFailed(failedAcc, "mid-stream hard failure before final SSE usage")
 	if h.metrics != nil {
@@ -631,6 +686,9 @@ func (h *proxyHandler) tryPlainTextStreamContinuation(
 	}
 	exclude := map[string]bool{failedAcc.ID: true}
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := contextDoneErr(continuation.ctx); err != nil {
+			return false, false
+		}
 		nextAcc, pickErr := h.candidateSupportingPath(
 			continuation.routePlan.Shape.ConversationID,
 			exclude,
@@ -650,6 +708,10 @@ func (h *proxyHandler) tryPlainTextStreamContinuation(
 			atomic.AddInt64(&nextAcc.Inflight, -1)
 			atomic.AddInt64(&h.inflight, -1)
 		}
+		if err := contextDoneErr(continuation.ctx); err != nil {
+			releaseInflight()
+			return false, false
+		}
 
 		targetBase := providerUpstreamURLForAccount(provider, continuation.routePlan.UpstreamPath, nextAcc)
 		if trace != nil {
@@ -659,6 +721,9 @@ func (h *proxyHandler) tryPlainTextStreamContinuation(
 		resp, sampleBuf, refreshFailed, tryErr := h.tryOnce(continuation.ctx, continuation.originalRequest, continuationBody, continuation.routePlan, nextAcc, reqID)
 		if tryErr != nil {
 			releaseInflight()
+			if isContextCanceledOrDeadline(tryErr) || contextDoneErr(continuation.ctx) != nil {
+				return false, false
+			}
 			markStreamContinuationSeatFailed(nextAcc, tryErr.Error())
 			if h.recent != nil {
 				h.recent.add(tryErr.Error())
