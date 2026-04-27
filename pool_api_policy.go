@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -11,16 +12,19 @@ import (
 
 const (
 	poolAPIPolicyWindow                     = time.Minute
+	poolAPIPolicyDefaultRetryAfterSeconds   = 60
 	defaultPoolAPIMaxOutputReservation      = int64(4096)
 	poolAPIPolicyErrorTypeRateLimit         = "rate_limit_error"
 	poolAPIPolicyErrorTypeInsufficientQuota = "insufficient_quota"
+	poolAPIPolicyErrorTypeInvalidRequest    = "invalid_request_error"
 )
 
 type poolAPIPolicyError struct {
-	StatusCode int
-	Code       string
-	Type       string
-	Message    string
+	StatusCode        int
+	Code              string
+	Type              string
+	Message           string
+	RetryAfterSeconds int
 }
 
 func (e *poolAPIPolicyError) Error() string {
@@ -32,10 +36,24 @@ func (e *poolAPIPolicyError) Error() string {
 
 func newPoolAPIRateLimitPolicyError(code, message string) *poolAPIPolicyError {
 	return &poolAPIPolicyError{
-		StatusCode: http.StatusTooManyRequests,
-		Code:       code,
-		Type:       poolAPIPolicyErrorTypeRateLimit,
-		Message:    message,
+		StatusCode:        http.StatusTooManyRequests,
+		Code:              code,
+		Type:              poolAPIPolicyErrorTypeRateLimit,
+		Message:           message,
+		RetryAfterSeconds: poolAPIPolicyDefaultRetryAfterSeconds,
+	}
+}
+
+func newPoolAPIAccountTypePolicyError(accountType AccountType) *poolAPIPolicyError {
+	routeAccountType := strings.TrimSpace(string(accountType))
+	if routeAccountType == "" {
+		routeAccountType = "unknown"
+	}
+	return &poolAPIPolicyError{
+		StatusCode: http.StatusForbidden,
+		Code:       "account_type_not_allowed",
+		Type:       poolAPIPolicyErrorTypeInvalidRequest,
+		Message:    "pool API token is not allowed to use " + routeAccountType + " accounts",
 	}
 }
 
@@ -70,6 +88,13 @@ func writeOpenAICompatiblePoolAPIPolicyError(w http.ResponseWriter, err *poolAPI
 		errType = poolAPIPolicyErrorTypeRateLimit
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if status == http.StatusTooManyRequests {
+		retryAfterSeconds := err.RetryAfterSeconds
+		if retryAfterSeconds <= 0 {
+			retryAfterSeconds = poolAPIPolicyDefaultRetryAfterSeconds
+		}
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]any{
@@ -97,15 +122,24 @@ func poolAPITokenPolicyFromToken(tok *PoolAPIToken) PoolAPITokenPolicy {
 }
 
 type poolAPITokenPolicyState struct {
-	Active          int
-	RequestTimes    []time.Time
-	TPMReservations []poolAPITPMReservation
+	Active                int
+	RequestTimes          []time.Time
+	TPMReservations       []poolAPITPMReservation
+	DailyBudgetReserved   int64
+	MonthlyBudgetReserved int64
 }
 
 type poolAPITPMReservation struct {
 	At     time.Time
 	Tokens int64
 }
+
+type poolAPIBudgetUsage struct {
+	DailyUsed   int64
+	MonthlyUsed int64
+}
+
+type poolAPIBudgetUsageReader func(time.Time) (poolAPIBudgetUsage, *poolAPIPolicyError)
 
 type poolAPIPolicyManager struct {
 	mu     sync.Mutex
@@ -121,9 +155,12 @@ func newPoolAPIPolicyManager() *poolAPIPolicyManager {
 }
 
 type poolAPIPolicyReservation struct {
-	manager *poolAPIPolicyManager
-	tokenID string
-	once    sync.Once
+	manager               *poolAPIPolicyManager
+	tokenID               string
+	concurrencyReserved   bool
+	dailyBudgetReserved   int64
+	monthlyBudgetReserved int64
+	once                  sync.Once
 }
 
 func (r *poolAPIPolicyReservation) Release() {
@@ -131,7 +168,7 @@ func (r *poolAPIPolicyReservation) Release() {
 		return
 	}
 	r.once.Do(func() {
-		r.manager.release(r.tokenID)
+		r.manager.release(r)
 	})
 }
 
@@ -190,7 +227,63 @@ func sumPoolAPITPMReservations(reservations []poolAPITPMReservation) int64 {
 	return total
 }
 
-func (m *poolAPIPolicyManager) Reserve(tokenID string, policy PoolAPITokenPolicy, estimatedTokens int64) (*poolAPIPolicyReservation, *poolAPIPolicyError) {
+func poolAPIPolicyHasBudgetLimits(policy PoolAPITokenPolicy, readBudgetUsage poolAPIBudgetUsageReader) bool {
+	return readBudgetUsage != nil && (policy.DailyBudget > 0 || policy.MonthlyBudget > 0)
+}
+
+func poolAPIPolicyNeedsState(policy PoolAPITokenPolicy, readBudgetUsage poolAPIBudgetUsageReader) bool {
+	return policy.MaxConcurrency > 0 || policy.MaxRPM > 0 || policy.MaxTPM > 0 || poolAPIPolicyHasBudgetLimits(policy, readBudgetUsage)
+}
+
+func poolAPIPolicyStateEmpty(st *poolAPITokenPolicyState) bool {
+	return st == nil || (st.Active <= 0 && len(st.RequestTimes) == 0 && len(st.TPMReservations) == 0 && st.DailyBudgetReserved <= 0 && st.MonthlyBudgetReserved <= 0)
+}
+
+func (m *poolAPIPolicyManager) cleanupStateLocked(tokenID string, st *poolAPITokenPolicyState) {
+	if m == nil || st == nil {
+		return
+	}
+	tokenID = strings.TrimSpace(tokenID)
+	if tokenID == "" {
+		return
+	}
+	if st.Active < 0 {
+		st.Active = 0
+	}
+	if st.DailyBudgetReserved < 0 {
+		st.DailyBudgetReserved = 0
+	}
+	if st.MonthlyBudgetReserved < 0 {
+		st.MonthlyBudgetReserved = 0
+	}
+	if poolAPIPolicyStateEmpty(st) {
+		delete(m.states, tokenID)
+	}
+}
+
+func (m *poolAPIPolicyManager) pruneStateLocked(tokenID string, st *poolAPITokenPolicyState, cutoff time.Time) {
+	if st == nil {
+		return
+	}
+	st.RequestTimes = prunePoolAPITimes(st.RequestTimes, cutoff)
+	st.TPMReservations = prunePoolAPITPMReservations(st.TPMReservations, cutoff)
+	m.cleanupStateLocked(tokenID, st)
+}
+
+func (m *poolAPIPolicyManager) pruneExistingState(tokenID string, cutoff time.Time) {
+	if m == nil || strings.TrimSpace(tokenID) == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	st := m.states[tokenID]
+	if st == nil {
+		return
+	}
+	m.pruneStateLocked(tokenID, st, cutoff)
+}
+
+func (m *poolAPIPolicyManager) Reserve(tokenID string, policy PoolAPITokenPolicy, estimatedTokens int64, readBudgetUsage poolAPIBudgetUsageReader) (*poolAPIPolicyReservation, *poolAPIPolicyError) {
 	if m == nil {
 		m = newPoolAPIPolicyManager()
 	}
@@ -203,6 +296,10 @@ func (m *poolAPIPolicyManager) Reserve(tokenID string, policy PoolAPITokenPolicy
 	}
 	now := m.nowUTC()
 	cutoff := now.Add(-poolAPIPolicyWindow)
+	if !poolAPIPolicyNeedsState(policy, readBudgetUsage) {
+		m.pruneExistingState(tokenID, cutoff)
+		return nil, nil
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -211,21 +308,49 @@ func (m *poolAPIPolicyManager) Reserve(tokenID string, policy PoolAPITokenPolicy
 	st.RequestTimes = prunePoolAPITimes(st.RequestTimes, cutoff)
 	st.TPMReservations = prunePoolAPITPMReservations(st.TPMReservations, cutoff)
 
+	budgetLimitsActive := poolAPIPolicyHasBudgetLimits(policy, readBudgetUsage)
+	var budgetUsage poolAPIBudgetUsage
+	if budgetLimitsActive {
+		var budgetErr *poolAPIPolicyError
+		budgetUsage, budgetErr = readBudgetUsage(now)
+		if budgetErr != nil {
+			m.cleanupStateLocked(tokenID, st)
+			return nil, budgetErr
+		}
+	}
+
 	if policy.MaxConcurrency > 0 && st.Active >= policy.MaxConcurrency {
+		m.cleanupStateLocked(tokenID, st)
 		return nil, newPoolAPIRateLimitPolicyError("concurrency_limit_exceeded", "pool API token concurrency limit exceeded")
 	}
 	if policy.MaxRPM > 0 && len(st.RequestTimes) >= policy.MaxRPM {
+		m.cleanupStateLocked(tokenID, st)
 		return nil, newPoolAPIRateLimitPolicyError("requests_per_minute_exceeded", "pool API token requests-per-minute limit exceeded")
 	}
 	if policy.MaxTPM > 0 {
 		reserved := sumPoolAPITPMReservations(st.TPMReservations)
 		if reserved+estimatedTokens > int64(policy.MaxTPM) {
+			m.cleanupStateLocked(tokenID, st)
 			return nil, newPoolAPIRateLimitPolicyError("tokens_per_minute_exceeded", "pool API token tokens-per-minute reservation limit exceeded")
 		}
 	}
+	if budgetLimitsActive && policy.DailyBudget > 0 {
+		if wouldExceedPoolAPITokenBudget(budgetUsage.DailyUsed+st.DailyBudgetReserved, estimatedTokens, policy.DailyBudget) {
+			m.cleanupStateLocked(tokenID, st)
+			return nil, newPoolAPIBudgetPolicyError("daily_token_budget_exceeded", "pool API token daily token budget exceeded")
+		}
+	}
+	if budgetLimitsActive && policy.MonthlyBudget > 0 {
+		if wouldExceedPoolAPITokenBudget(budgetUsage.MonthlyUsed+st.MonthlyBudgetReserved, estimatedTokens, policy.MonthlyBudget) {
+			m.cleanupStateLocked(tokenID, st)
+			return nil, newPoolAPIBudgetPolicyError("monthly_token_budget_exceeded", "pool API token monthly token budget exceeded")
+		}
+	}
 
+	reservation := &poolAPIPolicyReservation{manager: m, tokenID: tokenID}
 	if policy.MaxConcurrency > 0 {
 		st.Active++
+		reservation.concurrencyReserved = true
 	}
 	if policy.MaxRPM > 0 {
 		st.RequestTimes = append(st.RequestTimes, now)
@@ -233,24 +358,48 @@ func (m *poolAPIPolicyManager) Reserve(tokenID string, policy PoolAPITokenPolicy
 	if policy.MaxTPM > 0 && estimatedTokens > 0 {
 		st.TPMReservations = append(st.TPMReservations, poolAPITPMReservation{At: now, Tokens: estimatedTokens})
 	}
-	return &poolAPIPolicyReservation{manager: m, tokenID: tokenID}, nil
+	if budgetLimitsActive && policy.DailyBudget > 0 && estimatedTokens > 0 {
+		st.DailyBudgetReserved += estimatedTokens
+		reservation.dailyBudgetReserved = estimatedTokens
+	}
+	if budgetLimitsActive && policy.MonthlyBudget > 0 && estimatedTokens > 0 {
+		st.MonthlyBudgetReserved += estimatedTokens
+		reservation.monthlyBudgetReserved = estimatedTokens
+	}
+	return reservation, nil
 }
 
-func (m *poolAPIPolicyManager) release(tokenID string) {
-	if m == nil {
+func (m *poolAPIPolicyManager) release(reservation *poolAPIPolicyReservation) {
+	if m == nil || reservation == nil {
 		return
 	}
-	tokenID = strings.TrimSpace(tokenID)
+	tokenID := strings.TrimSpace(reservation.tokenID)
 	if tokenID == "" {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st := m.states[tokenID]
-	if st == nil || st.Active <= 0 {
+	if st == nil {
 		return
 	}
-	st.Active--
+	if reservation.concurrencyReserved && st.Active > 0 {
+		st.Active--
+	}
+	if reservation.dailyBudgetReserved > 0 {
+		st.DailyBudgetReserved -= reservation.dailyBudgetReserved
+		if st.DailyBudgetReserved < 0 {
+			st.DailyBudgetReserved = 0
+		}
+	}
+	if reservation.monthlyBudgetReserved > 0 {
+		st.MonthlyBudgetReserved -= reservation.monthlyBudgetReserved
+		if st.MonthlyBudgetReserved < 0 {
+			st.MonthlyBudgetReserved = 0
+		}
+	}
+	cutoff := m.nowUTC().Add(-poolAPIPolicyWindow)
+	m.pruneStateLocked(tokenID, st, cutoff)
 }
 
 func (h *proxyHandler) poolAPIPolicyManager() *poolAPIPolicyManager {
@@ -388,33 +537,68 @@ func wouldExceedPoolAPITokenBudget(used, estimated int64, budget float64) bool {
 	if estimated < 0 {
 		estimated = 0
 	}
-	return float64(used) >= budget || float64(used+estimated) > budget
+	return float64(used+estimated) > budget
 }
 
-func (h *proxyHandler) checkPoolAPITokenBudgets(tokenID string, policy PoolAPITokenPolicy, estimatedTokens int64) *poolAPIPolicyError {
-	if h == nil || h.store == nil || strings.TrimSpace(tokenID) == "" {
+func (h *proxyHandler) poolAPIBudgetUsageReader(tokenID string, policy PoolAPITokenPolicy) poolAPIBudgetUsageReader {
+	if h == nil || h.store == nil || strings.TrimSpace(tokenID) == "" || (policy.DailyBudget <= 0 && policy.MonthlyBudget <= 0) {
 		return nil
 	}
-	now := time.Now().UTC()
-	if policy.DailyBudget > 0 {
-		used, err := h.store.getTokenDailyBillableUsage(tokenID, now)
-		if err != nil {
-			return newPoolAPIPolicyCheckUnavailableError("pool API token daily budget check unavailable")
+	return func(at time.Time) (poolAPIBudgetUsage, *poolAPIPolicyError) {
+		if at.IsZero() {
+			at = time.Now().UTC()
+		} else {
+			at = at.UTC()
 		}
-		if wouldExceedPoolAPITokenBudget(used, estimatedTokens, policy.DailyBudget) {
-			return newPoolAPIBudgetPolicyError("daily_token_budget_exceeded", "pool API token daily token budget exceeded")
+		usage := poolAPIBudgetUsage{}
+		if policy.DailyBudget > 0 {
+			used, err := h.store.getTokenDailyBillableUsage(tokenID, at)
+			if err != nil {
+				return usage, newPoolAPIPolicyCheckUnavailableError("pool API token daily budget check unavailable")
+			}
+			usage.DailyUsed = used
+		}
+		if policy.MonthlyBudget > 0 {
+			used, err := h.store.getTokenMonthlyBillableUsage(tokenID, at)
+			if err != nil {
+				return usage, newPoolAPIPolicyCheckUnavailableError("pool API token monthly budget check unavailable")
+			}
+			usage.MonthlyUsed = used
+		}
+		return usage, nil
+	}
+}
+
+func poolAPIPolicyAllowsAccountType(policy PoolAPITokenPolicy, accountType AccountType) bool {
+	if len(policy.AllowedAccountTypes) == 0 {
+		return true
+	}
+	accountTypeText := strings.TrimSpace(string(accountType))
+	if accountTypeText == "" {
+		return false
+	}
+	for _, allowed := range policy.AllowedAccountTypes {
+		if strings.EqualFold(strings.TrimSpace(string(allowed)), accountTypeText) {
+			return true
 		}
 	}
-	if policy.MonthlyBudget > 0 {
-		used, err := h.store.getTokenMonthlyBillableUsage(tokenID, now)
-		if err != nil {
-			return newPoolAPIPolicyCheckUnavailableError("pool API token monthly budget check unavailable")
-		}
-		if wouldExceedPoolAPITokenBudget(used, estimatedTokens, policy.MonthlyBudget) {
-			return newPoolAPIBudgetPolicyError("monthly_token_budget_exceeded", "pool API token monthly token budget exceeded")
-		}
+	return false
+}
+
+func validatePoolAPITokenAllowedAccountType(routePlan RoutePlan, policy PoolAPITokenPolicy) *poolAPIPolicyError {
+	if !isOpenAICompatiblePoolKeyAdmission(routePlan.Admission) || len(policy.AllowedAccountTypes) == 0 {
+		return nil
 	}
-	return nil
+	// Some local synthetic responses (for example /v1/models) do not select an
+	// upstream account type. Enforce the allowlist only once a planned upstream
+	// route has a concrete AccountType.
+	if strings.TrimSpace(string(routePlan.AccountType)) == "" {
+		return nil
+	}
+	if poolAPIPolicyAllowsAccountType(policy, routePlan.AccountType) {
+		return nil
+	}
+	return newPoolAPIAccountTypePolicyError(routePlan.AccountType)
 }
 
 func (h *proxyHandler) reservePoolAPITokenPolicy(w http.ResponseWriter, routePlan RoutePlan, requestBodyForInspection []byte) (*poolAPIPolicyReservation, bool) {
@@ -427,12 +611,12 @@ func (h *proxyHandler) reservePoolAPITokenPolicy(w http.ResponseWriter, routePla
 	if len(policy.AllowedModels) == 0 && len(routePlan.Admission.TokenAllowedModels) > 0 {
 		policy.AllowedModels = append([]string(nil), routePlan.Admission.TokenAllowedModels...)
 	}
-	estimatedTokens := estimateOpenAICompatiblePoolAPITokens(routePlan.Shape.Path, requestBodyForInspection, poolAPIDefaultMaxOutputReservationFromConfig(h.cfg))
-	if err := h.checkPoolAPITokenBudgets(routePlan.Admission.TokenID, policy, estimatedTokens); err != nil {
+	if err := validatePoolAPITokenAllowedAccountType(routePlan, policy); err != nil {
 		writeOpenAICompatiblePoolAPIPolicyError(w, err)
 		return nil, false
 	}
-	reservation, err := h.poolAPIPolicyManager().Reserve(routePlan.Admission.TokenID, policy, estimatedTokens)
+	estimatedTokens := estimateOpenAICompatiblePoolAPITokens(routePlan.Shape.Path, requestBodyForInspection, poolAPIDefaultMaxOutputReservationFromConfig(h.cfg))
+	reservation, err := h.poolAPIPolicyManager().Reserve(routePlan.Admission.TokenID, policy, estimatedTokens, h.poolAPIBudgetUsageReader(routePlan.Admission.TokenID, policy))
 	if err != nil {
 		writeOpenAICompatiblePoolAPIPolicyError(w, err)
 		return nil, false
