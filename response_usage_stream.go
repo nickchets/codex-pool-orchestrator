@@ -219,6 +219,7 @@ func (h *proxyHandler) wrapUsageInterceptWriterWithAttribution(
 		managedStreamFailureOnce,
 		usageAttribution,
 		nil,
+		nil,
 	)
 }
 
@@ -235,6 +236,7 @@ func (h *proxyHandler) wrapUsageInterceptWriterWithAttributionAndTracker(
 	managedStreamFailureOnce *sync.Once,
 	usageAttribution UsageAttribution,
 	streamTracker *streamUsageTracker,
+	continuationTracker *streamContinuationTracker,
 ) io.Writer {
 	var claudeAccum *RequestUsage
 	var claudeTailWatcher *claudePingTailWatcher
@@ -259,6 +261,9 @@ func (h *proxyHandler) wrapUsageInterceptWriterWithAttributionAndTracker(
 			}
 			if streamTracker != nil {
 				streamTracker.noteSSEEvent(data)
+			}
+			if continuationTracker != nil {
+				continuationTracker.noteSSEEvent(data)
 			}
 			h.handleCodexSSEFailureEvent(reqID, acc, data, managedStreamFailed, managedStreamFailureOnce)
 		},

@@ -537,6 +537,8 @@ type RequestUsage struct {
 	Status            int
 	Estimated         bool
 	ErrorClass        string
+	ContinuationUsed  bool `json:"continuation_used,omitempty"`
+	SegmentCount      int  `json:"segment_count,omitempty"`
 	InputTokens       int64
 	CachedInputTokens int64
 	OutputTokens      int64

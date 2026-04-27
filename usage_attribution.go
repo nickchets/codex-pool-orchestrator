@@ -6,14 +6,16 @@ import "strings"
 // It intentionally stores virtual key IDs/names only; raw API key material must never
 // be copied into this struct.
 type UsageAttribution struct {
-	TokenID        string
-	TokenName      string
-	CredentialKind CredentialKind
-	ClientEndpoint string
-	Stream         bool
-	Status         int
-	Estimated      bool
-	ErrorClass     string
+	TokenID          string
+	TokenName        string
+	CredentialKind   CredentialKind
+	ClientEndpoint   string
+	Stream           bool
+	Status           int
+	Estimated        bool
+	ErrorClass       string
+	ContinuationUsed bool
+	SegmentCount     int
 }
 
 func buildUsageAttribution(admission AdmissionResult, clientEndpoint string, stream bool) UsageAttribution {
@@ -51,6 +53,12 @@ func applyUsageAttribution(ru *RequestUsage, attr UsageAttribution) *RequestUsag
 	}
 	if attr.ErrorClass != "" {
 		ru.ErrorClass = attr.ErrorClass
+	}
+	if attr.ContinuationUsed {
+		ru.ContinuationUsed = true
+	}
+	if attr.SegmentCount > 0 {
+		ru.SegmentCount = attr.SegmentCount
 	}
 	return ru
 }

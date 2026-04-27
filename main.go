@@ -63,6 +63,8 @@ type config struct {
 	streamTimeout                 time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
 	streamIdleTimeout             time.Duration // Kill SSE streams idle for this long (0 = no idle timeout)
 	claudePingTailTimeout         time.Duration // Cut GitLab Claude SSE tails that degrade into ping-only keepalives after useful output
+	streamContinuation            string        // Experimental plain-text SSE continuation bridge mode (default off)
+	streamContinuationMaxAttempts int           // Max continuation attempts after first segment failure (default 1)
 	tierThreshold                 float64       // Secondary usage % at which we stop preferring a tier (default 0.15)
 	lowHeadroomReservePct         float64       // Minimum quota headroom reserved from new admissions (default 0.10)
 	poolAPIDefaultMaxOutputTokens int           // Default output-token reservation for virtual pool API key TPM policy
@@ -202,6 +204,8 @@ func buildConfig() config {
 			cfg.claudePingTailTimeout = time.Duration(n) * time.Second
 		}
 	}
+	cfg.streamContinuation = normalizeStreamContinuationMode(getConfigString("PROXY_STREAM_CONTINUATION", fileCfg.StreamContinuation, streamContinuationModeOff))
+	cfg.streamContinuationMaxAttempts = getConfigInt("PROXY_STREAM_CONTINUATION_MAX_ATTEMPTS", fileCfg.StreamContinuationMaxAttempts, 1)
 
 	// Tier threshold: secondary usage % at which we stop preferring a tier (default 15%)
 	cfg.tierThreshold = getConfigFloat64("TIER_THRESHOLD", fileCfg.TierThreshold, 0.15)
@@ -1174,6 +1178,13 @@ type bufferedAttemptSuccess struct {
 	inflightHeld bool
 }
 
+type streamContinuationContext struct {
+	ctx             context.Context
+	originalRequest *http.Request
+	bodyBytes       []byte
+	routePlan       RoutePlan
+}
+
 type copiedProxyResponseDeliveryOptions struct {
 	requestPath           string
 	initialConversationID string
@@ -1184,6 +1195,7 @@ type copiedProxyResponseDeliveryOptions struct {
 	captureResponseSample bool
 	existingSample        *bytes.Buffer
 	usageAttribution      UsageAttribution
+	streamContinuation    *streamContinuationContext
 }
 
 type rateLimitResponseError struct {
@@ -1750,6 +1762,11 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 	writer = newTraceWriter(writer, trace)
 	streamTracker := newStreamUsageTracker()
 	writer = &streamWriteTrackingWriter{w: writer, tracker: streamTracker}
+	baseSegmentWriter := writer
+	var continuationTracker *streamContinuationTracker
+	if isSSE && opts.streamContinuation != nil {
+		continuationTracker = h.newStreamContinuationTracker(opts.streamContinuation.routePlan, opts.requestPath, opts.streamContinuation.bodyBytes, provider, acc)
+	}
 	managedStreamFailed := false
 	var managedStreamFailureOnce sync.Once
 
@@ -1784,6 +1801,7 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 			&managedStreamFailureOnce,
 			usageAttribution,
 			streamTracker,
+			continuationTracker,
 		)
 	}
 
@@ -1813,16 +1831,44 @@ func (h *proxyHandler) deliverCopiedProxyResponse(
 	if sampleBuf != nil {
 		respSample = sampleBuf.Bytes()
 	}
+	if copyErr != nil && continuationTracker != nil {
+		if handled, ok := h.tryPlainTextStreamContinuation(
+			baseSegmentWriter,
+			cancel,
+			reqID,
+			trace,
+			provider,
+			acc,
+			userID,
+			resp.StatusCode,
+			headerPrimaryPct,
+			headerSecondaryPct,
+			respSample,
+			managedStreamFailed,
+			usageAttribution,
+			streamTracker,
+			continuationTracker,
+			opts.streamContinuation,
+			opts.initialConversationID,
+			start,
+		); handled {
+			return ok
+		}
+	}
 	return h.finalizeCopiedProxyResponseWithAttribution(reqID, trace, provider, acc, userID, resp.StatusCode, isSSE, managedStreamFailed, opts.initialConversationID, headerPrimaryPct, headerSecondaryPct, respSample, copyErr, idleReader != nil, start, opts.debugLabel, usageAttribution, streamTracker)
 }
 
 func (h *proxyHandler) deliverBufferedAttemptSuccess(
 	w http.ResponseWriter,
+	ctx context.Context,
 	cancel context.CancelFunc,
+	r *http.Request,
+	bodyBytes []byte,
 	reqID string,
 	trace *requestTrace,
 	provider Provider,
 	attemptSuccess *bufferedAttemptSuccess,
+	routePlan RoutePlan,
 	requestPath string,
 	userID, conversationID string,
 	start time.Time,
@@ -1857,6 +1903,12 @@ func (h *proxyHandler) deliverBufferedAttemptSuccess(
 			closeBodyAfterCopy:    true,
 			existingSample:        attemptSuccess.sampleBuf,
 			usageAttribution:      usageAttribution,
+			streamContinuation: &streamContinuationContext{
+				ctx:             ctx,
+				originalRequest: r,
+				bodyBytes:       bodyBytes,
+				routePlan:       routePlan,
+			},
 		},
 	)
 }
@@ -2102,7 +2154,7 @@ func (h *proxyHandler) proxyRequest(w http.ResponseWriter, r *http.Request, reqI
 		return
 	}
 
-	if !h.deliverBufferedAttemptSuccess(w, cancel, reqID, trace, provider, attemptSuccess, r.URL.Path, userID, conversationID, start, buildUsageAttribution(routePlan.Admission, r.URL.Path, false)) {
+	if !h.deliverBufferedAttemptSuccess(w, ctx, cancel, r, bodyBytes, reqID, trace, provider, attemptSuccess, routePlan, r.URL.Path, userID, conversationID, start, buildUsageAttribution(routePlan.Admission, r.URL.Path, false)) {
 		return
 	}
 	return

@@ -27,6 +27,8 @@ type ConfigFile struct {
 	TierThreshold                 float64 `toml:"tier_threshold"`                     // Secondary usage % threshold for tier preference (default 0.15)
 	LowHeadroomReservePct         float64 `toml:"low_headroom_reserve_pct"`           // Minimum quota headroom reserved from new admissions (default 0.10)
 	PoolAPIDefaultMaxOutputTokens int     `toml:"pool_api_default_max_output_tokens"` // Default output-token reservation for virtual pool API key TPM policy
+	StreamContinuation            string  `toml:"stream_continuation"`                // Experimental plain-text SSE continuation bridge (default off)
+	StreamContinuationMaxAttempts int     `toml:"stream_continuation_max_attempts"`   // Max continuation segments after a mid-stream failure (default 1)
 
 	PoolUsers PoolUsersConfig `toml:"pool_users"`
 }

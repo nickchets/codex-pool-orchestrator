@@ -103,6 +103,258 @@ func newBufferedGitLabCodexAccountForTest(t *testing.T, dir, id, sourceToken, ga
 	}
 }
 
+func newPhase9CodexContinuationAccount(id, token string) *Account {
+	return &Account{
+		ID:          id,
+		Type:        AccountTypeCodex,
+		AccessToken: token,
+		PlanType:    "pro",
+		Usage: UsageSnapshot{
+			RetrievedAt: time.Now().UTC(),
+		},
+	}
+}
+
+func phase9SSETextDelta(text string) string {
+	return "event: response.output_text.delta\n" +
+		fmt.Sprintf("data: {\"type\":\"response.output_text.delta\",\"delta\":%q}\n\n", text)
+}
+
+func phase9SSEUsageDone(inputTokens, outputTokens int64) string {
+	return "event: response.completed\n" +
+		fmt.Sprintf("data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":%d,\"output_tokens\":%d}}}\n\n", inputTokens, outputTokens) +
+		"data: [DONE]\n\n"
+}
+
+func phase9StreamingRequest(t *testing.T, rawKey, body string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "http://pool.local/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	return req
+}
+
+func phase9SSEFailureResponse(req *http.Request, body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       newPhase8FailingReadCloser(body, io.ErrUnexpectedEOF),
+		Request:    req,
+	}
+}
+
+func phase9SSEOKResponse(req *http.Request, body string) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}
+}
+
+func TestPhase9StreamContinuationDefaultOffFallsBackToPhase8PartialUsage(t *testing.T) {
+	store := testUsageStore(t)
+	seatA := newPhase9CodexContinuationAccount("seat-a", "token-a")
+	seatB := newPhase9CodexContinuationAccount("seat-b", "token-b")
+	var calls int64
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		call := atomic.AddInt64(&calls, 1)
+		if call != 1 {
+			t.Fatalf("default-off continuation should not make upstream call #%d", call)
+		}
+		return phase9SSEFailureResponse(req, phase9SSETextDelta("Hello partial")), nil
+	}), seatA, seatB)
+	h.store = store
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, phase9StreamingRequest(t, rawKey, `{"model":"gpt-4.1-mini","input":"say hello","stream":true}`))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "Hello partial") {
+		t.Fatalf("client did not receive partial stream: %q", rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), "continuation segment") {
+		t.Fatalf("default-off stream unexpectedly emitted continuation marker: %q", rr.Body.String())
+	}
+	if got := atomic.LoadInt64(&calls); got != 1 {
+		t.Fatalf("upstream calls=%d want 1", got)
+	}
+
+	rows := readStoredRequestUsageRows(t, store)
+	if len(rows) != 1 || !rows[0].Estimated || rows[0].ErrorClass != "upstream_unexpected_eof" {
+		t.Fatalf("expected existing Phase8 estimated partial usage row, got %+v", rows)
+	}
+	if rows[0].ContinuationUsed || rows[0].SegmentCount != 0 {
+		t.Fatalf("default-off usage row should not be marked as continuation: %+v", rows[0])
+	}
+}
+
+func TestPhase9PlainTextContinuationBridgesSecondSeatAndDeduplicatesPrefix(t *testing.T) {
+	store := testUsageStore(t)
+	seatA := newPhase9CodexContinuationAccount("seat-a", "token-a")
+	seatB := newPhase9CodexContinuationAccount("seat-b", "token-b")
+	var calls int64
+	var authSeen []string
+	var requestBodies []string
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		call := atomic.AddInt64(&calls, 1)
+		authSeen = append(authSeen, req.Header.Get("Authorization"))
+		body, _ := io.ReadAll(req.Body)
+		requestBodies = append(requestBodies, string(body))
+		switch call {
+		case 1:
+			return phase9SSEFailureResponse(req, phase9SSETextDelta("Hello ")), nil
+		case 2:
+			return phase9SSEOKResponse(req, phase9SSETextDelta("Hello ")+phase9SSETextDelta("world")+phase9SSEUsageDone(11, 2)), nil
+		default:
+			t.Fatalf("unexpected upstream call #%d", call)
+			return nil, nil
+		}
+	}), seatA, seatB)
+	h.store = store
+	h.cfg.streamContinuation = streamContinuationModePlainTextOnly
+	h.cfg.streamContinuationMaxAttempts = 1
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, phase9StreamingRequest(t, rawKey, `{"model":"gpt-4.1-mini","input":"say hello","stream":true}`))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, "Hello ") || !strings.Contains(body, "world") {
+		t.Fatalf("client did not receive bridged text: %q", body)
+	}
+	if strings.Count(body, `"delta":"Hello "`) != 1 {
+		t.Fatalf("expected repeated prefix to be de-duplicated in downstream stream, body=%s", body)
+	}
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Fatalf("upstream calls=%d want 2", got)
+	}
+	if len(authSeen) != 2 || authSeen[0] != "Bearer token-a" || authSeen[1] != "Bearer token-b" {
+		t.Fatalf("auth/seat sequence = %#v", authSeen)
+	}
+	if len(requestBodies) != 2 || !strings.Contains(requestBodies[1], "Hello ") || !strings.Contains(strings.ToLower(requestBodies[1]), "continue") {
+		t.Fatalf("continuation request body was not built from partial assistant text: %#v", requestBodies)
+	}
+	if !seatA.RateLimitUntil.After(time.Now().Add(-time.Second)) {
+		t.Fatalf("first seat was not marked draining after mid-stream failure: %+v", snapshotProxyTestAccount(seatA))
+	}
+
+	rows := readStoredRequestUsageRows(t, store)
+	if len(rows) != 1 {
+		t.Fatalf("usage rows = %+v", rows)
+	}
+	if rows[0].Estimated || !rows[0].ContinuationUsed || rows[0].SegmentCount != 2 || rows[0].AccountID != "seat-b" {
+		t.Fatalf("expected authoritative continuation usage on second seat, got %+v", rows[0])
+	}
+}
+
+func TestPhase9ContinuationSafetyRejectsToolStructuredAndPassthrough(t *testing.T) {
+	baseURL, _ := url.Parse("https://upstream.example")
+	provider := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	seat := newPhase9CodexContinuationAccount("seat-a", "token-a")
+	h := &proxyHandler{cfg: config{streamContinuation: streamContinuationModePlainTextOnly}}
+	basePlan := RoutePlan{
+		Admission: AdmissionResult{
+			Kind:           AdmissionKindPoolUser,
+			UserID:         "user-1",
+			TokenID:        "tok-1",
+			CredentialKind: CredentialKindOpenAICompatiblePoolKey,
+		},
+		Shape:                    RequestShape{Path: "/v1/chat/completions", RequestedModel: "gpt-4.1-mini"},
+		Provider:                 provider,
+		UpstreamPath:             "/v1/chat/completions",
+		AccountType:              AccountTypeCodex,
+		IsOpenAICompatibleClient: true,
+	}
+
+	cases := []struct {
+		name string
+		body string
+		plan RoutePlan
+	}{
+		{
+			name: "tool_calls",
+			body: `{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup"}}],"stream":true}`,
+			plan: basePlan,
+		},
+		{
+			name: "structured_output",
+			body: `{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hi"}],"response_format":{"type":"json_schema","json_schema":{"name":"x","schema":{"type":"object"}}},"stream":true}`,
+			plan: basePlan,
+		},
+		{
+			name: "passthrough",
+			body: `{"model":"gpt-4.1-mini","messages":[{"role":"user","content":"hi"}],"stream":true}`,
+			plan: func() RoutePlan {
+				p := basePlan
+				p.Admission = AdmissionResult{Kind: AdmissionKindPassthrough, ProviderType: AccountTypeCodex}
+				p.IsOpenAICompatibleClient = false
+				return p
+			}(),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tracker := h.newStreamContinuationTracker(tc.plan, "/v1/chat/completions", []byte(tc.body), provider, seat)
+			if tracker != nil {
+				t.Fatalf("expected continuation to be disabled for %s", tc.name)
+			}
+		})
+	}
+}
+
+func TestPhase9MaxContinuationAttemptsPreventsInfiniteLoopAndRecordsPartialUsage(t *testing.T) {
+	store := testUsageStore(t)
+	seatA := newPhase9CodexContinuationAccount("seat-a", "token-a")
+	seatB := newPhase9CodexContinuationAccount("seat-b", "token-b")
+	seatC := newPhase9CodexContinuationAccount("seat-c", "token-c")
+	var calls int64
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		call := atomic.AddInt64(&calls, 1)
+		switch call {
+		case 1:
+			return phase9SSEFailureResponse(req, phase9SSETextDelta("first ")), nil
+		case 2:
+			return phase9SSEFailureResponse(req, phase9SSETextDelta("second ")), nil
+		default:
+			t.Fatalf("max continuation attempts should prevent upstream call #%d", call)
+			return nil, nil
+		}
+	}), seatA, seatB, seatC)
+	h.store = store
+	h.cfg.streamContinuation = streamContinuationModePlainTextOnly
+	h.cfg.streamContinuationMaxAttempts = 1
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, phase9StreamingRequest(t, rawKey, `{"model":"gpt-4.1-mini","input":"say hello","stream":true}`))
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Fatalf("upstream calls=%d want 2", got)
+	}
+	if !strings.Contains(rr.Body.String(), "first ") || !strings.Contains(rr.Body.String(), "second ") {
+		t.Fatalf("client should receive both failed segments before final partial accounting: %q", rr.Body.String())
+	}
+
+	rows := readStoredRequestUsageRows(t, store)
+	if len(rows) != 1 || !rows[0].Estimated || rows[0].ErrorClass != "upstream_unexpected_eof" {
+		t.Fatalf("expected one estimated partial usage row after failed continuation, got %+v", rows)
+	}
+	if !rows[0].ContinuationUsed || rows[0].SegmentCount != 2 {
+		t.Fatalf("partial continuation usage metadata missing: %+v", rows[0])
+	}
+}
+
 func waitForBufferedProxySuccessAccountState(t *testing.T, acc *Account, reason string) proxyTestAccountSnapshot {
 	t.Helper()
 
