@@ -191,6 +191,64 @@ func TestWrapUsageInterceptWriterMarksLocalCodexUsageLimitAsStreamFailure(t *tes
 	}
 }
 
+func TestWrapUsageInterceptWriterMarksQuotaEventWithoutAbortingStream(t *testing.T) {
+	baseURL, err := url.Parse("https://example.com")
+	if err != nil {
+		t.Fatalf("parse base url: %v", err)
+	}
+
+	now := time.Now().UTC()
+	resetAt := now.Add(20 * time.Minute).Truncate(time.Second)
+	h := &proxyHandler{}
+	provider := NewCodexProvider(baseURL, baseURL, baseURL, baseURL)
+	acc := &Account{
+		ID:   "stream-draining-seat",
+		Type: AccountTypeCodex,
+		Usage: UsageSnapshot{
+			PrimaryResetAt: resetAt,
+		},
+	}
+	managedStreamFailed := false
+	var managedStreamFailureOnce sync.Once
+	var forwarded bytes.Buffer
+
+	writer := h.wrapUsageInterceptWriter(
+		"req-stream-draining",
+		&forwarded,
+		provider,
+		acc,
+		"user-1",
+		nil,
+		0,
+		0,
+		&managedStreamFailed,
+		&managedStreamFailureOnce,
+	)
+
+	chunk := []byte("event: error\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"You've hit your usage limit. Try again later.\"}}}\n\n" +
+		"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"still forwarded\"}\n\n" +
+		"event: done\ndata: [DONE]\n\n")
+	n, err := writer.Write(chunk)
+	if err != nil {
+		t.Fatalf("quota event hook should not abort stream: %v", err)
+	}
+	if n != len(chunk) {
+		t.Fatalf("write len=%d want %d", n, len(chunk))
+	}
+	if !bytes.Equal(forwarded.Bytes(), chunk) {
+		t.Fatalf("forwarded stream mismatch:\n%s", forwarded.String())
+	}
+	if !managedStreamFailed {
+		t.Fatal("expected quota event to mark stream as failed for accounting")
+	}
+	if acc.HealthStatus != "rate_limited" {
+		t.Fatalf("health_status=%q", acc.HealthStatus)
+	}
+	if !acc.RateLimitUntil.Equal(resetAt) {
+		t.Fatalf("rate_limit_until=%v want %v", acc.RateLimitUntil, resetAt)
+	}
+}
+
 func TestClaudePingTailWatcherCutsOffGitLabPingOnlyTail(t *testing.T) {
 	trace := &requestTrace{
 		cfg:       requestTraceConfig{requests: true},

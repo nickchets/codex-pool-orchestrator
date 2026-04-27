@@ -64,6 +64,7 @@ type config struct {
 	streamIdleTimeout             time.Duration // Kill SSE streams idle for this long (0 = no idle timeout)
 	claudePingTailTimeout         time.Duration // Cut GitLab Claude SSE tails that degrade into ping-only keepalives after useful output
 	tierThreshold                 float64       // Secondary usage % at which we stop preferring a tier (default 0.15)
+	lowHeadroomReservePct         float64       // Minimum quota headroom reserved from new admissions (default 0.10)
 	poolAPIDefaultMaxOutputTokens int           // Default output-token reservation for virtual pool API key TPM policy
 }
 
@@ -204,6 +205,7 @@ func buildConfig() config {
 
 	// Tier threshold: secondary usage % at which we stop preferring a tier (default 15%)
 	cfg.tierThreshold = getConfigFloat64("TIER_THRESHOLD", fileCfg.TierThreshold, 0.15)
+	cfg.lowHeadroomReservePct = normalizeLowHeadroomReservePct(getConfigFloat64("PROXY_LOW_HEADROOM_RESERVE_PCT", fileCfg.LowHeadroomReservePct, defaultLowHeadroomReservePct))
 
 	flag.StringVar(&cfg.listenAddr, "listen", cfg.listenAddr, "listen address")
 	flag.Parse()
@@ -228,6 +230,7 @@ func main() {
 	}
 	pool := newPoolState(accounts, cfg.debug)
 	pool.tierThreshold = cfg.tierThreshold
+	pool.lowHeadroomReservePct = cfg.lowHeadroomReservePct
 	codexCount := pool.countByType(AccountTypeCodex)
 	claudeCount := pool.countByType(AccountTypeClaude)
 	geminiCount := pool.countByType(AccountTypeGemini)
@@ -1165,9 +1168,10 @@ func formatBufferedRetryStatusError(resp *http.Response, bodyText string) error 
 }
 
 type bufferedAttemptSuccess struct {
-	acc       *Account
-	resp      *http.Response
-	sampleBuf *bytes.Buffer
+	acc          *Account
+	resp         *http.Response
+	sampleBuf    *bytes.Buffer
+	inflightHeld bool
 }
 
 type copiedProxyResponseDeliveryOptions struct {
@@ -1412,10 +1416,9 @@ func (h *proxyHandler) runBufferedAttemptContour(
 
 		resp, sampleBuf, refreshFailed, err := h.tryOnce(ctx, r, bodyBytes, routePlan, acc, reqID)
 
-		atomic.AddInt64(&acc.Inflight, -1)
-		atomic.AddInt64(&h.inflight, -1)
-
 		if err != nil {
+			atomic.AddInt64(&acc.Inflight, -1)
+			atomic.AddInt64(&h.inflight, -1)
 			lastErr = err
 			h.recent.add(err.Error())
 			if h.cfg.debug {
@@ -1426,14 +1429,17 @@ func (h *proxyHandler) runBufferedAttemptContour(
 		lastStatus = resp.StatusCode
 
 		if retry, retryErr := h.applyBufferedRetryDisposition(reqID, trace, acc, resp, refreshFailed, routePlan.Shape.RequestedModel, routePlan.UpstreamPath, attempt, attempts); retry {
+			atomic.AddInt64(&acc.Inflight, -1)
+			atomic.AddInt64(&h.inflight, -1)
 			lastErr = retryErr
 			continue
 		}
 
 		return &bufferedAttemptSuccess{
-			acc:       acc,
-			resp:      resp,
-			sampleBuf: sampleBuf,
+			acc:          acc,
+			resp:         resp,
+			sampleBuf:    sampleBuf,
+			inflightHeld: true,
 		}, false
 	}
 
@@ -1820,6 +1826,13 @@ func (h *proxyHandler) deliverBufferedAttemptSuccess(
 ) bool {
 	if attemptSuccess == nil {
 		return false
+	}
+	if attemptSuccess.inflightHeld {
+		defer func() {
+			atomic.AddInt64(&attemptSuccess.acc.Inflight, -1)
+			atomic.AddInt64(&h.inflight, -1)
+			attemptSuccess.inflightHeld = false
+		}()
 	}
 
 	return h.deliverCopiedProxyResponse(

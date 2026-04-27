@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -598,6 +599,174 @@ func TestProxyBufferedManagedAPI429RetriesNextSeatAfterQuotaFallback(t *testing.
 	}
 	if calls["Bearer sk-proj-live"] == nil || calls["Bearer sk-proj-live"].count != 2 {
 		t.Fatalf("live account calls = %+v", calls["Bearer sk-proj-live"])
+	}
+}
+
+func TestProxyBufferedManagedAPISSEQuotaMarksSeatDrainingWithoutInterruptingActiveStream(t *testing.T) {
+	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
+
+	var mu sync.Mutex
+	calls := map[string]int{}
+	quotaEventSent := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(releaseFirst) })
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		mu.Lock()
+		calls[auth]++
+		mu.Unlock()
+
+		switch auth {
+		case "Bearer sk-draining-stream":
+			w.Header().Set("Content-Type", "text/event-stream")
+			flusher, _ := w.(http.Flusher)
+			_, _ = io.WriteString(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"before quota\"}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			_, _ = io.WriteString(w, "event: error\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"rate_limit_exceeded for this seat\",\"code\":\"rate_limit_exceeded\"}}}\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			select {
+			case <-quotaEventSent:
+			default:
+				close(quotaEventSent)
+			}
+			<-releaseFirst
+			_, _ = io.WriteString(w, "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\" after quota\"}\n\n")
+			_, _ = io.WriteString(w, "event: done\ndata: [DONE]\n\n")
+		case "Bearer sk-live-stream":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"id":"resp_live_stream","status":"completed"}`)
+		default:
+			t.Fatalf("unexpected auth header %q", auth)
+		}
+	}))
+	defer upstream.Close()
+
+	now := time.Now().UTC()
+	drainingAcc := &Account{
+		ID:              "openai_api_draining_stream",
+		Type:            AccountTypeCodex,
+		AccessToken:     "sk-draining-stream",
+		PlanType:        "api",
+		AuthMode:        accountAuthModeAPIKey,
+		HealthStatus:    "healthy",
+		HealthCheckedAt: now,
+		LastHealthyAt:   now,
+	}
+	liveAcc := &Account{
+		ID:              "openai_api_live_stream",
+		Type:            AccountTypeCodex,
+		AccessToken:     "sk-live-stream",
+		PlanType:        "api",
+		AuthMode:        accountAuthModeAPIKey,
+		HealthStatus:    "healthy",
+		HealthCheckedAt: now,
+		LastHealthyAt:   now,
+	}
+
+	h := newBufferedCodexProxyHandlerForTest(t, upstream.URL, []*Account{drainingAcc, liveAcc})
+	proxy := httptest.NewServer(h)
+	defer proxy.Close()
+
+	firstReq, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/responses", bytes.NewReader([]byte(`{"model":"gpt-4.1-mini","input":"stream","stream":true}`)))
+	if err != nil {
+		t.Fatalf("new first request: %v", err)
+	}
+	firstReq.Header.Set("Authorization", "Bearer "+generateClaudePoolToken(getPoolJWTSecret(), "buffered-managed-api-stream-user"))
+	firstReq.Header.Set("Content-Type", "application/json")
+
+	firstResp, err := http.DefaultClient.Do(firstReq)
+	if err != nil {
+		t.Fatalf("first proxy request: %v", err)
+	}
+	defer firstResp.Body.Close()
+	if firstResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(firstResp.Body)
+		t.Fatalf("first status=%d body=%s", firstResp.StatusCode, string(body))
+	}
+
+	firstBodyCh := make(chan []byte, 1)
+	firstErrCh := make(chan error, 1)
+	go func() {
+		body, err := io.ReadAll(firstResp.Body)
+		if err != nil {
+			firstErrCh <- err
+			return
+		}
+		firstBodyCh <- body
+	}()
+
+	select {
+	case <-quotaEventSent:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for upstream quota event")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		state := snapshotProxyTestAccount(drainingAcc)
+		if state.RateLimitUntil.After(time.Now()) || state.Dead {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	drainingState := snapshotProxyTestAccount(drainingAcc)
+	if !drainingState.RateLimitUntil.After(time.Now()) {
+		t.Fatalf("expected active stream quota event to mark seat draining, state=%+v", drainingState)
+	}
+	if drainingState.Inflight != 1 {
+		t.Fatalf("expected first stream to remain inflight while draining, inflight=%d", drainingState.Inflight)
+	}
+
+	secondReq, err := http.NewRequest(http.MethodPost, proxy.URL+"/v1/responses", bytes.NewReader([]byte(`{"model":"gpt-4.1-mini","input":"second"}`)))
+	if err != nil {
+		t.Fatalf("new second request: %v", err)
+	}
+	secondReq.Header.Set("Authorization", "Bearer "+generateClaudePoolToken(getPoolJWTSecret(), "buffered-managed-api-stream-user"))
+	secondReq.Header.Set("Content-Type", "application/json")
+
+	secondResp, err := http.DefaultClient.Do(secondReq)
+	if err != nil {
+		t.Fatalf("second proxy request: %v", err)
+	}
+	defer secondResp.Body.Close()
+	secondBody, err := io.ReadAll(secondResp.Body)
+	if err != nil {
+		t.Fatalf("read second body: %v", err)
+	}
+	if secondResp.StatusCode != http.StatusOK || !bytes.Contains(secondBody, []byte("resp_live_stream")) {
+		t.Fatalf("second status=%d body=%s", secondResp.StatusCode, string(secondBody))
+	}
+
+	releaseOnce.Do(func() { close(releaseFirst) })
+	var firstBody []byte
+	select {
+	case firstBody = <-firstBodyCh:
+	case err := <-firstErrCh:
+		t.Fatalf("read first body: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first stream to finish")
+	}
+	if !bytes.Contains(firstBody, []byte("before quota")) || !bytes.Contains(firstBody, []byte(" after quota")) || !bytes.Contains(firstBody, []byte("[DONE]")) {
+		t.Fatalf("first stream did not receive all chunks: %s", string(firstBody))
+	}
+	if got := snapshotProxyTestAccount(drainingAcc).Inflight; got != 0 {
+		t.Fatalf("expected draining stream to finish and release inflight, got %d", got)
+	}
+	mu.Lock()
+	drainingCalls := calls["Bearer sk-draining-stream"]
+	liveCalls := calls["Bearer sk-live-stream"]
+	mu.Unlock()
+	if drainingCalls != 1 {
+		t.Fatalf("draining account calls=%d", drainingCalls)
+	}
+	if liveCalls != 1 {
+		t.Fatalf("live account calls=%d", liveCalls)
 	}
 }
 

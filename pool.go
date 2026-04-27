@@ -72,6 +72,8 @@ const (
 // Codex seats leave rotation once usage reaches 90%, i.e. when remaining headroom is 10% or below.
 const codexPreemptiveUsedThreshold = 0.90
 
+const defaultLowHeadroomReservePct = 1.0 - codexPreemptiveUsedThreshold
+
 type routingState struct {
 	Eligible               bool
 	BlockReason            string
@@ -137,8 +139,33 @@ func usageSnapshotHasObservedHeadroom(snapshot UsageSnapshot) bool {
 	return false
 }
 
+func normalizeLowHeadroomReservePct(reserve float64) float64 {
+	if reserve < 0 {
+		return defaultLowHeadroomReservePct
+	}
+	if reserve > 1 {
+		reserve = reserve / 100
+	}
+	if reserve > 0.90 {
+		return 0.90
+	}
+	return reserve
+}
+
+func usageAtOrAboveReserveThreshold(used, reserve float64) bool {
+	reserve = normalizeLowHeadroomReservePct(reserve)
+	if reserve <= 0 {
+		return false
+	}
+	threshold := 1.0 - reserve
+	if threshold < 0 {
+		threshold = 0
+	}
+	return used >= threshold
+}
+
 func usageAtOrAbovePreemptiveThreshold(used float64) bool {
-	return used >= codexPreemptiveUsedThreshold
+	return usageAtOrAboveReserveThreshold(used, defaultLowHeadroomReservePct)
 }
 
 func earliestFutureTime(now time.Time, candidates ...time.Time) time.Time {
@@ -155,6 +182,11 @@ func earliestFutureTime(now time.Time, candidates ...time.Time) time.Time {
 }
 
 func routingStateLocked(a *Account, now time.Time, accountType AccountType, requiredPlan string) routingState {
+	return routingStateLockedWithReserve(a, now, accountType, requiredPlan, defaultLowHeadroomReservePct)
+}
+
+func routingStateLockedWithReserve(a *Account, now time.Time, accountType AccountType, requiredPlan string, lowHeadroomReservePct float64) routingState {
+	lowHeadroomReservePct = normalizeLowHeadroomReservePct(lowHeadroomReservePct)
 	if a == nil {
 		return routingState{Eligible: false, BlockReason: "missing_account"}
 	}
@@ -260,8 +292,8 @@ func routingStateLocked(a *Account, now time.Time, accountType AccountType, requ
 			}
 			return state
 		}
-		primaryBlocked := state.PrimaryHeadroomKnown && usageAtOrAbovePreemptiveThreshold(primaryUsed)
-		secondaryBlocked := state.SecondaryHeadroomKnown && usageAtOrAbovePreemptiveThreshold(secondaryUsed)
+		primaryBlocked := state.PrimaryHeadroomKnown && usageAtOrAboveReserveThreshold(primaryUsed, lowHeadroomReservePct)
+		secondaryBlocked := state.SecondaryHeadroomKnown && usageAtOrAboveReserveThreshold(secondaryUsed, lowHeadroomReservePct)
 		if primaryBlocked || secondaryBlocked {
 			state.Eligible = false
 			state.BlockReason = "quota_pressured"
@@ -283,8 +315,8 @@ func routingStateLocked(a *Account, now time.Time, accountType AccountType, requ
 		return state
 	}
 	if a.Type == AccountTypeCodex && !isManagedCodexAPI {
-		primaryBlocked := usageAtOrAbovePreemptiveThreshold(primaryUsed)
-		secondaryBlocked := usageAtOrAbovePreemptiveThreshold(secondaryUsed)
+		primaryBlocked := usageAtOrAboveReserveThreshold(primaryUsed, lowHeadroomReservePct)
+		secondaryBlocked := usageAtOrAboveReserveThreshold(secondaryUsed, lowHeadroomReservePct)
 		switch {
 		case primaryBlocked && secondaryBlocked:
 			state.Eligible = false
@@ -1399,16 +1431,17 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 
 // poolState wraps accounts with a mutex.
 type poolState struct {
-	mu             sync.RWMutex
-	accounts       []*Account
-	convPin        map[string]string // conversation_id -> account ID
-	pendingClaims  map[string]int64
-	activeCodexID  string
-	activeAPIID    string
-	activeGeminiID string
-	debug          bool
-	rr             uint64
-	tierThreshold  float64 // secondary usage % at which we stop preferring a tier
+	mu                    sync.RWMutex
+	accounts              []*Account
+	convPin               map[string]string // conversation_id -> account ID
+	pendingClaims         map[string]int64
+	activeCodexID         string
+	activeAPIID           string
+	activeGeminiID        string
+	debug                 bool
+	rr                    uint64
+	tierThreshold         float64 // secondary usage % at which we stop preferring a tier
+	lowHeadroomReservePct float64 // minimum quota headroom required for new admissions (0 disables)
 }
 
 type accountRuntimeState struct {
@@ -1422,11 +1455,12 @@ type accountRuntimeState struct {
 
 func newPoolState(accs []*Account, debug bool) *poolState {
 	return &poolState{
-		accounts:      accs,
-		convPin:       map[string]string{},
-		pendingClaims: map[string]int64{},
-		debug:         debug,
-		tierThreshold: 0.15,
+		accounts:              accs,
+		convPin:               map[string]string{},
+		pendingClaims:         map[string]int64{},
+		debug:                 debug,
+		tierThreshold:         0.15,
+		lowHeadroomReservePct: defaultLowHeadroomReservePct,
 	}
 }
 
@@ -1595,6 +1629,14 @@ func (p *poolState) effectiveInflightLocked(a *Account) int64 {
 	return atomic.LoadInt64(&a.Inflight) + p.pendingClaims[a.ID]
 }
 
+func (p *poolState) routingStateLocked(a *Account, now time.Time, accountType AccountType, requiredPlan string) routingState {
+	reserve := defaultLowHeadroomReservePct
+	if p != nil {
+		reserve = p.lowHeadroomReservePct
+	}
+	return routingStateLockedWithReserve(a, now, accountType, requiredPlan, reserve)
+}
+
 func (p *poolState) pinnedEligibleCandidateLocked(now time.Time, conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string) *Account {
 	if conversationID == "" {
 		return nil
@@ -1614,7 +1656,7 @@ func (p *poolState) pinnedEligibleCandidateLocked(now time.Time, conversationID 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	routing := routingStateLocked(a, now, accountType, requiredPlan)
+	routing := p.routingStateLocked(a, now, accountType, requiredPlan)
 	ok = routing.Eligible
 	if ok && routing.CodexRateLimitBypass && p.debug {
 		log.Printf("ignoring rate limit for codex account %s (until %s)",
@@ -1697,7 +1739,7 @@ func (p *poolState) codexStickySeatNeedsRotationLocked(now time.Time, current *A
 		}
 
 		candidate.mu.Lock()
-		routing := routingStateLocked(candidate, now, AccountTypeCodex, requiredPlan)
+		routing := p.routingStateLocked(candidate, now, AccountTypeCodex, requiredPlan)
 		eligible := routing.Eligible && !authExpiryBlocksStickySelectionLocked(candidate, now)
 		candidate.mu.Unlock()
 		if !eligible {
@@ -1742,7 +1784,7 @@ func (p *poolState) activeGeminiCandidateLocked(now time.Time, exclude map[strin
 
 	a.mu.Lock()
 	expired := !a.ExpiresAt.IsZero() && a.ExpiresAt.Before(now)
-	routing := routingStateLocked(a, now, AccountTypeGemini, requiredPlan)
+	routing := p.routingStateLocked(a, now, AccountTypeGemini, requiredPlan)
 	ok := routing.Eligible && !expired
 	a.mu.Unlock()
 	if !ok {
@@ -1783,7 +1825,7 @@ func (p *poolState) activeCodexCandidateLocked(now time.Time, exclude map[string
 	}
 
 	a.mu.Lock()
-	routing := routingStateLocked(a, now, AccountTypeCodex, requiredPlan)
+	routing := p.routingStateLocked(a, now, AccountTypeCodex, requiredPlan)
 	ok := routing.Eligible && !authExpiryBlocksStickySelectionLocked(a, now) && codexAccountMatchesSelectionMode(a, requiredPlan, managed)
 	a.mu.Unlock()
 	if !ok {
@@ -1815,7 +1857,7 @@ func (p *poolState) stickyEligibleCandidateMatchingLocked(now time.Time, exclude
 
 		a.mu.Lock()
 		lastUsed := a.LastUsed
-		routing := routingStateLocked(a, now, accountType, requiredPlan)
+		routing := p.routingStateLocked(a, now, accountType, requiredPlan)
 		ok := routing.Eligible && !authExpiryBlocksStickySelectionLocked(a, now) && !lastUsed.IsZero()
 		if ok && (sticky == nil || lastUsed.After(stickyLastUsed)) {
 			sticky = a
@@ -1909,7 +1951,7 @@ func (p *poolState) selectEligibleCandidateMatchingLocked(now time.Time, exclude
 			continue
 		}
 		a.mu.Lock()
-		routing := routingStateLocked(a, now, accountType, requiredPlan)
+		routing := p.routingStateLocked(a, now, accountType, requiredPlan)
 		if !routing.Eligible {
 			if p.debug {
 				log.Printf(
@@ -2675,7 +2717,7 @@ func (p *poolState) getPoolUtilization() []PoolUtilization {
 		}
 		pa.total++
 
-		routing := routingStateLocked(a, now, "", "")
+		routing := p.routingStateLocked(a, now, "", "")
 		usedP := routing.PrimaryUsed
 		usedS := routing.SecondaryUsed
 

@@ -123,6 +123,83 @@ func TestCandidatePrefersAccountsUnderPreemptiveThreshold(t *testing.T) {
 	}
 }
 
+func TestCandidateAvoidsDrainingSeatAndReadmitsAfterCooldown(t *testing.T) {
+	now := time.Now().UTC()
+	draining := &Account{
+		ID:       "draining",
+		Type:     AccountTypeCodex,
+		PlanType: "pro",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.05,
+			SecondaryUsedPercent: 0.05,
+		},
+		RateLimitUntil: now.Add(30 * time.Second),
+	}
+	healthy := &Account{
+		ID:       "healthy",
+		Type:     AccountTypeCodex,
+		PlanType: "pro",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.40,
+			SecondaryUsedPercent: 0.40,
+		},
+	}
+	p := newPoolState([]*Account{draining, healthy}, false)
+	p.pin("conv-draining", draining.ID)
+
+	got := p.peekCandidateAt(now, AccountTypeCodex, "")
+	if got == nil || got.ID != healthy.ID {
+		t.Fatalf("expected new requests to avoid draining seat, got %+v", got)
+	}
+	got = p.candidate("conv-draining", nil, AccountTypeCodex, "")
+	if got == nil || got.ID != healthy.ID {
+		t.Fatalf("expected pinned conversation to leave draining seat, got %+v", got)
+	}
+
+	draining.mu.Lock()
+	draining.RateLimitUntil = now.Add(-time.Second)
+	draining.mu.Unlock()
+
+	got = p.candidateAtLocked(now.Add(time.Second), "", map[string]bool{healthy.ID: true}, AccountTypeCodex, "", false)
+	if got == nil || got.ID != draining.ID {
+		t.Fatalf("expected expired draining seat to be eligible again, got %+v", got)
+	}
+}
+
+func TestCandidateHonorsConfiguredLowHeadroomReservePct(t *testing.T) {
+	now := time.Now().UTC()
+	lowHeadroom := &Account{
+		ID:       "low-headroom",
+		Type:     AccountTypeCodex,
+		PlanType: "pro",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.80,
+			SecondaryUsedPercent: 0.10,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	healthy := &Account{
+		ID:       "healthy",
+		Type:     AccountTypeCodex,
+		PlanType: "pro",
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.10,
+			PrimaryResetAt:       now.Add(2 * time.Hour),
+			SecondaryResetAt:     now.Add(24 * time.Hour),
+		},
+	}
+	p := newPoolState([]*Account{lowHeadroom, healthy}, false)
+	p.lowHeadroomReservePct = 0.25
+	p.pin("conv-low-headroom", lowHeadroom.ID)
+
+	got := p.candidateAtLocked(now, "conv-low-headroom", nil, AccountTypeCodex, "", false)
+	if got == nil || got.ID != healthy.ID {
+		t.Fatalf("expected configured 25%% headroom reserve to eject pinned low-headroom seat, got %+v", got)
+	}
+}
+
 func TestRoutingStateBlocksExactTenPercentHeadroom(t *testing.T) {
 	now := time.Now()
 	exactThreshold := &Account{

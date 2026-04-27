@@ -1,12 +1,16 @@
 package main
 
-import "time"
+import (
+	"sync/atomic"
+	"time"
+)
 
 type proxyTestAccountSnapshot struct {
 	Dead                           bool
 	HealthStatus                   string
 	HealthError                    string
 	LastUsed                       time.Time
+	Inflight                       int64
 	Penalty                        float64
 	RateLimitUntil                 time.Time
 	GeminiModelRateLimitResetTimes map[string]time.Time
@@ -27,6 +31,7 @@ func snapshotProxyTestAccount(acc *Account) proxyTestAccountSnapshot {
 		HealthStatus:                   acc.HealthStatus,
 		HealthError:                    acc.HealthError,
 		LastUsed:                       acc.LastUsed,
+		Inflight:                       atomic.LoadInt64(&acc.Inflight),
 		Penalty:                        acc.Penalty,
 		RateLimitUntil:                 acc.RateLimitUntil,
 		GeminiModelRateLimitResetTimes: cloneTimeMap(acc.GeminiModelRateLimitResetTimes),

@@ -25,6 +25,7 @@ type ConfigFile struct {
 	FriendTagline                 string  `toml:"friend_tagline"`
 	AdminToken                    string  `toml:"admin_token"`
 	TierThreshold                 float64 `toml:"tier_threshold"`                     // Secondary usage % threshold for tier preference (default 0.15)
+	LowHeadroomReservePct         float64 `toml:"low_headroom_reserve_pct"`           // Minimum quota headroom reserved from new admissions (default 0.10)
 	PoolAPIDefaultMaxOutputTokens int     `toml:"pool_api_default_max_output_tokens"` // Default output-token reservation for virtual pool API key TPM policy
 
 	PoolUsers PoolUsersConfig `toml:"pool_users"`
