@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -59,10 +60,31 @@ func managedOpenAIAPIAccountID(apiKey string) string {
 	return fmt.Sprintf("openai_api_%x", sum[:6])
 }
 
-func saveManagedOpenAIAPIKey(poolDir, apiKey string) (*Account, bool, error) {
+func normalizeManagedOpenAIAPIBaseURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		if err == nil {
+			err = fmt.Errorf("missing scheme or host")
+		}
+		return "", fmt.Errorf("invalid openai api base url: %w", err)
+	}
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return strings.TrimRight(parsed.String(), "/"), nil
+}
+
+func saveManagedOpenAIAPIKey(poolDir, apiKey, apiBaseURL string) (*Account, bool, error) {
 	key := strings.TrimSpace(apiKey)
 	if key == "" {
 		return nil, false, fmt.Errorf("api key is empty")
+	}
+	apiBaseURL, err := normalizeManagedOpenAIAPIBaseURL(apiBaseURL)
+	if err != nil {
+		return nil, false, err
 	}
 	dir := filepath.Join(poolDir, managedOpenAIAPISubdir)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -83,24 +105,31 @@ func saveManagedOpenAIAPIKey(poolDir, apiKey string) (*Account, bool, error) {
 		"plan_type":      "api",
 		"health_status":  "unknown",
 	}
+	if apiBaseURL != "" {
+		root["openai_api_base_url"] = apiBaseURL
+	}
 	if err := atomicWriteJSON(path, root); err != nil {
 		return nil, false, err
 	}
 
 	return &Account{
-		Type:         AccountTypeCodex,
-		ID:           accountID,
-		File:         path,
-		AccessToken:  key,
-		PlanType:     "api",
-		AuthMode:     accountAuthModeAPIKey,
-		HealthStatus: "unknown",
+		Type:            AccountTypeCodex,
+		ID:              accountID,
+		File:            path,
+		AccessToken:     key,
+		PlanType:        "api",
+		AuthMode:        accountAuthModeAPIKey,
+		HealthStatus:    "unknown",
+		UpstreamBaseURL: apiBaseURL,
 	}, created, nil
 }
 
 func (h *proxyHandler) handleOperatorCodexAPIKeyAdd(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
-		APIKey string `json:"api_key"`
+		APIKey           string `json:"api_key"`
+		APIBaseURL       string `json:"api_base_url"`
+		OpenAIAPIBaseURL string `json:"openai_api_base_url"`
+		UpstreamBaseURL  string `json:"upstream_base_url"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&payload); err != nil {
 		respondJSONError(w, http.StatusBadRequest, "invalid json body")
@@ -117,7 +146,8 @@ func (h *proxyHandler) handleOperatorCodexAPIKeyAdd(w http.ResponseWriter, r *ht
 		return
 	}
 
-	acc, created, err := saveManagedOpenAIAPIKey(h.cfg.poolDir, apiKey)
+	apiBaseURL := firstNonEmpty(payload.OpenAIAPIBaseURL, payload.APIBaseURL, payload.UpstreamBaseURL)
+	acc, created, err := saveManagedOpenAIAPIKey(h.cfg.poolDir, apiKey, apiBaseURL)
 	if err != nil {
 		respondJSONError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -131,12 +161,13 @@ func (h *proxyHandler) handleOperatorCodexAPIKeyAdd(w http.ResponseWriter, r *ht
 	h.reloadAccounts()
 
 	respondJSON(w, map[string]any{
-		"status":        "ok",
-		"account_id":    acc.ID,
-		"created":       created,
-		"health_status": firstNonEmpty(strings.TrimSpace(acc.HealthStatus), "unknown"),
-		"health_error":  sanitizeStatusMessage(acc.HealthError),
-		"dead":          acc.Dead,
+		"status":              "ok",
+		"account_id":          acc.ID,
+		"created":             created,
+		"openai_api_base_url": strings.TrimSpace(acc.UpstreamBaseURL),
+		"health_status":       firstNonEmpty(strings.TrimSpace(acc.HealthStatus), "unknown"),
+		"health_error":        sanitizeStatusMessage(acc.HealthError),
+		"dead":                acc.Dead,
 		"last_healthy_at": func() string {
 			if acc.LastHealthyAt.IsZero() {
 				return ""

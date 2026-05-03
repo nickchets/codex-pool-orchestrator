@@ -616,6 +616,8 @@ func (a *Account) applyRequestUsage(u RequestUsage) {
 // CodexAuthJSON is the format for Codex auth.json files.
 type CodexAuthJSON struct {
 	OpenAIKey                 *string           `json:"OPENAI_API_KEY"`
+	OpenAIAPIBaseURL          string            `json:"openai_api_base_url,omitempty"`
+	APIBaseURL                string            `json:"api_base_url,omitempty"`
 	Tokens                    *TokenData        `json:"tokens"`
 	LastRefresh               *time.Time        `json:"last_refresh,omitempty"`
 	LastHealthyAt             *time.Time        `json:"last_healthy_at,omitempty"`
@@ -2294,6 +2296,12 @@ func saveCodexAccount(a *Account) error {
 			root["plan_type"] = strings.TrimSpace(a.PlanType)
 		} else {
 			root["plan_type"] = "api"
+		}
+		if strings.TrimSpace(a.UpstreamBaseURL) != "" {
+			root["openai_api_base_url"] = strings.TrimSpace(a.UpstreamBaseURL)
+		} else {
+			delete(root, "openai_api_base_url")
+			delete(root, "api_base_url")
 		}
 		if !a.HealthCheckedAt.IsZero() {
 			root["health_checked_at"] = a.HealthCheckedAt.UTC().Format(time.RFC3339Nano)

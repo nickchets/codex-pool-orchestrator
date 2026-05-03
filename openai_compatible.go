@@ -10,6 +10,9 @@ import (
 )
 
 var defaultOpenAICompatibleModelIDs = []string{
+	"gpt-5.5",
+	"gpt-5.4",
+	"gpt-5.4-pro",
 	"gpt-5-codex",
 	"gpt-5",
 	"gpt-5-mini",
@@ -303,12 +306,22 @@ func buildOpenAICompatibleModelsEntry(allowedModels []string) codexModelsCacheEn
 			"owned_by": "codex-pool",
 		})
 	}
-	body, err := json.Marshal(map[string]any{
-		"object": "list",
-		"data":   data,
-	})
+
+	specs := make([]gitLabCodexModelSpec, 0, len(ids))
+	for idx, id := range ids {
+		spec := gitLabCodexGenericModelSpec(id, idx+1)
+		spec.Description = "OpenAI-compatible model routed through codex-pool."
+		specs = append(specs, spec)
+	}
+	catalog := buildGitLabCodexModelsEntry(specs)
+	root := map[string]any{}
+	_ = json.Unmarshal(catalog.Body, &root)
+	root["object"] = "list"
+	root["data"] = data
+
+	body, err := json.Marshal(root)
 	if err != nil {
-		body = []byte(`{"object":"list","data":[]}`)
+		body = []byte(`{"object":"list","data":[],"models":[]}`)
 	}
 	return codexModelsCacheEntry{
 		Body:        body,

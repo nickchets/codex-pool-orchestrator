@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1834,6 +1835,72 @@ func TestLocalOperatorCodexAPIKeyAddStoresManagedKey(t *testing.T) {
 	}
 }
 
+func TestLocalOperatorCodexAPIKeyAddUsesPerKeyAPIBaseURL(t *testing.T) {
+	probeHits := 0
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		probeHits++
+		if r.URL.Path != "/v1/responses" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_probe","status":"completed"}`))
+	}))
+	defer apiServer.Close()
+
+	defaultBase, err := url.Parse("http://127.0.0.1:1")
+	if err != nil {
+		t.Fatalf("parse default api base: %v", err)
+	}
+	codex := NewCodexProvider(defaultBase, defaultBase, defaultBase, defaultBase)
+	claude := NewClaudeProvider(defaultBase)
+	gemini := NewGeminiProvider(defaultBase, defaultBase)
+
+	poolDir := t.TempDir()
+	h := &proxyHandler{
+		cfg:       config{poolDir: poolDir},
+		pool:      newPoolState(nil, false),
+		registry:  NewProviderRegistry(codex, claude, gemini),
+		transport: http.DefaultTransport,
+	}
+
+	reqBody := fmt.Sprintf(`{"api_key":"sk-test-custom-base","openai_api_base_url":%q}`, apiServer.URL)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/operator/codex/api-key-add", strings.NewReader(reqBody))
+	req.Host = "127.0.0.1:8989"
+	req.RemoteAddr = "127.0.0.1:4242"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if probeHits != 1 {
+		t.Fatalf("probeHits=%d, want 1", probeHits)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode json: %v", err)
+	}
+	accountID, _ := payload["account_id"].(string)
+	keyPath := filepath.Join(poolDir, managedOpenAIAPISubdir, accountID+".json")
+	raw, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read stored key: %v", err)
+	}
+	var stored map[string]any
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatalf("decode stored key: %v", err)
+	}
+	if stored["openai_api_base_url"] != apiServer.URL {
+		t.Fatalf("stored openai_api_base_url=%v, want %s", stored["openai_api_base_url"], apiServer.URL)
+	}
+	accounts := h.pool.allAccounts()
+	if len(accounts) != 1 || accounts[0].UpstreamBaseURL != apiServer.URL {
+		t.Fatalf("loaded upstream base mismatch: %+v", accounts)
+	}
+}
+
 func TestLocalOperatorCodexAPIKeyAddMarksQuotaKeyDead(t *testing.T) {
 	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/responses" {
@@ -3465,7 +3532,7 @@ func TestLocalOperatorAccountDeleteRemovesManagedAPIKeyAndReloadsPool(t *testing
 	gemini := NewGeminiProvider(apiBase, apiBase)
 
 	poolDir := t.TempDir()
-	acc, _, err := saveManagedOpenAIAPIKey(poolDir, "sk-proj-test-delete")
+	acc, _, err := saveManagedOpenAIAPIKey(poolDir, "sk-test-delete", "")
 	if err != nil {
 		t.Fatalf("save managed key: %v", err)
 	}

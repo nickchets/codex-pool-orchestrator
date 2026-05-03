@@ -101,14 +101,15 @@ func (p *CodexProvider) LoadAccount(name, path string, data []byte) (*Account, e
 	}
 	if aj.OpenAIKey != nil && strings.TrimSpace(*aj.OpenAIKey) != "" {
 		acc := &Account{
-			Type:        AccountTypeCodex,
-			ID:          strings.TrimSuffix(name, filepath.Ext(name)),
-			File:        path,
-			AccessToken: strings.TrimSpace(*aj.OpenAIKey),
-			PlanType:    firstNonEmpty(strings.TrimSpace(aj.PlanType), "api"),
-			AuthMode:    accountAuthModeAPIKey,
-			Disabled:    aj.Disabled,
-			Dead:        aj.Dead,
+			Type:            AccountTypeCodex,
+			ID:              strings.TrimSuffix(name, filepath.Ext(name)),
+			File:            path,
+			AccessToken:     strings.TrimSpace(*aj.OpenAIKey),
+			PlanType:        firstNonEmpty(strings.TrimSpace(aj.PlanType), "api"),
+			AuthMode:        accountAuthModeAPIKey,
+			Disabled:        aj.Disabled,
+			Dead:            aj.Dead,
+			UpstreamBaseURL: firstNonEmpty(strings.TrimSpace(aj.OpenAIAPIBaseURL), strings.TrimSpace(aj.APIBaseURL)),
 		}
 		if strings.TrimSpace(aj.AuthMode) != "" {
 			acc.AuthMode = strings.TrimSpace(aj.AuthMode)
@@ -425,8 +426,15 @@ func (p *CodexProvider) UpstreamURLForAccount(path string, acc *Account) *url.UR
 			return parsed
 		}
 	}
-	if isManagedCodexAPIKeyAccount(acc) && p.apiBase != nil {
-		return p.apiBase
+	if isManagedCodexAPIKeyAccount(acc) {
+		if rawBase := strings.TrimSpace(acc.UpstreamBaseURL); rawBase != "" {
+			if parsed, err := url.Parse(rawBase); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+				return parsed
+			}
+		}
+		if p.apiBase != nil {
+			return p.apiBase
+		}
 	}
 	return p.UpstreamURL(path)
 }
