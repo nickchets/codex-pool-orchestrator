@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -33,10 +34,27 @@ type contextCanceledError struct{}
 
 func (contextCanceledError) Error() string { return "context canceled" }
 
+type lockedLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func captureLogs(t *testing.T, fn func()) string {
 	t.Helper()
 
-	var buf bytes.Buffer
+	var buf lockedLogBuffer
 	prevWriter := log.Writer()
 	prevFlags := log.Flags()
 	log.SetOutput(&buf)
