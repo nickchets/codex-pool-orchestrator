@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Go 1.24.x verify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache: true
+
+      - name: Show Go version
+        run: go version
+
+      - name: Diff and whitespace check
+        run: make diff-check
+
+      - name: Go test
+        run: make test
+
+      - name: Selected race tests
+        run: make test-race-selected
+
+      - name: Go vet
+        run: make vet
+
+      - name: Build
+        run: make build BUILD_OUTPUT="${RUNNER_TEMP}/codex-pool-orchestrator"
+
+      - name: Install gitleaks
+        env:
+          GOBIN: ${{ runner.temp }}/bin
+          GITLEAKS_VERSION: v8.30.1
+        run: |
+          mkdir -p "${GOBIN}"
+          go install "github.com/gitleaks/gitleaks/v8@${GITLEAKS_VERSION}"
+          echo "${GOBIN}" >> "${GITHUB_PATH}"
+
+      - name: Gitleaks
+        run: make secrets GITLEAKS_REPORT="${RUNNER_TEMP}/gitleaks.redacted.json"

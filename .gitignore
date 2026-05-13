@@ -11,6 +11,11 @@
 
 # Testing / automation
 .playwright-mcp/
+.pytest_cache/
+
+# Local Hermes/devloop artifacts
+.hermes/
+*.bak.*
 
 # Local notes (deployment docs, personal notes)
 .localnotes/
