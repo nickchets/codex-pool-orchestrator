@@ -163,7 +163,7 @@ func TestServeCLCodeSetupScript_Bash(t *testing.T) {
 }
 
 func TestServeGeminiSetupScript_PowerShell(t *testing.T) {
-	secret := "test-secret-key-12345678901234567890"
+	secret := lowEntropyTestSecret(t)
 	t.Setenv("POOL_JWT_SECRET", secret)
 
 	tmpDir := t.TempDir()
@@ -221,7 +221,7 @@ func TestServeGeminiSetupScript_PowerShell(t *testing.T) {
 }
 
 func TestServeOpenCodeSetupScript_PowerShell(t *testing.T) {
-	secret := "test-secret-key-12345678901234567890"
+	secret := lowEntropyTestSecret(t)
 	t.Setenv("POOL_JWT_SECRET", secret)
 
 	tmpDir := t.TempDir()
@@ -272,7 +272,7 @@ func TestServeOpenCodeSetupScript_PowerShell(t *testing.T) {
 }
 
 func TestServeOpenCodeSetupScript_Bash(t *testing.T) {
-	secret := "test-secret-key-12345678901234567890"
+	secret := lowEntropyTestSecret(t)
 	t.Setenv("POOL_JWT_SECRET", secret)
 
 	tmpDir := t.TempDir()
@@ -320,7 +320,7 @@ func TestServeOpenCodeSetupScript_Bash(t *testing.T) {
 }
 
 func TestServeGeminiSetupScript_Bash(t *testing.T) {
-	secret := "test-secret-key-12345678901234567890"
+	secret := lowEntropyTestSecret(t)
 	t.Setenv("POOL_JWT_SECRET", secret)
 
 	tmpDir := t.TempDir()
@@ -372,7 +372,7 @@ func TestServeGeminiSetupScript_Bash(t *testing.T) {
 }
 
 func TestServeClaudeSetupScript_PowerShell(t *testing.T) {
-	secret := "test-secret-key-12345678901234567890"
+	secret := lowEntropyTestSecret(t)
 	t.Setenv("POOL_JWT_SECRET", secret)
 
 	// Ensure env is not contaminated by user-specific settings during test runs.
@@ -473,6 +473,28 @@ func TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction(t *testing.T) 
 		"GitLab Claude Pool",
 		"Start Codex OAuth",
 		"/operator/codex/oauth-start",
+		"Phone / remote fallback.",
+		"Generate Mobile Login Link",
+		"/admin/codex/add",
+		"/admin/codex/exchange",
+		"Add from Callback Link",
+		"Paste the full localhost callback URL here",
+		"codex-oauth-callback-link-input",
+		"Phone / remote callback flow completed successfully.",
+		"currentDashboardAuthContext",
+		"dashboardAuthFetch('/admin/codex/add'",
+		"dashboardAuthFetch('/admin/codex/exchange'",
+		"X-Admin-Token",
+		"X-Friend-Code",
+		"localStorage.getItem('friendCode')",
+		"Manual seat refresh.",
+		"Force Refresh All Seats",
+		"codex-refresh-all-btn",
+		"codex-refresh-all-status",
+		"forceRefreshAllAccountsFromWeb()",
+		"Loading live account list for manual refresh...",
+		"Manual refresh finished:",
+		"adminAccountsBasePath()",
 		"/operator/codex/api-key-add",
 		"/operator/claude/gitlab-token-add",
 		"/operator/account-delete",
@@ -518,7 +540,6 @@ func TestServeFriendLanding_LocalTemplateIncludesCodexOAuthAction(t *testing.T) 
 		"/hero.png",
 		"hero-art",
 		"hero-wrapper",
-		"/admin/codex/add",
 		"/admin/accounts",
 		"open http://127.0.0.1:8989/status",
 		"cp pool/gemini_ACCOUNT.json ~/.gemini/oauth_creds.json",

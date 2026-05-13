@@ -11,7 +11,7 @@ import (
 )
 
 func TestSignAndValidateJWT(t *testing.T) {
-	secret := "test-secret-key-12345678901234567890"
+	secret := lowEntropyTestSecret(t)
 	claims := map[string]any{
 		"exp": time.Now().Add(1 * time.Hour).Unix(),
 		"iss": "https://auth.openai.com",
@@ -412,7 +412,7 @@ func TestPoolUserStoreLoadsExistingUserArrayWithoutTokenFile(t *testing.T) {
 }
 
 func TestGenerateCodexAuth(t *testing.T) {
-	secret := "test-secret-key-12345678901234567890"
+	secret := lowEntropyTestSecret(t)
 	user := &PoolUser{
 		ID:        "abcdef1234567890abcdef1234567890",
 		Email:     "test@example.com",
@@ -465,7 +465,7 @@ func TestGenerateCodexAuth(t *testing.T) {
 }
 
 func TestGenerateGeminiAuth(t *testing.T) {
-	secret := "test-secret-key-12345678901234567890"
+	secret := lowEntropyTestSecret(t)
 	user := &PoolUser{
 		ID:        "abcdef1234567890abcdef1234567890",
 		Email:     "test@example.com",
@@ -596,7 +596,7 @@ func TestLooksLikeProviderCredential(t *testing.T) {
 }
 
 func TestClaudePoolToken_FormatAndBackwardCompatibility(t *testing.T) {
-	secret := "test-secret-key-12345678901234567890"
+	secret := lowEntropyTestSecret(t)
 	userID := "user123"
 
 	tok := generateClaudePoolToken(secret, userID)

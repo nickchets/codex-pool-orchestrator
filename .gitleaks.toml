@@ -1,0 +1,15 @@
+title = "codex-pool local gitleaks allowlists"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Narrow local artifact allowlists plus public Claude OAuth client ID constant"
+paths = [
+  '''(^|/)\.hermes/''',
+  '''(^|/)[^/]+\.bak\.[0-9]{8}-[0-9]{6}$''',
+]
+regexTarget = "line"
+regexes = [
+  '''ClaudeOAuthClientID\s*=\s*"[^"]+"''',
+]

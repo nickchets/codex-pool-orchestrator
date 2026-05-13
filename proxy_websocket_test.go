@@ -722,7 +722,7 @@ func performRawWebSocketHandshake(
 	}
 	defer conn.Close()
 
-	key := "dGhlIHNhbXBsZSBub25jZQ=="
+	key := validTestWebSocketHandshakeKey(t, path)
 	request := fmt.Sprintf(
 		"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n",
 		path,
@@ -773,7 +773,7 @@ func performRawWebSocketHTTPResponse(
 	}
 	defer conn.Close()
 
-	key := "dGhlIHNhbXBsZSBub25jZQ=="
+	key := validTestWebSocketHandshakeKey(t, path)
 	request := fmt.Sprintf(
 		"GET %s HTTP/1.1\r\nHost: %s\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: %s\r\n",
 		path,
