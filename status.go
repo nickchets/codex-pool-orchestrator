@@ -12,32 +12,38 @@ import (
 
 // StatusData contains all the data for the status page.
 type StatusData struct {
-	GeneratedAt          time.Time                     `json:"generated_at"`
-	Uptime               time.Duration                 `json:"uptime"`
-	TotalCount           int                           `json:"total_count"`
-	CodexCount           int                           `json:"codex_count"`
-	CodexSeatCount       int                           `json:"codex_seat_count,omitempty"`
-	GeminiCount          int                           `json:"gemini_count"`
-	ClaudeCount          int                           `json:"claude_count"`
-	KimiCount            int                           `json:"kimi_count"`
-	MinimaxCount         int                           `json:"minimax_count"`
-	PoolUsers            int                           `json:"pool_users,omitempty"`
-	OpenAIAPIPool        OpenAIAPIPoolStatus           `json:"openai_api_pool"`
-	GitLabClaudePool     GitLabClaudePoolStatus        `json:"gitlab_claude_pool"`
-	GeminiOperator       GeminiOperatorStatus          `json:"gemini_operator"`
-	GeminiPool           *GeminiPoolStatus             `json:"gemini_pool,omitempty"`
-	Quarantine           QuarantineStatus              `json:"quarantine,omitempty"`
-	PoolSummary          PoolDashboardSummary          `json:"pool_summary"`
-	CurrentSeat          *CurrentSeatStatus            `json:"current_seat,omitempty"`
-	ActiveSeat           *CurrentSeatStatus            `json:"active_seat,omitempty"`
-	LastUsedSeat         *CurrentSeatStatus            `json:"last_used_seat,omitempty"`
-	BestEligibleSeat     *CurrentSeatStatus            `json:"best_eligible_seat,omitempty"`
-	WorkspaceGroups      []PoolDashboardWorkspaceGroup `json:"workspace_groups"`
-	Accounts             []AccountStatus               `json:"accounts"`
-	TokenAnalytics       *TokenAnalytics               `json:"token_analytics,omitempty"`
-	PoolUtilization      []PoolUtilization             `json:"pool_utilization,omitempty"`
-	CodexForcedPlan      string                        `json:"codex_forced_plan,omitempty"`
-	LocalOperatorEnabled bool                          `json:"-"`
+	GeneratedAt                     time.Time                     `json:"generated_at"`
+	Uptime                          time.Duration                 `json:"uptime"`
+	TotalCount                      int                           `json:"total_count"`
+	CodexCount                      int                           `json:"codex_count"`
+	CodexSeatCount                  int                           `json:"codex_seat_count,omitempty"`
+	GeminiCount                     int                           `json:"gemini_count"`
+	ClaudeCount                     int                           `json:"claude_count"`
+	KimiCount                       int                           `json:"kimi_count"`
+	MinimaxCount                    int                           `json:"minimax_count"`
+	PoolUsers                       int                           `json:"pool_users,omitempty"`
+	OpenAIAPIPool                   OpenAIAPIPoolStatus           `json:"openai_api_pool"`
+	GitLabClaudePool                GitLabClaudePoolStatus        `json:"gitlab_claude_pool"`
+	GeminiOperator                  GeminiOperatorStatus          `json:"gemini_operator"`
+	GeminiPool                      *GeminiPoolStatus             `json:"gemini_pool,omitempty"`
+	Quarantine                      QuarantineStatus              `json:"quarantine,omitempty"`
+	PoolSummary                     PoolDashboardSummary          `json:"pool_summary"`
+	CurrentSeat                     *CurrentSeatStatus            `json:"current_seat,omitempty"`
+	ActiveSeat                      *CurrentSeatStatus            `json:"active_seat,omitempty"`
+	LastUsedSeat                    *CurrentSeatStatus            `json:"last_used_seat,omitempty"`
+	BestEligibleSeat                *CurrentSeatStatus            `json:"best_eligible_seat,omitempty"`
+	WorkspaceGroups                 []PoolDashboardWorkspaceGroup `json:"workspace_groups"`
+	Accounts                        []AccountStatus               `json:"accounts"`
+	TokenAnalytics                  *TokenAnalytics               `json:"token_analytics,omitempty"`
+	PoolUtilization                 []PoolUtilization             `json:"pool_utilization,omitempty"`
+	CodexForcedPlan                 string                        `json:"codex_forced_plan,omitempty"`
+	ProtocolAdapters                ProtocolAdapterStatus         `json:"protocol_adapters"`
+	PrimaryHeadroomReservePct       float64                       `json:"primary_headroom_reserve_pct,omitempty"`
+	SecondaryHeadroomReservePct     float64                       `json:"secondary_headroom_reserve_pct,omitempty"`
+	PrimaryPreemptiveThresholdPct   float64                       `json:"primary_preemptive_threshold_pct,omitempty"`
+	SecondaryPreemptiveThresholdPct float64                       `json:"secondary_preemptive_threshold_pct,omitempty"`
+	LocalOperatorEnabled            bool                          `json:"-"`
+	UpstreamErrorSummary            *UpstreamErrorSummary         `json:"upstream_error_summary,omitempty"`
 }
 
 type PoolDashboardSummary struct {
@@ -46,6 +52,10 @@ type PoolDashboardSummary struct {
 	WorkspaceCount   int                                 `json:"workspace_count"`
 	NextRecoveryAt   string                              `json:"next_recovery_at,omitempty"`
 	Providers        map[string]PoolDashboardProviderSum `json:"providers,omitempty"`
+}
+
+type ProtocolAdapterStatus struct {
+	CodexChatCompletionsResponsesAdapter bool `json:"codex_chat_completions_responses_adapter"`
 }
 
 type PoolDashboardProviderSum struct {
@@ -448,19 +458,22 @@ type AccountStatus struct {
 }
 
 type PoolDashboardRouting struct {
-	State                  string  `json:"state,omitempty"`
-	Eligible               bool    `json:"eligible"`
-	BlockReason            string  `json:"block_reason,omitempty"`
-	DegradedReason         string  `json:"degraded_reason,omitempty"`
-	PrimaryUsedPct         float64 `json:"primary_used_pct"`
-	SecondaryUsedPct       float64 `json:"secondary_used_pct"`
-	PrimaryHeadroomPct     float64 `json:"primary_headroom_pct"`
-	SecondaryHeadroomPct   float64 `json:"secondary_headroom_pct"`
-	PrimaryHeadroomKnown   bool    `json:"primary_headroom_known,omitempty"`
-	SecondaryHeadroomKnown bool    `json:"secondary_headroom_known,omitempty"`
-	RecoveryAt             string  `json:"recovery_at,omitempty"`
-	CodexRateLimitBypass   bool    `json:"codex_rate_limit_bypass,omitempty"`
-	PreemptiveThresholdPct float64 `json:"preemptive_threshold_pct,omitempty"`
+	State                           string  `json:"state,omitempty"`
+	Eligible                        bool    `json:"eligible"`
+	BlockReason                     string  `json:"block_reason,omitempty"`
+	DegradedReason                  string  `json:"degraded_reason,omitempty"`
+	PrimaryUsedPct                  float64 `json:"primary_used_pct"`
+	SecondaryUsedPct                float64 `json:"secondary_used_pct"`
+	PrimaryHeadroomPct              float64 `json:"primary_headroom_pct"`
+	SecondaryHeadroomPct            float64 `json:"secondary_headroom_pct"`
+	PrimaryHeadroomKnown            bool    `json:"primary_headroom_known,omitempty"`
+	SecondaryHeadroomKnown          bool    `json:"secondary_headroom_known,omitempty"`
+	RecoveryAt                      string  `json:"recovery_at,omitempty"`
+	CodexRateLimitBypass            bool    `json:"codex_rate_limit_bypass,omitempty"`
+	PreemptiveThresholdPct          float64 `json:"preemptive_threshold_pct,omitempty"`
+	SecondaryPreemptiveThresholdPct float64 `json:"secondary_preemptive_threshold_pct,omitempty"`
+	PrimaryHeadroomReservePct       float64 `json:"primary_headroom_reserve_pct,omitempty"`
+	SecondaryHeadroomReservePct     float64 `json:"secondary_headroom_reserve_pct,omitempty"`
 }
 
 type poolWorkspaceAccumulator struct {
@@ -1246,21 +1259,24 @@ func enrichGitLabClaudeDashboardStatus(status *AccountStatus, snapshot accountSn
 	}
 }
 
-func buildPoolDashboardRouting(snapshot accountSnapshot, routing routingState, now time.Time) PoolDashboardRouting {
+func buildPoolDashboardRouting(snapshot accountSnapshot, routing routingState, primaryReserve float64, secondaryReserve float64, now time.Time) PoolDashboardRouting {
 	state, degradedReason := geminiRoutingDisplay(snapshot, routing, now)
 	row := PoolDashboardRouting{
-		State:                  state,
-		Eligible:               routing.Eligible,
-		BlockReason:            routing.BlockReason,
-		DegradedReason:         degradedReason,
-		PrimaryUsedPct:         routing.PrimaryUsed * 100,
-		SecondaryUsedPct:       routing.SecondaryUsed * 100,
-		PrimaryHeadroomPct:     routing.PrimaryHeadroom * 100,
-		SecondaryHeadroomPct:   routing.SecondaryHeadroom * 100,
-		PrimaryHeadroomKnown:   routing.PrimaryHeadroomKnown,
-		SecondaryHeadroomKnown: routing.SecondaryHeadroomKnown,
-		CodexRateLimitBypass:   routing.CodexRateLimitBypass,
-		PreemptiveThresholdPct: codexPreemptiveUsedThreshold * 100,
+		State:                           state,
+		Eligible:                        routing.Eligible,
+		BlockReason:                     routing.BlockReason,
+		DegradedReason:                  degradedReason,
+		PrimaryUsedPct:                  routing.PrimaryUsed * 100,
+		SecondaryUsedPct:                routing.SecondaryUsed * 100,
+		PrimaryHeadroomPct:              routing.PrimaryHeadroom * 100,
+		SecondaryHeadroomPct:            routing.SecondaryHeadroom * 100,
+		PrimaryHeadroomKnown:            routing.PrimaryHeadroomKnown,
+		SecondaryHeadroomKnown:          routing.SecondaryHeadroomKnown,
+		CodexRateLimitBypass:            routing.CodexRateLimitBypass,
+		PreemptiveThresholdPct:          usedThresholdPctFromReserve(primaryReserve),
+		SecondaryPreemptiveThresholdPct: usedThresholdPctFromReserve(secondaryReserve),
+		PrimaryHeadroomReservePct:       normalizeLowHeadroomReservePct(primaryReserve) * 100,
+		SecondaryHeadroomReservePct:     normalizeLowHeadroomReservePct(secondaryReserve) * 100,
 	}
 	if !routing.RecoveryAt.IsZero() && routing.RecoveryAt.After(now) {
 		row.RecoveryAt = routing.RecoveryAt.Format(time.RFC3339)
@@ -1316,7 +1332,16 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		GeneratedAt: now,
 		Uptime:      now.Sub(h.startTime),
 	}
+	primaryReserve, secondaryReserve := h.pool.headroomReserves()
+	data.PrimaryHeadroomReservePct = normalizeLowHeadroomReservePct(primaryReserve) * 100
+	data.SecondaryHeadroomReservePct = normalizeLowHeadroomReservePct(secondaryReserve) * 100
+	data.PrimaryPreemptiveThresholdPct = usedThresholdPctFromReserve(primaryReserve)
+	data.SecondaryPreemptiveThresholdPct = usedThresholdPctFromReserve(secondaryReserve)
 	data.CodexForcedPlan = strings.TrimSpace(h.cfg.forceCodexRequiredPlan)
+	data.ProtocolAdapters = ProtocolAdapterStatus{
+		CodexChatCompletionsResponsesAdapter: h.cfg.codexChatCompletionsResponsesAdapter,
+	}
+	data.UpstreamErrorSummary = h.upstreamErrorSummary(now)
 
 	if h.poolUsers != nil {
 		data.PoolUsers = len(h.poolUsers.List())
@@ -1365,7 +1390,7 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 		}
 
 		routing := snapshot.Routing
-		routingRow := buildPoolDashboardRouting(snapshot, routing, now)
+		routingRow := buildPoolDashboardRouting(snapshot, routing, primaryReserve, secondaryReserve, now)
 		primaryUsed := routing.PrimaryUsed
 		secondaryUsed := routing.SecondaryUsed
 		effectivePrimary := primaryUsed
@@ -1524,6 +1549,23 @@ func (h *proxyHandler) buildPoolDashboardData(now time.Time) StatusData {
 	}
 
 	return data
+}
+
+func (h *proxyHandler) upstreamErrorSummary(now time.Time) *UpstreamErrorSummary {
+	if h == nil || h.upstreamErrors == nil {
+		return nil
+	}
+	return h.upstreamErrors.summary(now)
+}
+
+func (h *proxyHandler) recordUpstreamError(info upstreamErrorInfo, resp *http.Response) {
+	if h == nil {
+		return
+	}
+	if h.upstreamErrors == nil {
+		h.upstreamErrors = newUpstreamErrorTracker(256)
+	}
+	h.upstreamErrors.record(info, resp, time.Now().UTC())
 }
 
 func mapKeys(values map[string]struct{}) []string {
@@ -2040,6 +2082,16 @@ const statusHTML = `<!DOCTYPE html>
         {{end}}
     </div>
 
+    <div class="operator-card" style="margin-bottom: 20px;">
+        <div class="operator-title">Protocol Adapters</div>
+        <div class="muted">
+            Safe routing metadata only; no credentials, headers, or upstream tokens are exposed here.
+        </div>
+        <div class="result-block">
+            <div><strong>Codex chat.completions → responses adapter:</strong> {{if .ProtocolAdapters.CodexChatCompletionsResponsesAdapter}}enabled{{else}}disabled{{end}}</div>
+        </div>
+    </div>
+
     {{if .WorkspaceGroups}}
     <h2 style="color: #58a6ff; margin-top: 20px; margin-bottom: 10px;">🧩 Workspace Groups</h2>
     <div class="table-wrap">
@@ -2285,7 +2337,7 @@ const statusHTML = `<!DOCTYPE html>
     <p style="margin-top: 20px; color: #8b949e; font-size: 12px;">
 	        <strong>Note:</strong> Remaining columns show remaining headroom, not used quota.
 	        Primary/Secondary usage and recovery come from the latest observed quota snapshot.
-	        Codex seats leave rotation once headroom reaches 10% remaining and stay out until the observed reset restores headroom.
+	        Codex seats leave rotation once primary headroom reaches {{pct .PrimaryHeadroomReservePct}} remaining or secondary headroom reaches {{pct .SecondaryHeadroomReservePct}} remaining, and stay out until the observed reset restores headroom.
 	        Gemini seats can show <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">n/a</code> until the local proxy has an actual headroom observation.
 	        Gemini <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">provider</code>, <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">operational</code>, and <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">routing</code> lines are additive on purpose: a seat may be degraded-enabled even when provider truth is restricted.
 	        <code style="background: #21262d; padding: 2px 6px; border-radius: 3px;">Auth TTL</code>,

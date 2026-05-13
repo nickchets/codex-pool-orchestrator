@@ -331,7 +331,7 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !h.checkAdminAuth(w, r) {
 			return
 		}
-		h.metrics.serve(w, r)
+		h.serveMetrics(w, r)
 		return
 	case "/admin/reload":
 		if !h.checkAdminAuth(w, r) {

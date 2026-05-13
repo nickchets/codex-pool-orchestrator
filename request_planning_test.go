@@ -204,6 +204,89 @@ func TestPlanRouteKeepsAnthropicMessagesGeminiLowDirect(t *testing.T) {
 	}
 }
 
+func TestPlanRouteAdaptsCodexChatCompletionsToResponsesWhenEnabled(t *testing.T) {
+	h := newPlanningTestHandler(t)
+	h.cfg.codexChatCompletionsResponsesAdapter = true
+	req := httptest.NewRequest("POST", "http://example.com/v1/chat/completions", nil)
+	body := []byte(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	shape := buildBufferedRequestShape(req, body, nil)
+
+	plan, rewrittenBody, err := h.planRoute(AdmissionResult{Kind: AdmissionKindPoolUser, UserID: "u1"}, req, shape, body)
+	if err != nil {
+		t.Fatalf("plan route: %v", err)
+	}
+	if plan.AccountType != AccountTypeCodex {
+		t.Fatalf("account_type = %q", plan.AccountType)
+	}
+	if plan.UpstreamPath != "/v1/responses" {
+		t.Fatalf("upstream_path = %q", plan.UpstreamPath)
+	}
+	if plan.ResponseAdapter != responseAdapterCodexChatCompletionsFromResponsesStream {
+		t.Fatalf("response_adapter = %q", plan.ResponseAdapter)
+	}
+	if !strings.Contains(string(rewrittenBody), `"input"`) || !strings.Contains(string(rewrittenBody), `"stream":true`) {
+		t.Fatalf("rewritten body = %s", string(rewrittenBody))
+	}
+}
+
+func TestPlanRouteDoesNotAdaptExplicitNonCodexChatModelsWhenEnabled(t *testing.T) {
+	h := newPlanningTestHandler(t)
+	h.cfg.codexChatCompletionsResponsesAdapter = true
+	for _, model := range []string{"gemini-2.5-pro", "claude-sonnet-4", "kimi-k2", "minimax-m1", "o3", "gpt-4o", "gpt-6-preview"} {
+		req := httptest.NewRequest("POST", "http://example.com/v1/chat/completions", nil)
+		body := []byte(`{"model":"` + model + `","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+		shape := buildBufferedRequestShape(req, body, nil)
+
+		plan, _, err := h.planRoute(AdmissionResult{Kind: AdmissionKindPoolUser, UserID: "u1"}, req, shape, body)
+		if err != nil {
+			t.Fatalf("plan route for %s: %v", model, err)
+		}
+		if plan.ResponseAdapter == responseAdapterCodexChatCompletionsFromResponsesStream || plan.UpstreamPath == "/v1/responses" {
+			t.Fatalf("explicit non-Codex/unknown route %s used Codex adapter: %+v", model, plan)
+		}
+	}
+}
+
+func TestPlanRouteKeepsCodexChatCompletionsUnchangedWhenAdapterDisabled(t *testing.T) {
+	h := newPlanningTestHandler(t)
+	req := httptest.NewRequest("POST", "http://example.com/v1/chat/completions", nil)
+	body := []byte(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hi"}],"stream":true}`)
+	shape := buildBufferedRequestShape(req, body, nil)
+
+	plan, rewrittenBody, err := h.planRoute(AdmissionResult{Kind: AdmissionKindPoolUser, UserID: "u1"}, req, shape, body)
+	if err != nil {
+		t.Fatalf("plan route: %v", err)
+	}
+	if plan.AccountType != AccountTypeCodex {
+		t.Fatalf("account_type = %q", plan.AccountType)
+	}
+	if plan.UpstreamPath != "/v1/chat/completions" {
+		t.Fatalf("upstream_path = %q", plan.UpstreamPath)
+	}
+	if plan.ResponseAdapter != "" {
+		t.Fatalf("response_adapter = %q", plan.ResponseAdapter)
+	}
+	if string(rewrittenBody) != string(body) {
+		t.Fatalf("rewritten body changed while adapter disabled: %s", string(rewrittenBody))
+	}
+}
+
+func TestPlanRouteRejectsUnsupportedCodexChatCompletionsAdapterFeaturesLocally(t *testing.T) {
+	h := newPlanningTestHandler(t)
+	h.cfg.codexChatCompletionsResponsesAdapter = true
+	req := httptest.NewRequest("POST", "http://example.com/v1/chat/completions", nil)
+	body := []byte(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"lookup"}}]}`)
+	shape := buildBufferedRequestShape(req, body, nil)
+
+	_, _, err := h.planRoute(AdmissionResult{Kind: AdmissionKindPoolUser, UserID: "u1"}, req, shape, body)
+	if err == nil {
+		t.Fatal("plan route accepted unsupported adapter feature")
+	}
+	if got := strings.ToLower(err.Error()); !strings.Contains(got, "tools") || strings.Contains(got, "hi") {
+		t.Fatalf("error = %q, want field-only tools rejection", err.Error())
+	}
+}
+
 func TestPlanRouteRequiresCodexPro(t *testing.T) {
 	h := newPlanningTestHandler(t)
 	req := httptest.NewRequest("POST", "http://example.com/responses", nil)

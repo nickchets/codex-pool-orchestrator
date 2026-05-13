@@ -25,10 +25,11 @@ const (
 )
 
 type managedOpenAIAPIErrorDisposition struct {
-	Retry     bool
-	MarkDead  bool
-	RateLimit bool
-	Reason    string
+	Retry               bool
+	MarkDead            bool
+	RateLimit           bool
+	ProviderPolicyBlock bool
+	Reason              string
 }
 
 func bumpManagedOpenAIAPIPenaltyLocked(acc *Account, delta, cap float64, now time.Time) {
@@ -449,6 +450,9 @@ func classifyManagedOpenAIAPIErrorStrings(message, errType, code string) managed
 	}
 
 	reason := sanitizeStatusMessage(firstNonEmpty(message, code, errType))
+	if hasProviderPolicyBlockMarkers(strings.ToLower(strings.Join(fields, " "))) {
+		return managedOpenAIAPIErrorDisposition{Retry: true, ProviderPolicyBlock: true, Reason: firstNonEmpty(reason, "provider policy block")}
+	}
 	if containsAny("invalid_api_key", "incorrect api key", "incorrect_api_key", "organization_deactivated", "account_deactivated") {
 		return managedOpenAIAPIErrorDisposition{Retry: true, MarkDead: true, Reason: reason}
 	}

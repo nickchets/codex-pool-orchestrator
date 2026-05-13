@@ -1107,6 +1107,38 @@
                         </div>
 
                         <div class="action-card">
+                            <p>
+                                <strong>Phone / remote fallback.</strong> If you opened the protected Codex dashboard from a phone, generate a login link here, finish the OpenAI sign-in in any browser, then paste the full <code>http://localhost:1455/auth/callback?...</code> URL back below. The server matches the OAuth state and adds or refreshes the shared pool seat for you.
+                            </p>
+                            <button id="codex-oauth-manual-start-btn" class="action-btn" onclick="startCodexOAuthManualFromWeb()">Generate Mobile Login Link</button>
+                            <div id="codex-oauth-manual-start-status" class="status-line"></div>
+                            <div id="codex-oauth-manual-result" style="display: none; margin-top: 16px;">
+                                <div class="code-shell">
+                                    <button class="copy-btn" onclick="copyToClipboard('codex-oauth-manual-url', this)">Copy</button>
+                                    <pre id="codex-oauth-manual-url"></pre>
+                                </div>
+                                <a id="codex-oauth-manual-open" href="#" target="_blank" style="display: inline-block; margin-top: 10px; color: var(--accent); font-weight: 700; text-decoration: none;">Open Login Page</a>
+                            </div>
+                            <form onsubmit="event.preventDefault(); exchangeCodexCallbackLinkFromWeb();" style="margin-top: 14px;">
+                                <div class="input-row">
+                                    <textarea id="codex-oauth-callback-link-input" placeholder="Paste the full localhost callback URL here (http://localhost:1455/auth/callback?code=...)" autocomplete="off" spellcheck="false"></textarea>
+                                </div>
+                                <div class="input-row" style="margin-top: 10px;">
+                                    <button id="codex-oauth-callback-link-btn" class="action-btn" type="submit">Add from Callback Link</button>
+                                </div>
+                            </form>
+                            <div id="codex-oauth-callback-link-status" class="status-line"></div>
+                        </div>
+
+                        <div class="action-card">
+                            <p>
+                                <strong>Manual seat refresh.</strong> Forces a sequential refresh of every current pool account from the dashboard and waits between seats so the service-wide refresh spacing still behaves.
+                            </p>
+                            <button id="codex-refresh-all-btn" class="action-btn" onclick="forceRefreshAllAccountsFromWeb()">Force Refresh All Seats</button>
+                            <div id="codex-refresh-all-status" class="status-line"></div>
+                        </div>
+
+                        <div class="action-card">
                             <p>Add an OpenAI API key to the fallback API pool. The key is health-probed immediately after save.</p>
                             <form onsubmit="event.preventDefault(); addOpenAIApiKeyFromStatus();">
                                 <div class="input-row">
@@ -3059,8 +3091,43 @@ python3 -m webbrowser '{{.BaseURL}}/'
             });
         }
 
+        function currentDashboardAuthContext() {
+            let adminToken = '';
+            let friendCode = '';
+            try {
+                const current = new URL(window.location.href);
+                adminToken = String(current.searchParams.get('admin_token') || '').trim();
+                friendCode = String(current.searchParams.get('code') || '').trim();
+            } catch (error) {
+                adminToken = '';
+                friendCode = '';
+            }
+            if (!friendCode) {
+                try {
+                    friendCode = String(window.friendCode || localStorage.getItem('friendCode') || '').trim();
+                } catch (error) {
+                    friendCode = String(window.friendCode || '').trim();
+                }
+            }
+            return { adminToken, friendCode };
+        }
+
+        async function dashboardAuthFetch(url, options = {}) {
+            const opts = Object.assign({}, options || {});
+            const headers = new Headers(opts.headers || {});
+            const auth = currentDashboardAuthContext();
+            if (auth.adminToken && !headers.has('X-Admin-Token')) {
+                headers.set('X-Admin-Token', auth.adminToken);
+            }
+            if (auth.friendCode && !headers.has('X-Friend-Code')) {
+                headers.set('X-Friend-Code', auth.friendCode);
+            }
+            opts.headers = headers;
+            return fetch(url, opts);
+        }
+
         async function fetchJSONWithTextError(url, options = {}) {
-            const response = await fetch(url, options);
+            const response = await dashboardAuthFetch(url, options);
             const text = await response.text();
             let payload = null;
             try {
@@ -3072,6 +3139,92 @@ python3 -m webbrowser '{{.BaseURL}}/'
                 throw new Error((payload && payload.error) || text || ('Request failed: ' + response.status));
             }
             return payload || {};
+        }
+
+        function adminAccountsBasePath() {
+            return '/admin/' + 'accounts';
+        }
+
+        async function forceRefreshAllAccountsFromWeb() {
+            const button = document.getElementById('codex-refresh-all-btn');
+            const status = document.getElementById('codex-refresh-all-status');
+            if (!button || !status) {
+                return;
+            }
+
+            button.disabled = true;
+            status.style.color = 'var(--muted)';
+            status.textContent = 'Loading live account list for manual refresh...';
+
+            try {
+                const rawPayload = await fetchJSONWithTextError(adminAccountsBasePath(), {
+                    headers: { 'Accept': 'application/json' },
+                });
+                const rawAccounts = Array.isArray(rawPayload)
+                    ? rawPayload
+                    : (Array.isArray(rawPayload.accounts) ? rawPayload.accounts : []);
+                const accounts = rawAccounts
+                    .map((acc) => {
+                        const row = acc || {};
+                        const id = String(row.id || '').trim();
+                        return {
+                            id: id,
+                            label: accountDisplayName(row) || id,
+                        };
+                    })
+                    .filter((acc) => acc.id)
+                    .sort((left, right) => left.id.localeCompare(right.id));
+
+                if (accounts.length === 0) {
+                    status.style.color = 'var(--warning)';
+                    status.textContent = 'No accounts are currently available for manual refresh.';
+                    return;
+                }
+
+                let okCount = 0;
+                let errorCount = 0;
+                const problems = [];
+                const spacingMs = 6000;
+
+                for (let index = 0; index < accounts.length; index += 1) {
+                    const acc = accounts[index];
+                    status.style.color = 'var(--muted)';
+                    status.textContent = 'Refreshing ' + String(index + 1) + '/' + String(accounts.length) + ': ' + acc.label + '...';
+                    try {
+                        const result = await fetchJSONWithTextError(adminAccountsBasePath() + '/' + encodeURIComponent(acc.id) + '/refresh', {
+                            method: 'POST',
+                            headers: { 'Accept': 'application/json' },
+                        });
+                        if (String((result && result.status) || 'ok') === 'ok') {
+                            okCount += 1;
+                        } else {
+                            errorCount += 1;
+                            problems.push(acc.label + ': ' + String((result && result.error) || (result && result.health_error) || 'provider refresh error'));
+                        }
+                    } catch (error) {
+                        errorCount += 1;
+                        problems.push(acc.label + ': ' + String(error && error.message ? error.message : error));
+                    }
+                    if (index + 1 < accounts.length) {
+                        status.textContent = 'Refreshed ' + String(index + 1) + '/' + String(accounts.length) + '. Waiting 6s before next seat...';
+                        await delay(spacingMs);
+                    }
+                }
+
+                await loadDashboard();
+                if (errorCount === 0) {
+                    status.style.color = 'var(--success)';
+                    status.textContent = 'Manual refresh finished: ' + String(okCount) + '/' + String(accounts.length) + ' ok. Dashboard reloaded.';
+                    return;
+                }
+                status.style.color = 'var(--warning)';
+                status.textContent = 'Manual refresh finished: ' + String(okCount) + ' ok, ' + String(errorCount) + ' with provider errors. Dashboard reloaded. ' + compactDetail(problems.join(' · '), 220);
+            } catch (error) {
+                status.style.color = 'var(--danger)';
+                status.textContent = 'Manual refresh failed: ' + String(error && error.message ? error.message : error);
+            } finally {
+                button.disabled = false;
+            }
         }
 
         function selectedPoolUserIDForAPIKeys() {
@@ -3593,6 +3746,116 @@ opencode run -m codex-pool/gemini-3.1-pro-high "Reply with exactly OK."
                 if (!codexOAuthPopup) {
                     button.disabled = false;
                 }
+            }
+        }
+
+        async function startCodexOAuthManualFromWeb() {
+            const button = document.getElementById('codex-oauth-manual-start-btn');
+            const status = document.getElementById('codex-oauth-manual-start-status');
+            const result = document.getElementById('codex-oauth-manual-result');
+            const urlNode = document.getElementById('codex-oauth-manual-url');
+            const openLink = document.getElementById('codex-oauth-manual-open');
+            if (!button || !status || !result || !urlNode || !openLink) {
+                return;
+            }
+
+            button.disabled = true;
+            status.style.color = 'var(--muted)';
+            status.textContent = 'Generating login link for phone / remote callback flow...';
+
+            try {
+                const response = await dashboardAuthFetch('/admin/codex/add', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                const text = await response.text();
+                let data = null;
+                try {
+                    data = text ? JSON.parse(text) : null;
+                } catch (parseError) {
+                    data = null;
+                }
+                if (!response.ok) {
+                    throw new Error((data && data.error) || text || 'Failed to generate login link');
+                }
+                if (!data || !data.oauth_url) {
+                    throw new Error('Missing oauth_url in response');
+                }
+
+                urlNode.textContent = String(data.oauth_url);
+                openLink.href = String(data.oauth_url);
+                result.style.display = 'block';
+                status.style.color = 'var(--success)';
+                status.textContent = 'Login link ready. Complete sign-in, then paste the full localhost callback URL below.';
+            } catch (error) {
+                status.style.color = 'var(--danger)';
+                status.textContent = 'Failed to generate login link: ' + (error && error.message ? error.message : error);
+            } finally {
+                button.disabled = false;
+            }
+        }
+
+        async function exchangeCodexCallbackLinkFromWeb() {
+            const input = document.getElementById('codex-oauth-callback-link-input');
+            const button = document.getElementById('codex-oauth-callback-link-btn');
+            const status = document.getElementById('codex-oauth-callback-link-status');
+            const manualStatus = document.getElementById('codex-oauth-manual-start-status');
+            const manualResult = document.getElementById('codex-oauth-manual-result');
+            if (!input || !button || !status) {
+                return;
+            }
+
+            const callbackUrl = String(input.value || '').trim();
+            if (!callbackUrl) {
+                status.style.color = 'var(--danger)';
+                status.textContent = 'Paste the full localhost callback URL first.';
+                return;
+            }
+
+            button.disabled = true;
+            status.style.color = 'var(--muted)';
+            status.textContent = 'Applying callback URL on the server...';
+
+            try {
+                const response = await dashboardAuthFetch('/admin/codex/exchange', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ callback_url: callbackUrl })
+                });
+                const text = await response.text();
+                let data = null;
+                try {
+                    data = text ? JSON.parse(text) : null;
+                } catch (parseError) {
+                    data = null;
+                }
+                if (!response.ok) {
+                    throw new Error((data && data.error) || text || 'Failed to apply callback URL');
+                }
+
+                const accountID = String((data && data.account_id) || 'codex');
+                const refreshedExisting = !!(data && data.refreshed_existing);
+                input.value = '';
+                status.style.color = 'var(--success)';
+                status.textContent = refreshedExisting
+                    ? 'Callback URL applied. Refreshed ' + accountID + '. Reloading status...'
+                    : 'Callback URL applied. Added ' + accountID + '. Reloading status...';
+                if (manualStatus) {
+                    manualStatus.style.color = 'var(--success)';
+                    manualStatus.textContent = 'Phone / remote callback flow completed successfully.';
+                }
+                if (manualResult) {
+                    manualResult.style.display = 'none';
+                }
+                window.setTimeout(() => {
+                    void loadDashboard();
+                }, 900);
+            } catch (error) {
+                status.style.color = 'var(--danger)';
+                status.textContent = 'Failed to apply callback URL: ' + (error && error.message ? error.message : error);
+            } finally {
+                button.disabled = false;
             }
         }
 

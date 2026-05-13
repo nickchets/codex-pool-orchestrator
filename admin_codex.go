@@ -552,17 +552,29 @@ func saveNewCodexAccount(poolDir, accountID string, tokens *CodexTokenResponse) 
 		reusedExistingSeat = true
 	}
 
-	// Check if file already exists
+	// Check if file already exists. Many workspace aliases collapse to the
+	// same short accountID (for example workspace200 -> workspac), so suffixes
+	// must keep growing beyond 99 instead of falling back to overwriting the
+	// base file once workspac_2..workspac_99 are occupied.
 	if _, err := os.Stat(filePath); err == nil && !reusedExistingSeat {
-		// File exists, append a number
-		for i := 2; i <= 99; i++ {
-			newPath := filepath.Join(poolDir, fmt.Sprintf("%s_%d.json", accountID, i))
-			if _, err := os.Stat(newPath); os.IsNotExist(err) {
+		assignedUniquePath := false
+		for i := 2; i <= 100000; i++ {
+			candidateID := fmt.Sprintf("%s_%d", accountID, i)
+			newPath := filepath.Join(poolDir, candidateID+".json")
+			if _, statErr := os.Stat(newPath); os.IsNotExist(statErr) {
 				filePath = newPath
-				accountID = fmt.Sprintf("%s_%d", accountID, i)
+				accountID = candidateID
+				assignedUniquePath = true
 				break
+			} else if statErr != nil {
+				return "", "", reusedExistingSeat, fmt.Errorf("stat candidate account file: %w", statErr)
 			}
 		}
+		if !assignedUniquePath {
+			return "", "", reusedExistingSeat, fmt.Errorf("no free account filename slot for %q", accountID)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", "", reusedExistingSeat, fmt.Errorf("stat account file: %w", err)
 	}
 
 	authJSON := map[string]any{

@@ -40,6 +40,7 @@ type modelRouteDecision struct {
 	UpstreamPath    string
 	RewrittenBody   []byte
 	ResponseAdapter string
+	Err             error
 }
 
 type anthropicMessagesRequest struct {

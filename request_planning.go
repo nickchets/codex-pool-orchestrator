@@ -296,6 +296,9 @@ func (h *proxyHandler) planRoute(admission AdmissionResult, r *http.Request, sha
 	rewrittenBody := bodyBytes
 	if shape.RequestedModel != "" {
 		override := h.modelRouteOverride(shape.Path, shape.RequestedModel, bodyBytes)
+		if override.Err != nil {
+			return RoutePlan{}, nil, override.Err
+		}
 		if override.Provider != nil {
 			provider = override.Provider
 			targetBase = override.TargetBase

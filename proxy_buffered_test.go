@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -102,6 +103,90 @@ func newBufferedGitLabCodexAccountForTest(t *testing.T, dir, id, sourceToken, ga
 		HealthStatus:    "healthy",
 		LastHealthyAt:   time.Now().UTC(),
 	}
+}
+
+func newBufferedManagedOpenAIAPIAccountForTest(t *testing.T, dir, id, token string) *Account {
+	t.Helper()
+
+	file := filepath.Join(dir, id+".json")
+	checkedAt := time.Now().UTC()
+	payload, err := json.Marshal(map[string]any{
+		"OPENAI_API_KEY":    token,
+		"auth_mode":         accountAuthModeAPIKey,
+		"plan_type":         "api",
+		"health_status":     "healthy",
+		"health_checked_at": checkedAt.Format(time.RFC3339Nano),
+		"last_healthy_at":   checkedAt.Format(time.RFC3339Nano),
+	})
+	if err != nil {
+		t.Fatalf("marshal managed api account fixture: %v", err)
+	}
+	if err := os.WriteFile(file, payload, 0o600); err != nil {
+		t.Fatalf("write managed api account fixture %s: %v", file, err)
+	}
+
+	return &Account{
+		ID:              id,
+		Type:            AccountTypeCodex,
+		File:            file,
+		AccessToken:     token,
+		PlanType:        "api",
+		AuthMode:        accountAuthModeAPIKey,
+		HealthStatus:    "healthy",
+		HealthCheckedAt: checkedAt,
+		LastHealthyAt:   checkedAt,
+	}
+}
+
+func newBufferedManagedOpenAIAPIAccountsForTest(t *testing.T, count int) []*Account {
+	t.Helper()
+
+	dir := t.TempDir()
+	accounts := make([]*Account, 0, count)
+	for i := 1; i <= count; i++ {
+		id := fmt.Sprintf("openai_api_seat_%02d", i)
+		token := fmt.Sprintf("test-managed-openai-seat-%02d", i)
+		accounts = append(accounts, newBufferedManagedOpenAIAPIAccountForTest(t, dir, id, token))
+	}
+	return accounts
+}
+
+func bufferedOpenAIStyleServiceUnavailableResponse(req *http.Request) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusServiceUnavailable,
+		Status:     "503 Service Unavailable",
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body: io.NopCloser(strings.NewReader(`{
+			"error": {
+				"message": "server overloaded",
+				"type": "service_unavailable_error",
+				"code": "server_is_overloaded"
+			}
+		}`)),
+		Request: req,
+	}
+}
+
+func bufferedResponsesOKResponse(req *http.Request) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"id":"resp_live","status":"completed","usage":{"input_tokens":1,"output_tokens":1}}`)),
+		Request:    req,
+	}
+}
+
+func serveBufferedResponsesWithPoolAPIKeyForTest(t *testing.T, h *proxyHandler, rawKey string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodPost, "http://pool.local/v1/responses", strings.NewReader(`{"model":"gpt-5.4","input":"hi"}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	return rr
 }
 
 func newPhase9CodexContinuationAccount(id, token string) *Account {
@@ -1607,6 +1692,211 @@ func TestProxyBufferedRetryable5xxRetriesNextSeat(t *testing.T) {
 	}
 }
 
+func TestBufferedResponsesRotatesThroughTransient503UntilSuccess(t *testing.T) {
+	accounts := newBufferedManagedOpenAIAPIAccountsForTest(t, 4)
+	successSeatID := accounts[len(accounts)-1].ID
+	seatByToken := map[string]string{}
+	for _, acc := range accounts {
+		seatByToken[acc.AccessToken] = acc.ID
+	}
+
+	var mu sync.Mutex
+	attemptOrder := []string{}
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+		seatID, ok := seatByToken[token]
+		if !ok {
+			t.Fatalf("unexpected upstream account credential")
+		}
+		mu.Lock()
+		attemptOrder = append(attemptOrder, seatID)
+		mu.Unlock()
+
+		if seatID == successSeatID {
+			return bufferedResponsesOKResponse(req), nil
+		}
+		return bufferedOpenAIStyleServiceUnavailableResponse(req), nil
+	}), accounts...)
+
+	rr := serveBufferedResponsesWithPoolAPIKeyForTest(t, h, rawKey)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"resp_live"`) {
+		t.Fatalf("body = %q", rr.Body.String())
+	}
+	if got := rr.Header().Get("X-Codex-Pool-Transient-Retry-Outcome"); got != "success_after_retry" {
+		t.Fatalf("transient retry outcome header=%q, want success_after_retry", got)
+	}
+	if got := rr.Header().Get("X-Codex-Pool-Transient-Retry-Attempts"); got != strconv.Itoa(len(accounts)) {
+		t.Fatalf("transient retry attempts header=%q, want %d", got, len(accounts))
+	}
+	if got := rr.Header().Get("X-Codex-Pool-Transient-Retry-Class"); got != "transient_overload" {
+		t.Fatalf("transient retry class header=%q, want transient_overload", got)
+	}
+	metricsW := httptest.NewRecorder()
+	h.serveMetrics(metricsW, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metricsBody := metricsW.Body.String()
+	if want := `codexpool_events_total{name="managed_openai_api_transient_retry"} 3`; !containsLine(metricsBody, want) {
+		t.Fatalf("missing transient retry metric %q in %s", want, metricsBody)
+	}
+	if want := `codexpool_events_total{name="managed_openai_api_transient_success_after_retry"} 1`; !containsLine(metricsBody, want) {
+		t.Fatalf("missing success-after-retry metric %q in %s", want, metricsBody)
+	}
+	if len(attemptOrder) != len(accounts) || len(attemptOrder) <= 3 {
+		t.Fatalf("attemptOrder=%v, want one attempt per compatible seat and more than 3 attempts", attemptOrder)
+	}
+	for _, acc := range accounts[:len(accounts)-1] {
+		state := snapshotProxyTestAccount(acc)
+		if state.Dead {
+			t.Fatalf("transient 503 marked %s dead", acc.ID)
+		}
+		if strings.Contains(strings.ToLower(state.HealthError), "invalid") || strings.Contains(strings.ToLower(state.HealthError), "auth") {
+			t.Fatalf("transient 503 gave %s auth-poisoned health error %q", acc.ID, state.HealthError)
+		}
+	}
+}
+
+func TestBufferedResponsesDoesNotStopAtConfiguredMaxAttemptsForTransientPoolRotation(t *testing.T) {
+	accounts := newBufferedManagedOpenAIAPIAccountsForTest(t, 5)
+	successSeatID := accounts[len(accounts)-1].ID
+	seatByToken := map[string]string{}
+	for _, acc := range accounts {
+		seatByToken[acc.AccessToken] = acc.ID
+	}
+
+	var mu sync.Mutex
+	attemptOrder := []string{}
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+		seatID, ok := seatByToken[token]
+		if !ok {
+			t.Fatalf("unexpected upstream account credential")
+		}
+		mu.Lock()
+		attemptOrder = append(attemptOrder, seatID)
+		mu.Unlock()
+
+		if seatID == successSeatID {
+			return bufferedResponsesOKResponse(req), nil
+		}
+		return bufferedOpenAIStyleServiceUnavailableResponse(req), nil
+	}), accounts...)
+	h.cfg.maxAttempts = 3
+
+	rr := serveBufferedResponsesWithPoolAPIKeyForTest(t, h, rawKey)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if len(attemptOrder) != len(accounts) {
+		t.Fatalf("attemptOrder=%v, want all %d compatible seats despite cfg.maxAttempts=3", attemptOrder, len(accounts))
+	}
+	if attemptOrder[len(attemptOrder)-1] != successSeatID {
+		t.Fatalf("attemptOrder=%v, final attempt should be successful seat %s", attemptOrder, successSeatID)
+	}
+}
+
+func TestBufferedResponsesExhaustionReportsStructuredPoolTransientFailure(t *testing.T) {
+	accounts := newBufferedManagedOpenAIAPIAccountsForTest(t, 4)
+	seatByToken := map[string]string{}
+	for _, acc := range accounts {
+		seatByToken[acc.AccessToken] = acc.ID
+	}
+
+	var mu sync.Mutex
+	attemptOrder := []string{}
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+		seatID, ok := seatByToken[token]
+		if !ok {
+			t.Fatalf("unexpected upstream account credential")
+		}
+		mu.Lock()
+		attemptOrder = append(attemptOrder, seatID)
+		mu.Unlock()
+
+		return bufferedOpenAIStyleServiceUnavailableResponse(req), nil
+	}), accounts...)
+	h.cfg.maxAttempts = 3
+
+	rr := serveBufferedResponsesWithPoolAPIKeyForTest(t, h, rawKey)
+	body := rr.Body.String()
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rr.Code, body)
+	}
+	if len(attemptOrder) != len(accounts) {
+		t.Fatalf("attemptOrder=%v, want every compatible seat attempted before exhaustion", attemptOrder)
+	}
+
+	var payload struct {
+		Error struct {
+			Type           string `json:"type"`
+			Code           string `json:"code"`
+			Class          string `json:"class"`
+			TerminalReason string `json:"terminal_reason"`
+			Message        string `json:"message"`
+			Attempts       int    `json:"attempts"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("exhaustion response is not structured JSON: %v body=%q", err, body)
+	}
+	errorType := strings.ToLower(strings.TrimSpace(firstNonEmpty(payload.Error.Type, payload.Error.Code)))
+	if !strings.Contains(errorType, "pool") || !strings.Contains(errorType, "transient") {
+		t.Fatalf("structured error type/code=%q/%q, want pool transient exhaustion", payload.Error.Type, payload.Error.Code)
+	}
+	if payload.Error.Class != "transient_overload" {
+		t.Fatalf("structured error class=%q, want transient_overload", payload.Error.Class)
+	}
+	if payload.Error.TerminalReason != "transient_overload" {
+		t.Fatalf("structured terminal_reason=%q, want transient_overload", payload.Error.TerminalReason)
+	}
+	if payload.Error.Attempts != len(accounts) {
+		t.Fatalf("structured attempts=%d, want %d", payload.Error.Attempts, len(accounts))
+	}
+	if got := rr.Header().Get("X-Codex-Pool-Transient-Retry-Outcome"); got != "exhausted" {
+		t.Fatalf("transient retry outcome header=%q, want exhausted", got)
+	}
+	if got := rr.Header().Get("X-Codex-Pool-Transient-Retry-Attempts"); got != strconv.Itoa(len(accounts)) {
+		t.Fatalf("transient retry attempts header=%q, want %d", got, len(accounts))
+	}
+	if got := rr.Header().Get("X-Codex-Pool-Transient-Retry-Class"); got != "transient_overload" {
+		t.Fatalf("transient retry class header=%q, want transient_overload", got)
+	}
+	metricsW := httptest.NewRecorder()
+	h.serveMetrics(metricsW, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	metricsBody := metricsW.Body.String()
+	if want := `codexpool_events_total{name="managed_openai_api_transient_retry"} 4`; !containsLine(metricsBody, want) {
+		t.Fatalf("missing transient retry metric %q in %s", want, metricsBody)
+	}
+	if want := `codexpool_events_total{name="managed_openai_api_transient_exhausted"} 1`; !containsLine(metricsBody, want) {
+		t.Fatalf("missing transient exhaustion metric %q in %s", want, metricsBody)
+	}
+	for _, forbidden := range []struct {
+		label string
+		value string
+	}{
+		{label: "pool api key", value: rawKey},
+		{label: "authorization header name", value: "Authorization"},
+		{label: "cookie header name", value: "Cookie"},
+		{label: "env key name", value: "OPENAI_API_KEY"},
+		{label: "raw prompt body", value: `"input":"hi"`},
+	} {
+		if forbidden.value != "" && strings.Contains(body, forbidden.value) {
+			t.Fatalf("structured exhaustion response leaked %s", forbidden.label)
+		}
+	}
+	for _, acc := range accounts {
+		if strings.Contains(body, acc.AccessToken) {
+			t.Fatalf("structured exhaustion response leaked an upstream credential for %s", acc.ID)
+		}
+		state := snapshotProxyTestAccount(acc)
+		if state.Dead {
+			t.Fatalf("transient exhaustion marked %s dead", acc.ID)
+		}
+	}
+}
+
 func TestProxyBufferedTransientAuthFailureRetriesNextSeat(t *testing.T) {
 	t.Setenv("POOL_JWT_SECRET", "test-secret-0123456789abcdef0123456789abcdef")
 
@@ -2327,5 +2617,117 @@ func TestProxyBufferedGitLabClaude403DirectAccessForbiddenMarksDead(t *testing.T
 	}
 	if staleCalls != 1 || liveCalls != 1 {
 		t.Fatalf("staleCalls=%d liveCalls=%d", staleCalls, liveCalls)
+	}
+}
+
+func TestBufferedProviderPolicyBlockRotatesToNextCodexSeatWithoutPoison(t *testing.T) {
+	seatA := newPhase9CodexContinuationAccount("seat-a", "token-a")
+	seatB := newPhase9CodexContinuationAccount("seat-b", "token-b")
+	var calls int64
+	var authSeen []string
+
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		call := atomic.AddInt64(&calls, 1)
+		authSeen = append(authSeen, req.Header.Get("Authorization"))
+		switch call {
+		case 1:
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Status:     "400 Bad Request",
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"error":"This content was flagged for possible cybersecurity risk. Trusted Access for Cyber"}`,
+				)),
+				Request: req,
+			}, nil
+		case 2:
+			return phase6OKResponse(req, `{"id":"ok-policy-rotated","usage":{"input_tokens":1,"output_tokens":1}}`), nil
+		default:
+			t.Fatalf("unexpected upstream call #%d", call)
+			return nil, nil
+		}
+	}), seatA, seatB)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://pool.local/v1/responses", strings.NewReader(`{"model":"gpt-5.5","input":"canary"}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Fatalf("upstream calls=%d want 2", got)
+	}
+	if len(authSeen) != 2 || authSeen[0] == authSeen[1] {
+		t.Fatalf("expected retry on a different seat, authSeen=%v", authSeen)
+	}
+	if seatA.Dead || seatB.Dead {
+		t.Fatalf("provider policy block must not mark seats dead: seatA=%v seatB=%v", seatA.Dead, seatB.Dead)
+	}
+	if seatA.Penalty != 0 || seatB.Penalty != 0 {
+		t.Fatalf("provider policy block must not penalize seats: seatA=%.1f seatB=%.1f", seatA.Penalty, seatB.Penalty)
+	}
+	if !strings.Contains(rr.Body.String(), "ok-policy-rotated") {
+		t.Fatalf("body did not come from successful rotated seat: %s", rr.Body.String())
+	}
+}
+
+func TestBufferedProviderPolicySSEFailureRotatesBeforeClientSeesError(t *testing.T) {
+	seatA := newPhase9CodexContinuationAccount("seat-a", "token-a")
+	seatB := newPhase9CodexContinuationAccount("seat-b", "token-b")
+	var calls int64
+	var authSeen []string
+
+	h, rawKey := newPhase4VirtualKeyHandler(t, PoolAPITokenPolicy{}, phase4RoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		call := atomic.AddInt64(&calls, 1)
+		authSeen = append(authSeen, req.Header.Get("Authorization"))
+		switch call {
+		case 1:
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body: io.NopCloser(strings.NewReader(
+					"event: response.failed\n" +
+						`data: {"type":"response.failed","response":{"status":"failed","error":{"message":"This content was flagged for possible cybersecurity risk. Trusted Access for Cyber","code":"content_policy"}}}` + "\n\n",
+				)),
+				Request: req,
+			}, nil
+		case 2:
+			return phase6OKResponse(req, `{"id":"ok-policy-sse-rotated","usage":{"input_tokens":1,"output_tokens":1}}`), nil
+		default:
+			t.Fatalf("unexpected upstream call #%d", call)
+			return nil, nil
+		}
+	}), seatA, seatB)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "http://pool.local/v1/responses", strings.NewReader(`{"model":"gpt-5.5","input":"canary","stream":true}`))
+	req.Header.Set("Authorization", "Bearer "+rawKey)
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Fatalf("upstream calls=%d want 2", got)
+	}
+	if len(authSeen) != 2 || authSeen[0] == authSeen[1] {
+		t.Fatalf("expected retry on a different seat, authSeen=%v", authSeen)
+	}
+	if strings.Contains(rr.Body.String(), "cybersecurity risk") || strings.Contains(rr.Body.String(), "Trusted Access") {
+		t.Fatalf("client saw provider policy block instead of rotated success: %s", rr.Body.String())
+	}
+	if seatA.Dead || seatB.Dead {
+		t.Fatalf("provider policy SSE block must not mark seats dead: seatA=%v seatB=%v", seatA.Dead, seatB.Dead)
+	}
+	if seatA.Penalty != 0 || seatB.Penalty != 0 {
+		t.Fatalf("provider policy SSE block must not penalize seats: seatA=%.1f seatB=%.1f", seatA.Penalty, seatB.Penalty)
+	}
+	if !strings.Contains(rr.Body.String(), "ok-policy-sse-rotated") {
+		t.Fatalf("body did not come from successful rotated seat: %s", rr.Body.String())
 	}
 }

@@ -131,3 +131,28 @@ func (m *metrics) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
+func (h *proxyHandler) serveMetrics(w http.ResponseWriter, r *http.Request) {
+	if h != nil && h.metrics != nil {
+		h.metrics.serve(w, r)
+	} else {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	}
+	if h == nil {
+		return
+	}
+	writeProtocolAdapterMetrics(w, ProtocolAdapterStatus{
+		CodexChatCompletionsResponsesAdapter: h.cfg.codexChatCompletionsResponsesAdapter,
+	})
+}
+
+func writeProtocolAdapterMetrics(w http.ResponseWriter, status ProtocolAdapterStatus) {
+	fmt.Fprintf(w, "codexpool_protocol_adapter_enabled{adapter=\"codex_chat_completions_responses\"} %d\n", metricBool(status.CodexChatCompletionsResponsesAdapter))
+}
+
+func metricBool(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}

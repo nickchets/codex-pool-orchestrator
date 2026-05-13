@@ -358,6 +358,7 @@ func buildOpenCodeAntigravityAccounts(h *proxyHandler) openCodePluginAccountsFil
 	}
 
 	now := time.Now().UTC()
+	primaryReserve, secondaryReserve := h.pool.headroomReserves()
 	h.pool.mu.RLock()
 	accs := append([]*Account(nil), h.pool.accounts...)
 	h.pool.mu.RUnlock()
@@ -388,7 +389,7 @@ func buildOpenCodeAntigravityAccounts(h *proxyHandler) openCodePluginAccountsFil
 		lastUsed := openCodeAccountLastUsedMillis(snapshot)
 		email := firstNonEmpty(strings.TrimSpace(snapshot.OperatorEmail), strings.TrimSpace(snapshot.AntigravityEmail))
 		projectID := strings.TrimSpace(snapshot.AntigravityProjectID)
-		routing := buildPoolDashboardRouting(snapshot, snapshot.Routing, now)
+		routing := buildPoolDashboardRouting(snapshot, snapshot.Routing, primaryReserve, secondaryReserve, now)
 		enabled := routing.Eligible
 		quota := buildOpenCodeCachedQuota(snapshot)
 		if quota == nil {

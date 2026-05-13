@@ -102,7 +102,7 @@ func TestCandidatePrefersAccountsUnderPreemptiveThreshold(t *testing.T) {
 		Type: AccountTypeCodex,
 		Usage: UsageSnapshot{
 			PrimaryUsedPercent:   0.20,
-			SecondaryUsedPercent: 0.91,
+			SecondaryUsedPercent: 0.98,
 			SecondaryResetAt:     time.Now().Add(2 * time.Hour),
 		},
 	}
@@ -191,7 +191,7 @@ func TestCandidateHonorsConfiguredLowHeadroomReservePct(t *testing.T) {
 		},
 	}
 	p := newPoolState([]*Account{lowHeadroom, healthy}, false)
-	p.lowHeadroomReservePct = 0.25
+	p.primaryLowHeadroomReservePct = 0.25
 	p.pin("conv-low-headroom", lowHeadroom.ID)
 
 	got := p.candidateAtLocked(now, "conv-low-headroom", nil, AccountTypeCodex, "", false)
@@ -200,14 +200,14 @@ func TestCandidateHonorsConfiguredLowHeadroomReservePct(t *testing.T) {
 	}
 }
 
-func TestRoutingStateBlocksExactTenPercentHeadroom(t *testing.T) {
+func TestRoutingStateBlocksExactConfiguredHeadroomThresholds(t *testing.T) {
 	now := time.Now()
 	exactThreshold := &Account{
 		ID:   "exact-threshold",
 		Type: AccountTypeCodex,
 		Usage: UsageSnapshot{
-			PrimaryUsedPercent:   0.90,
-			SecondaryUsedPercent: 0.90,
+			PrimaryUsedPercent:   0.95,
+			SecondaryUsedPercent: 0.98,
 			PrimaryResetAt:       now.Add(30 * time.Minute),
 			SecondaryResetAt:     now.Add(2 * time.Hour),
 		},
@@ -220,8 +220,56 @@ func TestRoutingStateBlocksExactTenPercentHeadroom(t *testing.T) {
 	if routing.Eligible {
 		t.Fatalf("expected exact-threshold seat to be blocked")
 	}
-	if routing.BlockReason != "codex_headroom_lt_10" {
-		t.Fatalf("expected codex_headroom_lt_10, got %q", routing.BlockReason)
+	if routing.BlockReason != "codex_headroom_lt_primary_5_secondary_2" {
+		t.Fatalf("expected codex_headroom_lt_primary_5_secondary_2, got %q", routing.BlockReason)
+	}
+}
+
+func TestRoutingStateUsesConfiguredPrimaryHeadroomThreshold(t *testing.T) {
+	now := time.Now()
+	acc := &Account{
+		ID:   "primary-threshold",
+		Type: AccountTypeCodex,
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.95,
+			SecondaryUsedPercent: 0.10,
+			PrimaryResetAt:       now.Add(30 * time.Minute),
+		},
+	}
+
+	acc.mu.Lock()
+	routing := routingStateLockedWithReserve(acc, now, AccountTypeCodex, "", 0.05, 0.02)
+	acc.mu.Unlock()
+
+	if routing.Eligible {
+		t.Fatalf("expected configured primary-threshold seat to be blocked")
+	}
+	if routing.BlockReason != "primary_headroom_lt_5" {
+		t.Fatalf("expected primary_headroom_lt_5, got %q", routing.BlockReason)
+	}
+}
+
+func TestRoutingStateUsesConfiguredSecondaryHeadroomThreshold(t *testing.T) {
+	now := time.Now()
+	acc := &Account{
+		ID:   "secondary-threshold",
+		Type: AccountTypeCodex,
+		Usage: UsageSnapshot{
+			PrimaryUsedPercent:   0.10,
+			SecondaryUsedPercent: 0.98,
+			SecondaryResetAt:     now.Add(2 * time.Hour),
+		},
+	}
+
+	acc.mu.Lock()
+	routing := routingStateLockedWithReserve(acc, now, AccountTypeCodex, "", 0.05, 0.02)
+	acc.mu.Unlock()
+
+	if routing.Eligible {
+		t.Fatalf("expected configured secondary-threshold seat to be blocked")
+	}
+	if routing.BlockReason != "secondary_headroom_lt_2" {
+		t.Fatalf("expected secondary_headroom_lt_2, got %q", routing.BlockReason)
 	}
 }
 
@@ -230,8 +278,8 @@ func TestPinnedConversationUnpinsAtExactPreemptiveThreshold(t *testing.T) {
 		ID:   "exact-threshold",
 		Type: AccountTypeCodex,
 		Usage: UsageSnapshot{
-			PrimaryUsedPercent:   0.90,
-			SecondaryUsedPercent: 0.90,
+			PrimaryUsedPercent:   0.95,
+			SecondaryUsedPercent: 0.20,
 			PrimaryResetAt:       time.Now().Add(30 * time.Minute),
 			SecondaryResetAt:     time.Now().Add(2 * time.Hour),
 		},
@@ -258,7 +306,7 @@ func TestPinnedConversationUnpinsAbovePreemptiveThreshold(t *testing.T) {
 		ID:   "exhausted",
 		Type: AccountTypeCodex,
 		Usage: UsageSnapshot{
-			PrimaryUsedPercent:   0.91,
+			PrimaryUsedPercent:   0.96,
 			SecondaryUsedPercent: 0.10,
 			PrimaryResetAt:       time.Now().Add(30 * time.Minute),
 		},
@@ -656,7 +704,7 @@ func TestCandidateStopsReusingMostRecentlyUsedSeatAtExactPrimaryThreshold(t *tes
 		PlanType: "team",
 		LastUsed: now.Add(-15 * time.Second),
 		Usage: UsageSnapshot{
-			PrimaryUsedPercent:   0.90,
+			PrimaryUsedPercent:   0.95,
 			SecondaryUsedPercent: 0.20,
 			PrimaryResetAt:       now.Add(30 * time.Minute),
 			SecondaryResetAt:     now.Add(24 * time.Hour),
@@ -690,7 +738,7 @@ func TestCandidateStopsReusingMostRecentlyUsedSeatAtExactSecondaryThreshold(t *t
 		LastUsed: now.Add(-15 * time.Second),
 		Usage: UsageSnapshot{
 			PrimaryUsedPercent:   0.20,
-			SecondaryUsedPercent: 0.90,
+			SecondaryUsedPercent: 0.98,
 			PrimaryResetAt:       now.Add(2 * time.Hour),
 			SecondaryResetAt:     now.Add(24 * time.Hour),
 		},
@@ -828,7 +876,7 @@ func TestCandidateDropsActiveCodexSeatAtExactPrimaryThreshold(t *testing.T) {
 		Type:     AccountTypeCodex,
 		PlanType: "team",
 		Usage: UsageSnapshot{
-			PrimaryUsedPercent:   0.90,
+			PrimaryUsedPercent:   0.95,
 			SecondaryUsedPercent: 0.20,
 			PrimaryResetAt:       now.Add(30 * time.Minute),
 			SecondaryResetAt:     now.Add(24 * time.Hour),
@@ -865,7 +913,7 @@ func TestCandidateDropsActiveCodexSeatAtExactSecondaryThreshold(t *testing.T) {
 		PlanType: "team",
 		Usage: UsageSnapshot{
 			PrimaryUsedPercent:   0.20,
-			SecondaryUsedPercent: 0.90,
+			SecondaryUsedPercent: 0.98,
 			PrimaryResetAt:       now.Add(2 * time.Hour),
 			SecondaryResetAt:     now.Add(24 * time.Hour),
 		},
@@ -1057,7 +1105,7 @@ func TestCandidateFallsBackToManagedOpenAIAPIKeyWhenCodexSeatsUnavailable(t *tes
 		PlanType: "pro",
 		Usage: UsageSnapshot{
 			PrimaryUsedPercent:   0.15,
-			SecondaryUsedPercent: 0.96,
+			SecondaryUsedPercent: 0.98,
 			SecondaryResetAt:     time.Now().Add(2 * time.Hour),
 		},
 	}
@@ -1327,7 +1375,7 @@ func TestRoutingStateBlocksQuotaPressuredGeminiSeat(t *testing.T) {
 		AntigravityProjectID:    "project-1",
 		GeminiProviderCheckedAt: now.Add(-time.Minute),
 		Usage: UsageSnapshot{
-			PrimaryUsedPercent:   0.91,
+			PrimaryUsedPercent:   0.95,
 			SecondaryUsedPercent: 0.25,
 			PrimaryResetAt:       now.Add(2 * time.Hour),
 		},

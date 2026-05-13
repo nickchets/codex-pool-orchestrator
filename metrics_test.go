@@ -31,6 +31,34 @@ func TestMetricsServe(t *testing.T) {
 	}
 }
 
+func TestProxyHandlerServeMetricsExposesProtocolAdapterMetadata(t *testing.T) {
+	h := &proxyHandler{
+		cfg:     config{codexChatCompletionsResponsesAdapter: true},
+		metrics: newMetrics(),
+	}
+	req := httptest.NewRequest("GET", "/metrics", nil)
+	w := httptest.NewRecorder()
+
+	h.serveMetrics(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		`codexpool_protocol_adapter_enabled{adapter="codex_chat_completions_responses"} 1`,
+	} {
+		if !containsLine(body, want) {
+			t.Fatalf("missing adapter metric %q in %s", want, body)
+		}
+	}
+	for _, forbidden := range []string{"Authorization", "Bearer ", "access_token", "refresh_token", "cookie", "/v1/responses", "/responses", "upstream_path", "native_path", "unsupported_chat_features_fail_local"} {
+		if strings.Contains(strings.ToLower(body), strings.ToLower(forbidden)) {
+			t.Fatalf("metrics leaked forbidden fragment %q in %s", forbidden, body)
+		}
+	}
+}
+
 func containsLine(body, needle string) bool {
 	for _, line := range strings.Split(body, "\n") {
 		if line == needle {

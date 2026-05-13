@@ -38,36 +38,39 @@ type config struct {
 	minimaxBase   *url.URL // MiniMax API endpoint
 	poolDir       string
 
-	disableRefresh  bool
-	refreshProxyURL string // HTTP proxy URL for refresh operations
+	disableRefresh      bool
+	refreshProxyURL     string // HTTP proxy URL for refresh operations
+	codexEgressProxyURL string // HTTP proxy URL for Codex/ChatGPT upstream egress
 
-	debug                         bool
-	logBodies                     bool
-	bodyLogLimit                  int64
-	traceRequests                 bool
-	tracePackets                  bool
-	tracePayloads                 bool
-	tracePayloadLimit             int
-	traceStallGap                 time.Duration
-	forceCodexRequiredPlan        string
-	gitLabCodexDiscoveryModels    []string
-	maxInMemoryBodyBytes          int64
-	flushInterval                 time.Duration
-	usageRefresh                  time.Duration
-	maxAttempts                   int
-	storePath                     string
-	retentionDays                 int
-	friendCode                    string
-	adminToken                    string
-	requestTimeout                time.Duration // Timeout for non-streaming requests (0 = no timeout)
-	streamTimeout                 time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
-	streamIdleTimeout             time.Duration // Kill SSE streams idle for this long (0 = no idle timeout)
-	claudePingTailTimeout         time.Duration // Cut GitLab Claude SSE tails that degrade into ping-only keepalives after useful output
-	streamContinuation            string        // Experimental plain-text SSE continuation bridge mode (default off)
-	streamContinuationMaxAttempts int           // Max continuation attempts after first segment failure (default 1)
-	tierThreshold                 float64       // Secondary usage % at which we stop preferring a tier (default 0.15)
-	lowHeadroomReservePct         float64       // Minimum quota headroom reserved from new admissions (default 0.10)
-	poolAPIDefaultMaxOutputTokens int           // Default output-token reservation for virtual pool API key TPM policy
+	debug                                bool
+	logBodies                            bool
+	bodyLogLimit                         int64
+	traceRequests                        bool
+	tracePackets                         bool
+	tracePayloads                        bool
+	tracePayloadLimit                    int
+	traceStallGap                        time.Duration
+	forceCodexRequiredPlan               string
+	gitLabCodexDiscoveryModels           []string
+	maxInMemoryBodyBytes                 int64
+	flushInterval                        time.Duration
+	usageRefresh                         time.Duration
+	maxAttempts                          int
+	storePath                            string
+	retentionDays                        int
+	friendCode                           string
+	adminToken                           string
+	requestTimeout                       time.Duration // Timeout for non-streaming requests (0 = no timeout)
+	streamTimeout                        time.Duration // Timeout for streaming/SSE requests (0 = no timeout)
+	streamIdleTimeout                    time.Duration // Kill SSE streams idle for this long (0 = no idle timeout)
+	claudePingTailTimeout                time.Duration // Cut GitLab Claude SSE tails that degrade into ping-only keepalives after useful output
+	streamContinuation                   string        // Experimental plain-text SSE continuation bridge mode (default off)
+	streamContinuationMaxAttempts        int           // Max continuation attempts after first segment failure (default 1)
+	codexChatCompletionsResponsesAdapter bool          // Feature-flagged OpenAI Chat -> Codex Responses adapter (default off)
+	tierThreshold                        float64       // Secondary usage % at which we stop preferring a tier (default 0.15)
+	primaryLowHeadroomReservePct         float64       // Minimum primary-window quota headroom reserved from new admissions (default 0.05)
+	secondaryLowHeadroomReservePct       float64       // Minimum secondary-window quota headroom reserved from new admissions (default 0.02)
+	poolAPIDefaultMaxOutputTokens        int           // Default output-token reservation for virtual pool API key TPM policy
 }
 
 func getenv(key, def string) string {
@@ -123,6 +126,7 @@ func buildConfig() config {
 	// Refresh often fails for some auth.json fixtures; allow opting out.
 	cfg.disableRefresh = getConfigBool("PROXY_DISABLE_REFRESH", fileCfg.DisableRefresh, false)
 	cfg.refreshProxyURL = getConfigString("REFRESH_PROXY_URL", fileCfg.RefreshProxyURL, "")
+	cfg.codexEgressProxyURL = strings.TrimSpace(getenv("PROXY_CODEX_EGRESS_PROXY_URL", ""))
 
 	cfg.debug = getConfigBool("PROXY_DEBUG", fileCfg.Debug, false)
 	cfg.forceCodexRequiredPlan = normalizeForceCodexRequiredPlan(getConfigString("PROXY_FORCE_CODEX_REQUIRED_PLAN", fileCfg.ForceCodexRequiredPlan, ""))
@@ -206,10 +210,13 @@ func buildConfig() config {
 	}
 	cfg.streamContinuation = normalizeStreamContinuationMode(getConfigString("PROXY_STREAM_CONTINUATION", fileCfg.StreamContinuation, streamContinuationModeOff))
 	cfg.streamContinuationMaxAttempts = getConfigInt("PROXY_STREAM_CONTINUATION_MAX_ATTEMPTS", fileCfg.StreamContinuationMaxAttempts, 1)
+	cfg.codexChatCompletionsResponsesAdapter = getConfigBool("PROXY_CODEX_CHAT_COMPLETIONS_RESPONSES_ADAPTER", fileCfg.CodexChatCompletionsResponsesAdapter, false)
 
 	// Tier threshold: secondary usage % at which we stop preferring a tier (default 15%)
 	cfg.tierThreshold = getConfigFloat64("TIER_THRESHOLD", fileCfg.TierThreshold, 0.15)
-	cfg.lowHeadroomReservePct = normalizeLowHeadroomReservePct(getConfigFloat64("PROXY_LOW_HEADROOM_RESERVE_PCT", fileCfg.LowHeadroomReservePct, defaultLowHeadroomReservePct))
+	legacyHeadroomReservePct := normalizeLowHeadroomReservePct(getConfigFloat64("PROXY_LOW_HEADROOM_RESERVE_PCT", fileCfg.LowHeadroomReservePct, defaultLowHeadroomReservePct))
+	cfg.primaryLowHeadroomReservePct = normalizeLowHeadroomReservePct(getConfigFloat64("PROXY_PRIMARY_LOW_HEADROOM_RESERVE_PCT", fileCfg.PrimaryLowHeadroomReservePct, legacyHeadroomReservePct))
+	cfg.secondaryLowHeadroomReservePct = normalizeLowHeadroomReservePct(getConfigFloat64("PROXY_SECONDARY_LOW_HEADROOM_RESERVE_PCT", fileCfg.SecondaryLowHeadroomReservePct, legacyHeadroomReservePct))
 
 	flag.StringVar(&cfg.listenAddr, "listen", cfg.listenAddr, "listen address")
 	flag.Parse()
@@ -234,7 +241,9 @@ func main() {
 	}
 	pool := newPoolState(accounts, cfg.debug)
 	pool.tierThreshold = cfg.tierThreshold
-	pool.lowHeadroomReservePct = cfg.lowHeadroomReservePct
+	pool.primaryLowHeadroomReservePct = cfg.primaryLowHeadroomReservePct
+	pool.secondaryLowHeadroomReservePct = cfg.secondaryLowHeadroomReservePct
+	log.Printf("codex headroom reserves configured: primary=%.2f%% secondary=%.2f%%", cfg.primaryLowHeadroomReservePct*100, cfg.secondaryLowHeadroomReservePct*100)
 	codexCount := pool.countByType(AccountTypeCodex)
 	claudeCount := pool.countByType(AccountTypeClaude)
 	geminiCount := pool.countByType(AccountTypeGemini)
@@ -279,6 +288,14 @@ func main() {
 	// NOTE: rustls fingerprint disabled - Cloudflare started blocking the HTTP/1.1-only fingerprint
 	// with 403 challenge pages. Using standard Go transport with HTTP/2 for all hosts.
 	var transport http.RoundTripper = standardTransport
+	if cfg.codexEgressProxyURL != "" {
+		codexProxyTransport, err := buildHTTPProxyTransport(cfg.codexEgressProxyURL)
+		if err != nil {
+			log.Fatalf("invalid PROXY_CODEX_EGRESS_PROXY_URL: %v", err)
+		}
+		transport = codexEgressHostRoundTripper{base: standardTransport, codex: codexProxyTransport}
+		log.Printf("codex/chatgpt upstream egress proxy enabled: %s", safeProxyLogHost(cfg.codexEgressProxyURL))
+	}
 
 	// Create refresh transport - may use a proxy for token refresh operations
 	var refreshTransport http.RoundTripper = transport
@@ -329,6 +346,7 @@ func main() {
 		store:            store,
 		metrics:          newMetrics(),
 		recent:           newRecentErrors(50),
+		upstreamErrors:   newUpstreamErrorTracker(256),
 		startTime:        time.Now(),
 	}
 	h.startUsagePoller()
@@ -384,6 +402,7 @@ type proxyHandler struct {
 	store             *usageStore
 	metrics           *metrics
 	recent            *recentErrors
+	upstreamErrors    *upstreamErrorTracker
 	inflight          int64
 	startTime         time.Time
 	codexModels       codexModelsCache
@@ -507,6 +526,10 @@ func isPermanentCodexAuthFailure(resp *http.Response, body []byte) bool {
 	if resp == nil {
 		return false
 	}
+	info := classifyUpstreamResponse(resp, body)
+	if info.Class == upstreamCloudflareChallenge || info.Class == upstreamProviderPolicyBlock {
+		return false
+	}
 	if strings.EqualFold(strings.TrimSpace(resp.Header.Get("X-Openai-Ide-Error-Code")), "account_deactivated") {
 		return true
 	}
@@ -545,6 +568,18 @@ func isManagedCodexAPIKeyRetryableStatus(statusCode int) bool {
 
 func (h *proxyHandler) applyUpstreamAuthFailureDisposition(reqID string, acc *Account, resp *http.Response, refreshFailed bool, inspectedBody []byte) {
 	if acc == nil || resp == nil {
+		return
+	}
+	info := classifyUpstreamResponse(resp, inspectedBody)
+	if info.Class != upstreamUnknown {
+		h.recordUpstreamError(info, resp)
+	}
+	if info.Class == upstreamCloudflareChallenge {
+		log.Printf("[%s] account %s upstream cloudflare challenge: status=%s action=no_seat_penalty", reqID, acc.ID, safeUpstreamStatusMessage(resp))
+		return
+	}
+	if info.Class == upstreamProviderPolicyBlock {
+		log.Printf("[%s] account %s upstream provider policy block: status=%s action=no_seat_penalty", reqID, acc.ID, safeUpstreamStatusMessage(resp))
 		return
 	}
 	if isGitLabCodexAccount(acc) {
@@ -644,6 +679,22 @@ func (h *proxyHandler) applyGeminiRateLimitDisposition(acc *Account, resp *http.
 func (h *proxyHandler) applyPreCopyUpstreamStatusDisposition(reqID string, acc *Account, resp *http.Response, refreshFailed bool, inspectedBody []byte, requestedModel, requestPath string) error {
 	if acc == nil || resp == nil {
 		return nil
+	}
+	info := classifyUpstreamResponse(resp, inspectedBody)
+	if info.Class != upstreamUnknown {
+		h.recordUpstreamError(info, resp)
+	}
+	if info.Class == upstreamCloudflareChallenge {
+		log.Printf("[%s] account %s upstream cloudflare challenge: status=%s action=no_seat_penalty", reqID, acc.ID, safeUpstreamStatusMessage(resp))
+		return nil
+	}
+	if info.Class == upstreamProviderPolicyBlock {
+		err := info
+		if h != nil && h.recent != nil {
+			h.recent.add(err.Error())
+		}
+		log.Printf("[%s] account %s upstream provider policy block: status=%s action=no_seat_penalty", reqID, acc.ID, safeUpstreamStatusMessage(resp))
+		return err
 	}
 	if isGitLabCodexAccount(acc) && (resp.StatusCode == http.StatusPaymentRequired || resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 		if accountIsDead(acc) {
@@ -833,10 +884,46 @@ func modelRequiresCodexPro(model string) bool {
 	return strings.EqualFold(strings.TrimSpace(model), "gpt-5.3-codex-spark")
 }
 
+func isCodexAdaptableChatModel(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(m, "codex") {
+		return true
+	}
+	switch m {
+	case "gpt-5.5", "gpt-5.4", "gpt-5.4-pro", "gpt-5.2":
+		return true
+	default:
+		return false
+	}
+}
+
+func isExplicitNonCodexChatModel(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(m, "gemini-") || strings.HasPrefix(m, "claude-") || strings.HasPrefix(m, "kimi-") || strings.HasPrefix(m, "minimax-")
+}
+
 // modelRouteOverride checks if the requested model should be routed to an external
 // provider (Kimi, MiniMax, etc.) instead of the path-detected provider.
 // Returns (provider, baseURL, rewrittenBody) or (nil, nil, nil) if no override.
 func (h *proxyHandler) modelRouteOverride(reqPath, model string, body []byte) modelRouteDecision {
+	if h != nil && h.cfg.codexChatCompletionsResponsesAdapter && strings.TrimSpace(reqPath) == "/v1/chat/completions" && isCodexAdaptableChatModel(model) {
+		p := h.registry.ForType(AccountTypeCodex)
+		if p != nil {
+			upstreamPath, rewrittenBody, responseAdapter, _, err := maybeBuildCodexChatCompletionsResponsesRequest(reqPath, model, body)
+			if err != nil {
+				return modelRouteDecision{Err: err}
+			}
+			if upstreamPath != "" {
+				return modelRouteDecision{
+					Provider:        p,
+					TargetBase:      p.UpstreamURL(upstreamPath),
+					UpstreamPath:    upstreamPath,
+					RewrittenBody:   rewrittenBody,
+					ResponseAdapter: responseAdapter,
+				}
+			}
+		}
+	}
 	if strings.HasPrefix(strings.TrimSpace(model), "gemini-") {
 		p := h.registry.ForType(AccountTypeGemini)
 		if p != nil {
@@ -1142,7 +1229,8 @@ type bufferedRetryInspection struct {
 }
 
 func needsBufferedRetryInspection(acc *Account, statusCode int) bool {
-	return statusCode == http.StatusTooManyRequests ||
+	return statusCode == http.StatusBadRequest ||
+		statusCode == http.StatusTooManyRequests ||
 		statusCode == http.StatusPaymentRequired ||
 		(isManagedCodexAPIKeyAccount(acc) && statusCode == http.StatusTooManyRequests) ||
 		isRetryableStatus(statusCode)
@@ -1156,9 +1244,132 @@ func inspectBufferedRetryStatus(resp *http.Response, limit int64) bufferedRetryI
 	}
 }
 
+const bufferedSSEPrestreamInspectionLimit int64 = 8 * 1024
+
+type bufferedSSEPrestreamInspection struct {
+	Prefix []byte
+	Events [][]byte
+}
+
+func needsBufferedSSEPrestreamInspection(acc *Account, provider Provider, resp *http.Response, requestPath string) bool {
+	if acc == nil || acc.Type != AccountTypeCodex || provider == nil || resp == nil || resp.Body == nil {
+		return false
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false
+	}
+	return provider.DetectsSSE(requestPath, resp.Header.Get("Content-Type"))
+}
+
+func hasCompleteSSEEventPrefix(prefix []byte) bool {
+	return bytes.Contains(prefix, []byte("\n\n")) || bytes.Contains(prefix, []byte("\r\n\r\n"))
+}
+
+func collectSSEEventDataForInspection(prefix []byte) [][]byte {
+	if len(prefix) == 0 {
+		return nil
+	}
+	var events [][]byte
+	collector := &sseInterceptWriter{
+		w: io.Discard,
+		eventCallback: func(data []byte) {
+			events = append(events, append([]byte(nil), data...))
+		},
+	}
+	_, _ = collector.Write(prefix)
+	return events
+}
+
+func inspectBufferedSSEPrestream(resp *http.Response, limit int64) bufferedSSEPrestreamInspection {
+	if resp == nil || resp.Body == nil || limit <= 0 {
+		return bufferedSSEPrestreamInspection{}
+	}
+
+	prefix := make([]byte, 0, min(int(limit), 4096))
+	scratchSize := min(int(limit), 1024)
+	if scratchSize <= 0 {
+		return bufferedSSEPrestreamInspection{}
+	}
+	scratch := make([]byte, scratchSize)
+	for int64(len(prefix)) < limit {
+		remaining := int(limit) - len(prefix)
+		readSize := len(scratch)
+		if remaining < readSize {
+			readSize = remaining
+		}
+		n, readErr := resp.Body.Read(scratch[:readSize])
+		if n > 0 {
+			prefix = append(prefix, scratch[:n]...)
+		}
+		if hasCompleteSSEEventPrefix(prefix) || readErr != nil || n == 0 {
+			break
+		}
+	}
+	if len(prefix) > 0 {
+		resp.Body = replayResponseBody(prefix, resp.Body)
+	}
+	return bufferedSSEPrestreamInspection{Prefix: prefix, Events: collectSSEEventDataForInspection(prefix)}
+}
+
+func codexProviderPolicySSEInfo(resp *http.Response, reason string) upstreamErrorInfo {
+	statusCode := 0
+	status := ""
+	if resp != nil {
+		statusCode = resp.StatusCode
+		status = strings.TrimSpace(resp.Status)
+	}
+	return upstreamErrorInfo{
+		Class:               upstreamProviderPolicyBlock,
+		StatusCode:          statusCode,
+		Status:              status,
+		Retryable:           true,
+		SeatPoison:          false,
+		ProviderPolicyBlock: true,
+		SafeMessage:         firstNonEmpty(sanitizeStatusMessage(reason), "provider policy block"),
+	}
+}
+
+func classifyCodexProviderPolicySSEEvent(resp *http.Response, event []byte) (upstreamErrorInfo, bool) {
+	if !hasProviderPolicyBlockMarkers(strings.ToLower(string(event))) {
+		return upstreamErrorInfo{}, false
+	}
+	reason := "provider policy block"
+	if disposition, ok := classifyManagedOpenAIAPISSEError(event); ok && disposition.ProviderPolicyBlock {
+		reason = firstNonEmpty(disposition.Reason, reason)
+	}
+	return codexProviderPolicySSEInfo(resp, reason), true
+}
+
+func (h *proxyHandler) applyBufferedSSEPrestreamDisposition(reqID string, trace *requestTrace, acc *Account, provider Provider, resp *http.Response, requestPath string, attempt, attempts int) (bool, error) {
+	if !needsBufferedSSEPrestreamInspection(acc, provider, resp, requestPath) {
+		return false, nil
+	}
+	inspection := inspectBufferedSSEPrestream(resp, bufferedSSEPrestreamInspectionLimit)
+	if len(inspection.Events) == 0 {
+		return false, nil
+	}
+	for _, event := range inspection.Events {
+		info, ok := classifyCodexProviderPolicySSEEvent(resp, event)
+		if !ok {
+			continue
+		}
+		if h != nil {
+			h.recordUpstreamError(info, resp)
+		}
+		log.Printf("[%s] account %s upstream provider policy SSE block: status=%s action=retry_no_seat_penalty", reqID, acc.ID, safeUpstreamStatusMessage(resp))
+		_ = resp.Body.Close()
+		return h.completeBufferedRetryDisposition(reqID, trace, acc, resp, attempt, attempts, false, string(event), info, true, true)
+	}
+	return false, nil
+}
+
 func formatBufferedRetryStatusError(resp *http.Response, bodyText string) error {
 	if resp == nil {
 		return nil
+	}
+	info := classifyUpstreamResponse(resp, []byte(bodyText))
+	if info.Class == upstreamCloudflareChallenge || info.Class == upstreamProviderPolicyBlock {
+		return info
 	}
 	message := fmt.Sprintf("upstream %s", resp.Status)
 	if strings.TrimSpace(bodyText) != "" {
@@ -1203,6 +1414,12 @@ type rateLimitResponseError struct {
 	retryAfter time.Duration
 }
 
+type poolTransientExhaustionError struct {
+	attempts       int
+	terminalReason string
+	cause          error
+}
+
 func (e *rateLimitResponseError) Error() string {
 	if e == nil {
 		return ""
@@ -1210,8 +1427,27 @@ func (e *rateLimitResponseError) Error() string {
 	return e.message
 }
 
+func (e *poolTransientExhaustionError) Error() string {
+	return "pool transient upstream exhausted"
+}
+
+func (e *poolTransientExhaustionError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
 func asRateLimitResponseError(err error) (*rateLimitResponseError, bool) {
 	var target *rateLimitResponseError
+	if !errors.As(err, &target) || target == nil {
+		return nil, false
+	}
+	return target, true
+}
+
+func asPoolTransientExhaustionError(err error) (*poolTransientExhaustionError, bool) {
+	var target *poolTransientExhaustionError
 	if !errors.As(err, &target) || target == nil {
 		return nil, false
 	}
@@ -1229,7 +1465,104 @@ func retryAfterHeaderValue(wait time.Duration) string {
 	return strconv.Itoa(seconds)
 }
 
+const (
+	managedOpenAIAPITransientRetryClass              = "transient_overload"
+	managedOpenAIAPITransientRetryMetric             = "managed_openai_api_transient_retry"
+	managedOpenAIAPITransientSuccessAfterRetryMetric = "managed_openai_api_transient_success_after_retry"
+	managedOpenAIAPITransientExhaustedMetric         = "managed_openai_api_transient_exhausted"
+	transientRetryAttemptsHeader                     = "X-Codex-Pool-Transient-Retry-Attempts"
+	transientRetryOutcomeHeader                      = "X-Codex-Pool-Transient-Retry-Outcome"
+	transientRetryClassHeader                        = "X-Codex-Pool-Transient-Retry-Class"
+)
+
+func hasManagedOpenAIAPITransientOverloadMarker(statusCode int, bodyText string) bool {
+	if statusCode != http.StatusServiceUnavailable {
+		return false
+	}
+	lower := strings.ToLower(bodyText)
+	return strings.Contains(lower, "service_unavailable_error") ||
+		strings.Contains(lower, "server_is_overloaded") ||
+		strings.Contains(lower, "server overloaded")
+}
+
+func normalizedManagedOpenAIAPITransientReason(reason string) string {
+	if reason = strings.TrimSpace(reason); reason != "" {
+		return reason
+	}
+	return managedOpenAIAPITransientRetryClass
+}
+
+func setManagedOpenAIAPITransientRetryHeaders(headers http.Header, attempts int, outcome, class string) {
+	if headers == nil {
+		return
+	}
+	if attempts > 0 {
+		headers.Set(transientRetryAttemptsHeader, strconv.Itoa(attempts))
+	}
+	if outcome = strings.TrimSpace(outcome); outcome != "" {
+		headers.Set(transientRetryOutcomeHeader, outcome)
+	}
+	headers.Set(transientRetryClassHeader, normalizedManagedOpenAIAPITransientReason(class))
+}
+
+func annotateManagedOpenAIAPITransientRetryResponse(resp *http.Response, attempts int, outcome, class string) {
+	if resp == nil {
+		return
+	}
+	if resp.Header == nil {
+		resp.Header = http.Header{}
+	}
+	setManagedOpenAIAPITransientRetryHeaders(resp.Header, attempts, outcome, class)
+}
+
+func (h *proxyHandler) recordManagedOpenAIAPITransientRetryAttempt() {
+	if h == nil || h.metrics == nil {
+		return
+	}
+	h.metrics.incEvent(managedOpenAIAPITransientRetryMetric)
+}
+
+func (h *proxyHandler) recordManagedOpenAIAPITransientRetryOutcome(outcome string) {
+	if h == nil || h.metrics == nil {
+		return
+	}
+	switch strings.TrimSpace(outcome) {
+	case "success_after_retry":
+		h.metrics.incEvent(managedOpenAIAPITransientSuccessAfterRetryMetric)
+	case "exhausted":
+		h.metrics.incEvent(managedOpenAIAPITransientExhaustedMetric)
+	}
+}
+
+func writePoolTransientExhaustionError(w http.ResponseWriter, err *poolTransientExhaustionError) {
+	attempts := 0
+	terminalReason := managedOpenAIAPITransientRetryClass
+	if err != nil {
+		if err.attempts > 0 {
+			attempts = err.attempts
+		}
+		terminalReason = normalizedManagedOpenAIAPITransientReason(err.terminalReason)
+	}
+	setManagedOpenAIAPITransientRetryHeaders(w.Header(), attempts, "exhausted", terminalReason)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{
+			"type":            "pool_transient_exhausted",
+			"code":            "pool_transient_exhausted",
+			"class":           terminalReason,
+			"terminal_reason": terminalReason,
+			"message":         "all compatible upstream seats returned transient overload before a successful response",
+			"attempts":        attempts,
+		},
+	})
+}
+
 func writeHTTPErrorWithOptionalRateLimit(w http.ResponseWriter, err error, fallbackStatus int) {
+	if poolErr, ok := asPoolTransientExhaustionError(err); ok {
+		writePoolTransientExhaustionError(w, poolErr)
+		return
+	}
 	if err == nil {
 		http.Error(w, "request failed", fallbackStatus)
 		return
@@ -1269,6 +1602,10 @@ func writeBufferedAttemptFailure(w http.ResponseWriter, lastStatus int, lastErr 
 
 func bufferedRetryTraceReason(statusCode int, bodyText string) string {
 	switch {
+	case hasProviderPolicyBlockMarkers(strings.ToLower(bodyText)):
+		return "provider_policy_block"
+	case hasManagedOpenAIAPITransientOverloadMarker(statusCode, bodyText):
+		return "transient_overload"
 	case statusCode == http.StatusTooManyRequests:
 		return "rate_limited"
 	case statusCode == http.StatusPaymentRequired && strings.Contains(bodyText, "deactivated_workspace"):
@@ -1316,10 +1653,22 @@ func (h *proxyHandler) completeBufferedRetryDisposition(reqID string, trace *req
 
 func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *requestTrace, acc *Account, resp *http.Response, refreshFailed bool, requestedModel, requestPath string, attempt, attempts int) (bool, error) {
 	var retryInspection bufferedRetryInspection
-	if needsBufferedRetryInspection(acc, resp.StatusCode) {
+	needsInspection := needsBufferedRetryInspection(acc, resp.StatusCode)
+	if needsInspection {
 		// Buffered retries never replay upstream bodies to the client, so one
 		// bounded semantic snapshot is enough for all status-specific branches.
 		retryInspection = inspectBufferedRetryStatus(resp, preCopyStatusInspectionLimit)
+	}
+
+	if len(retryInspection.Body) > 0 {
+		info := classifyUpstreamResponse(resp, retryInspection.Body)
+		if info.Class == upstreamProviderPolicyBlock {
+			err := h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body, requestedModel, requestPath)
+			if err == nil {
+				err = info
+			}
+			return h.completeBufferedRetryDisposition(reqID, trace, acc, resp, attempt, attempts, refreshFailed, retryInspection.Text, err, true, true)
+		}
 	}
 
 	if resp.StatusCode == http.StatusTooManyRequests && !isManagedCodexAPIKeyAccount(acc) {
@@ -1358,6 +1707,12 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 	if isRetryableStatus(resp.StatusCode) {
 		if isManagedCodexAPIKeyAccount(acc) {
 			err := h.applyPreCopyUpstreamStatusDisposition(reqID, acc, resp, refreshFailed, retryInspection.Body, requestedModel, requestPath)
+			if hasManagedOpenAIAPITransientOverloadMarker(resp.StatusCode, retryInspection.Text) {
+				if err == nil {
+					err = formatBufferedRetryStatusError(resp, retryInspection.Text)
+				}
+				err = &poolTransientExhaustionError{attempts: attempt, terminalReason: managedOpenAIAPITransientRetryClass, cause: err}
+			}
 			return h.completeBufferedRetryDisposition(reqID, trace, acc, resp, attempt, attempts, refreshFailed, retryInspection.Text, err, false, true)
 		}
 
@@ -1366,11 +1721,8 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 			if refreshFailed && acc.Type != AccountTypeCodex {
 				log.Printf("[%s] account %s DEAD: 401/403 refresh failed, body=%s", reqID, acc.ID, retryInspection.Text)
 			} else if !isPermanentCodexAuthFailure(resp, retryInspection.Body) {
-				// Always log 401/403 with error body and response headers for debugging.
-				var respHdrs []string
-				for k, v := range resp.Header {
-					respHdrs = append(respHdrs, fmt.Sprintf("%s=%s", k, v[0]))
-				}
+				// Always log 401/403 with error body and sanitized response headers for debugging.
+				respHdrs := sanitizeHeaderForLog(resp.Header)
 				acc.mu.Lock()
 				penalty := acc.Penalty
 				acc.mu.Unlock()
@@ -1381,6 +1733,9 @@ func (h *proxyHandler) applyBufferedRetryDisposition(reqID string, trace *reques
 		return h.completeBufferedRetryDisposition(reqID, trace, acc, resp, attempt, attempts, refreshFailed, retryInspection.Text, err, true, true)
 	}
 
+	if needsInspection {
+		resp.Body = io.NopCloser(bytes.NewReader(retryInspection.Body))
+	}
 	return false, nil
 }
 
@@ -1409,6 +1764,8 @@ func (h *proxyHandler) runBufferedAttemptContour(
 	exclude := map[string]bool{}
 	var lastErr error
 	var lastStatus int
+	transientRetryAttempts := 0
+	transientRetryClass := ""
 
 	for attempt := 1; attempt <= attempts; attempt++ {
 		acc, err := h.candidateSupportingPath(routePlan.Shape.ConversationID, exclude, routePlan.AccountType, routePlan.RequiredPlan, routePlan.Provider, routePlan.UpstreamPath, routePlan.Shape.RequestedModel, routePlan.DebugGeminiSeatID)
@@ -1444,9 +1801,33 @@ func (h *proxyHandler) runBufferedAttemptContour(
 			atomic.AddInt64(&acc.Inflight, -1)
 			atomic.AddInt64(&h.inflight, -1)
 			lastErr = retryErr
+			if poolTransientErr, ok := asPoolTransientExhaustionError(retryErr); ok {
+				transientRetryAttempts = poolTransientErr.attempts
+				transientRetryClass = normalizedManagedOpenAIAPITransientReason(poolTransientErr.terminalReason)
+				h.recordManagedOpenAIAPITransientRetryAttempt()
+			}
+			if isNonRetryableUpstreamError(retryErr) {
+				writeBufferedAttemptFailure(w, lastStatus, lastErr)
+				return nil, true
+			}
 			continue
 		}
 
+		if retry, retryErr := h.applyBufferedSSEPrestreamDisposition(reqID, trace, acc, routePlan.Provider, resp, routePlan.UpstreamPath, attempt, attempts); retry {
+			atomic.AddInt64(&acc.Inflight, -1)
+			atomic.AddInt64(&h.inflight, -1)
+			lastErr = retryErr
+			if isNonRetryableUpstreamError(retryErr) {
+				writeBufferedAttemptFailure(w, lastStatus, lastErr)
+				return nil, true
+			}
+			continue
+		}
+
+		if transientRetryAttempts > 0 {
+			annotateManagedOpenAIAPITransientRetryResponse(resp, attempt, "success_after_retry", transientRetryClass)
+			h.recordManagedOpenAIAPITransientRetryOutcome("success_after_retry")
+		}
 		return &bufferedAttemptSuccess{
 			acc:          acc,
 			resp:         resp,
@@ -1455,6 +1836,9 @@ func (h *proxyHandler) runBufferedAttemptContour(
 		}, false
 	}
 
+	if _, ok := asPoolTransientExhaustionError(lastErr); ok {
+		h.recordManagedOpenAIAPITransientRetryOutcome("exhausted")
+	}
 	writeBufferedAttemptFailure(w, lastStatus, lastErr)
 	return nil, true
 }
@@ -3580,6 +3964,10 @@ func (h *proxyHandler) tryOnce(
 			return nil, nil, false, err
 		}
 		if err := maybeTransformAnthropicMessagesGeminiResponse(routePlan.ResponseAdapter, routePlan.Shape.RequestedModel, resp); err != nil {
+			_ = resp.Body.Close()
+			return nil, nil, false, err
+		}
+		if err := maybeTransformCodexChatCompletionsResponsesResponse(routePlan.ResponseAdapter, routePlan.Shape.RequestedModel, resp); err != nil {
 			_ = resp.Body.Close()
 			return nil, nil, false, err
 		}

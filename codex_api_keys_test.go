@@ -43,6 +43,21 @@ func TestClassifyManagedOpenAIAPISSEErrorTreatsUsageLimitMessageAsRateLimit(t *t
 	}
 }
 
+func TestClassifyManagedOpenAIAPISSEErrorTreatsProviderPolicyAsNoSeatPoisonRetry(t *testing.T) {
+	data := []byte(`{"type":"response.failed","response":{"status":"failed","error":{"message":"This content was flagged for possible cybersecurity risk. Trusted Access for Cyber","code":"content_policy"}}}`)
+
+	disposition, ok := classifyManagedOpenAIAPISSEError(data)
+	if !ok {
+		t.Fatal("expected provider-policy failure to be classified as retryable")
+	}
+	if !disposition.Retry || !disposition.ProviderPolicyBlock {
+		t.Fatalf("expected provider-policy retry disposition, got %+v", disposition)
+	}
+	if disposition.MarkDead || disposition.RateLimit {
+		t.Fatalf("provider-policy block must not poison seat or rate-limit it, got %+v", disposition)
+	}
+}
+
 func TestClassifyManagedOpenAIAPISSEErrorIgnoresUnsupportedParameter(t *testing.T) {
 	data := []byte(`{"type":"error","error":{"message":"Unsupported parameter: 'max_output_tokens' is not supported with this model.","type":"invalid_request_error","code":"unsupported_parameter"}}`)
 

@@ -153,15 +153,18 @@ func (h *proxyHandler) serveHealth(w http.ResponseWriter) {
 
 func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 	type routingRow struct {
-		Eligible               bool       `json:"eligible"`
-		BlockReason            string     `json:"block_reason,omitempty"`
-		PrimaryUsedPct         float64    `json:"primary_used_pct"`
-		SecondaryUsedPct       float64    `json:"secondary_used_pct"`
-		PrimaryHeadroomPct     float64    `json:"primary_headroom_pct"`
-		SecondaryHeadroomPct   float64    `json:"secondary_headroom_pct"`
-		RecoveryAt             *time.Time `json:"recovery_at,omitempty"`
-		CodexRateLimitBypass   bool       `json:"codex_rate_limit_bypass,omitempty"`
-		PreemptiveThresholdPct float64    `json:"preemptive_threshold_pct,omitempty"`
+		Eligible                        bool       `json:"eligible"`
+		BlockReason                     string     `json:"block_reason,omitempty"`
+		PrimaryUsedPct                  float64    `json:"primary_used_pct"`
+		SecondaryUsedPct                float64    `json:"secondary_used_pct"`
+		PrimaryHeadroomPct              float64    `json:"primary_headroom_pct"`
+		SecondaryHeadroomPct            float64    `json:"secondary_headroom_pct"`
+		RecoveryAt                      *time.Time `json:"recovery_at,omitempty"`
+		CodexRateLimitBypass            bool       `json:"codex_rate_limit_bypass,omitempty"`
+		PreemptiveThresholdPct          float64    `json:"preemptive_threshold_pct,omitempty"`
+		SecondaryPreemptiveThresholdPct float64    `json:"secondary_preemptive_threshold_pct,omitempty"`
+		PrimaryHeadroomReservePct       float64    `json:"primary_headroom_reserve_pct,omitempty"`
+		SecondaryHeadroomReservePct     float64    `json:"secondary_headroom_reserve_pct,omitempty"`
 	}
 	type row struct {
 		ID                        string      `json:"id"`
@@ -195,8 +198,9 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 	h.pool.mu.RLock()
 	accounts := append([]*Account(nil), h.pool.accounts...)
 	h.pool.mu.RUnlock()
-
+	primaryReserve, secondaryReserve := h.pool.headroomReserves()
 	out := make([]row, 0, len(accounts))
+
 	for _, a := range accounts {
 		snapshot := snapshotAccountState(a, now, "", "")
 		out = append(out, row{
@@ -223,15 +227,18 @@ func (h *proxyHandler) serveAccounts(w http.ResponseWriter) {
 			Penalty:                   snapshot.Penalty,
 			Score:                     snapshot.Score,
 			Routing: routingRow{
-				Eligible:               snapshot.Routing.Eligible,
-				BlockReason:            snapshot.Routing.BlockReason,
-				PrimaryUsedPct:         snapshot.Routing.PrimaryUsed * 100,
-				SecondaryUsedPct:       snapshot.Routing.SecondaryUsed * 100,
-				PrimaryHeadroomPct:     snapshot.Routing.PrimaryHeadroom * 100,
-				SecondaryHeadroomPct:   snapshot.Routing.SecondaryHeadroom * 100,
-				RecoveryAt:             timePtrUTC(snapshot.Routing.RecoveryAt),
-				CodexRateLimitBypass:   snapshot.Routing.CodexRateLimitBypass,
-				PreemptiveThresholdPct: codexPreemptiveUsedThreshold * 100,
+				Eligible:                        snapshot.Routing.Eligible,
+				BlockReason:                     snapshot.Routing.BlockReason,
+				PrimaryUsedPct:                  snapshot.Routing.PrimaryUsed * 100,
+				SecondaryUsedPct:                snapshot.Routing.SecondaryUsed * 100,
+				PrimaryHeadroomPct:              snapshot.Routing.PrimaryHeadroom * 100,
+				SecondaryHeadroomPct:            snapshot.Routing.SecondaryHeadroom * 100,
+				RecoveryAt:                      timePtrUTC(snapshot.Routing.RecoveryAt),
+				CodexRateLimitBypass:            snapshot.Routing.CodexRateLimitBypass,
+				PreemptiveThresholdPct:          usedThresholdPctFromReserve(primaryReserve),
+				SecondaryPreemptiveThresholdPct: usedThresholdPctFromReserve(secondaryReserve),
+				PrimaryHeadroomReservePct:       normalizeLowHeadroomReservePct(primaryReserve) * 100,
+				SecondaryHeadroomReservePct:     normalizeLowHeadroomReservePct(secondaryReserve) * 100,
 			},
 			Usage:  snapshot.Usage,
 			Totals: snapshot.Totals,

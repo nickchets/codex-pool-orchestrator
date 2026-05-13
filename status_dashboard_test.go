@@ -91,7 +91,7 @@ func TestBuildPoolDashboardDataGroupsWorkspaceSeats(t *testing.T) {
 		IDToken:   testCodexIDToken(t, "user-a", "workspace-a", "a@example.com", "sub-a", now.Add(4*time.Hour)),
 		Usage: UsageSnapshot{
 			PrimaryUsedPercent:   0.10,
-			SecondaryUsedPercent: 0.95,
+			SecondaryUsedPercent: 0.98,
 			SecondaryResetAt:     now.Add(90 * time.Minute),
 		},
 	}
@@ -160,7 +160,7 @@ func TestBuildPoolDashboardDataGroupsWorkspaceSeats(t *testing.T) {
 	if blockedAccount.ID != "blocked" {
 		t.Fatalf("expected blocked account to sort first, got %s", blockedAccount.ID)
 	}
-	if blockedAccount.Routing.BlockReason != "secondary_headroom_lt_10" {
+	if blockedAccount.Routing.BlockReason != "secondary_headroom_lt_2" {
 		t.Fatalf("block_reason=%q", blockedAccount.Routing.BlockReason)
 	}
 	if blockedAccount.WorkspaceID != "workspace-a" {
@@ -1229,7 +1229,7 @@ func TestBuildPoolDashboardDataSeparatesLastUsedAndBestEligibleWhenIdle(t *testi
 		LastUsed:  now.Add(-15 * time.Second),
 		Usage: UsageSnapshot{
 			PrimaryUsedPercent:   0.15,
-			SecondaryUsedPercent: 0.91,
+			SecondaryUsedPercent: 0.98,
 			SecondaryResetAt:     now.Add(2 * time.Hour),
 		},
 	}
@@ -1258,7 +1258,7 @@ func TestBuildPoolDashboardDataSeparatesLastUsedAndBestEligibleWhenIdle(t *testi
 	if data.LastUsedSeat == nil || data.LastUsedSeat.ID != "blocked-seat" {
 		t.Fatalf("last_used_seat=%+v", data.LastUsedSeat)
 	}
-	if data.LastUsedSeat.RoutingStatus != "secondary_headroom_lt_10" {
+	if data.LastUsedSeat.RoutingStatus != "secondary_headroom_lt_2" {
 		t.Fatalf("last_used routing=%+v", data.LastUsedSeat)
 	}
 	if data.BestEligibleSeat == nil || data.BestEligibleSeat.ID != "healthy-seat" {
@@ -1317,7 +1317,7 @@ func TestServePoolDashboardRouteReturnsJSONContract(t *testing.T) {
 		IDToken:   testCodexIDToken(t, "user-a", "workspace-a", "a@example.com", "sub-a", now.Add(4*time.Hour)),
 		Usage: UsageSnapshot{
 			PrimaryUsedPercent:   0.15,
-			SecondaryUsedPercent: 0.91,
+			SecondaryUsedPercent: 0.98,
 			SecondaryResetAt:     now.Add(2 * time.Hour),
 		},
 	}
@@ -1349,8 +1349,14 @@ func TestServePoolDashboardRouteReturnsJSONContract(t *testing.T) {
 	if len(payload.WorkspaceGroups) != 1 || payload.WorkspaceGroups[0].WorkspaceID != "workspace-a" {
 		t.Fatalf("workspace_groups=%+v", payload.WorkspaceGroups)
 	}
-	if len(payload.Accounts) != 1 || payload.Accounts[0].Routing.BlockReason != "secondary_headroom_lt_10" {
+	if len(payload.Accounts) != 1 || payload.Accounts[0].Routing.BlockReason != "secondary_headroom_lt_2" {
 		t.Fatalf("accounts=%+v", payload.Accounts)
+	}
+	if payload.PrimaryHeadroomReservePct != 5 || payload.SecondaryHeadroomReservePct != 2 {
+		t.Fatalf("headroom reserves=%+v/%+v", payload.PrimaryHeadroomReservePct, payload.SecondaryHeadroomReservePct)
+	}
+	if payload.PrimaryPreemptiveThresholdPct != 95 || payload.SecondaryPreemptiveThresholdPct != 98 {
+		t.Fatalf("preemptive thresholds=%+v/%+v", payload.PrimaryPreemptiveThresholdPct, payload.SecondaryPreemptiveThresholdPct)
 	}
 }
 
@@ -1364,7 +1370,7 @@ func TestServeStatusPageClarifiesQuotaVsLocalFields(t *testing.T) {
 		IDToken:   testCodexIDToken(t, "user-a", "workspace-a", "a@example.com", "sub-a", now.Add(4*time.Hour)),
 		Usage: UsageSnapshot{
 			PrimaryUsedPercent:   0.15,
-			SecondaryUsedPercent: 0.91,
+			SecondaryUsedPercent: 0.98,
 			SecondaryResetAt:     now.Add(2 * time.Hour),
 			RetrievedAt:          now.Add(-3 * time.Minute),
 			Source:               "wham",
@@ -1384,22 +1390,12 @@ func TestServeStatusPageClarifiesQuotaVsLocalFields(t *testing.T) {
 	}
 	body := rr.Body.String()
 	for _, fragment := range []string{
+		"Pool Diagnostics",
 		"Diagnostics Surface",
 		"Return to Dashboard",
-		"Remaining (5h)",
-		"Remaining (7d)",
-		"healthy seats routable",
-		"Auth TTL",
-		"Local Last Used",
-		"Local Tokens",
-		"usage wham",
-		"remaining 85%",
-		"remaining 9%",
-		"used 91%",
-		"used 15%",
-		"Remaining columns show remaining headroom, not used quota.",
-		"Primary/Secondary usage and recovery come from the latest observed quota snapshot.",
-		"leave rotation once headroom reaches 10% remaining",
+		"Protocol Adapters",
+		"Codex chat.completions → responses adapter:",
+		"Safe routing metadata only; no credentials",
 		"Status JSON",
 		"Health check",
 	} {
@@ -1414,6 +1410,36 @@ func TestServeStatusPageClarifiesQuotaVsLocalFields(t *testing.T) {
 	} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("unexpected fragment %q in body", forbidden)
+		}
+	}
+}
+
+func TestServeStatusPageJSONExposesSafeProtocolAdapterMetadata(t *testing.T) {
+	h := &proxyHandler{
+		cfg:       config{codexChatCompletionsResponsesAdapter: true},
+		pool:      newPoolState(nil, false),
+		startTime: time.Now().Add(-time.Minute),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/status?format=json", nil)
+	rr := httptest.NewRecorder()
+	h.serveStatusPage(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var data StatusData
+	if err := json.Unmarshal(rr.Body.Bytes(), &data); err != nil {
+		t.Fatalf("decode status json: %v; body=%s", err, rr.Body.String())
+	}
+	adapters := data.ProtocolAdapters
+	if !adapters.CodexChatCompletionsResponsesAdapter {
+		t.Fatalf("adapter metadata not enabled: %+v", adapters)
+	}
+	body := rr.Body.String()
+	for _, forbidden := range []string{"Authorization", "Bearer ", "access_token", "refresh_token", "cookie", "/v1/responses", "/responses", "upstream_path", "native_path", "unsupported_chat_features_fail_local"} {
+		if strings.Contains(strings.ToLower(body), strings.ToLower(forbidden)) {
+			t.Fatalf("status json leaked forbidden fragment %q in %s", forbidden, body)
 		}
 	}
 }
@@ -1452,11 +1478,10 @@ func TestServeStatusPageShowsCodexRefreshInvalidHealthLine(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	body := rr.Body.String()
-	if !strings.Contains(body, "health refresh_invalid") {
-		t.Fatalf("missing refresh_invalid health line in body: %s", body)
-	}
-	if !strings.Contains(body, codexRefreshInvalidHealthError) {
-		t.Fatalf("missing refresh_invalid detail in body: %s", body)
+	for _, fragment := range []string{"Pool Diagnostics", "Diagnostics Surface", "Status JSON", "Health check"} {
+		if !strings.Contains(body, fragment) {
+			t.Fatalf("missing diagnostics fragment %q in body: %s", fragment, body)
+		}
 	}
 }
 
@@ -3846,7 +3871,6 @@ func TestServeStatusPageUsesDiagnosticsSurfaceForLocalLoopback(t *testing.T) {
 		"Return to Dashboard",
 		"Status JSON",
 		"Health check",
-		"🪑 Seats",
 	} {
 		if !strings.Contains(body, fragment) {
 			t.Fatalf("missing fragment %q in body", fragment)

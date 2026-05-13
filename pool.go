@@ -69,10 +69,17 @@ const (
 	routingDisplayStateBlocked         = "blocked"
 )
 
-// Codex seats leave rotation once usage reaches 90%, i.e. when remaining headroom is 10% or below.
-const codexPreemptiveUsedThreshold = 0.90
+// By default Codex seats leave rotation once usage reaches 95% on the primary
+// tracked window or 98% on the secondary tracked window, i.e. when remaining
+// headroom is 5% (primary) or 2% (secondary) or below. Deployments can
+// override the primary and secondary headroom reserves independently.
+const defaultPrimaryLowHeadroomReservePct = 0.05
 
-const defaultLowHeadroomReservePct = 1.0 - codexPreemptiveUsedThreshold
+const defaultSecondaryLowHeadroomReservePct = 0.02
+
+const codexPreemptiveUsedThreshold = 1.0 - defaultPrimaryLowHeadroomReservePct
+
+const defaultLowHeadroomReservePct = defaultPrimaryLowHeadroomReservePct
 
 type routingState struct {
 	Eligible               bool
@@ -168,6 +175,34 @@ func usageAtOrAbovePreemptiveThreshold(used float64) bool {
 	return usageAtOrAboveReserveThreshold(used, defaultLowHeadroomReservePct)
 }
 
+func formatHeadroomReservePctLabel(reserve float64) string {
+	reserve = normalizeLowHeadroomReservePct(reserve)
+	pct := fmt.Sprintf("%g", reserve*100)
+	return strings.ReplaceAll(pct, ".", "_")
+}
+
+func headroomBlockReason(prefix string, reserve float64) string {
+	return fmt.Sprintf("%s_lt_%s", prefix, formatHeadroomReservePctLabel(reserve))
+}
+
+func codexHeadroomBlockReason(primaryReserve, secondaryReserve float64) string {
+	primary := formatHeadroomReservePctLabel(primaryReserve)
+	secondary := formatHeadroomReservePctLabel(secondaryReserve)
+	if primary == secondary {
+		return fmt.Sprintf("codex_headroom_lt_%s", primary)
+	}
+	return fmt.Sprintf("codex_headroom_lt_primary_%s_secondary_%s", primary, secondary)
+}
+
+func usedThresholdPctFromReserve(reserve float64) float64 {
+	reserve = normalizeLowHeadroomReservePct(reserve)
+	threshold := 1.0 - reserve
+	if threshold < 0 {
+		threshold = 0
+	}
+	return threshold * 100
+}
+
 func earliestFutureTime(now time.Time, candidates ...time.Time) time.Time {
 	var earliest time.Time
 	for _, candidate := range candidates {
@@ -182,11 +217,12 @@ func earliestFutureTime(now time.Time, candidates ...time.Time) time.Time {
 }
 
 func routingStateLocked(a *Account, now time.Time, accountType AccountType, requiredPlan string) routingState {
-	return routingStateLockedWithReserve(a, now, accountType, requiredPlan, defaultLowHeadroomReservePct)
+	return routingStateLockedWithReserve(a, now, accountType, requiredPlan, defaultPrimaryLowHeadroomReservePct, defaultSecondaryLowHeadroomReservePct)
 }
 
-func routingStateLockedWithReserve(a *Account, now time.Time, accountType AccountType, requiredPlan string, lowHeadroomReservePct float64) routingState {
-	lowHeadroomReservePct = normalizeLowHeadroomReservePct(lowHeadroomReservePct)
+func routingStateLockedWithReserve(a *Account, now time.Time, accountType AccountType, requiredPlan string, primaryLowHeadroomReservePct float64, secondaryLowHeadroomReservePct float64) routingState {
+	primaryLowHeadroomReservePct = normalizeLowHeadroomReservePct(primaryLowHeadroomReservePct)
+	secondaryLowHeadroomReservePct = normalizeLowHeadroomReservePct(secondaryLowHeadroomReservePct)
 	if a == nil {
 		return routingState{Eligible: false, BlockReason: "missing_account"}
 	}
@@ -292,8 +328,8 @@ func routingStateLockedWithReserve(a *Account, now time.Time, accountType Accoun
 			}
 			return state
 		}
-		primaryBlocked := state.PrimaryHeadroomKnown && usageAtOrAboveReserveThreshold(primaryUsed, lowHeadroomReservePct)
-		secondaryBlocked := state.SecondaryHeadroomKnown && usageAtOrAboveReserveThreshold(secondaryUsed, lowHeadroomReservePct)
+		primaryBlocked := state.PrimaryHeadroomKnown && usageAtOrAboveReserveThreshold(primaryUsed, primaryLowHeadroomReservePct)
+		secondaryBlocked := state.SecondaryHeadroomKnown && usageAtOrAboveReserveThreshold(secondaryUsed, secondaryLowHeadroomReservePct)
 		if primaryBlocked || secondaryBlocked {
 			state.Eligible = false
 			state.BlockReason = "quota_pressured"
@@ -315,20 +351,20 @@ func routingStateLockedWithReserve(a *Account, now time.Time, accountType Accoun
 		return state
 	}
 	if a.Type == AccountTypeCodex && !isManagedCodexAPI {
-		primaryBlocked := usageAtOrAboveReserveThreshold(primaryUsed, lowHeadroomReservePct)
-		secondaryBlocked := usageAtOrAboveReserveThreshold(secondaryUsed, lowHeadroomReservePct)
+		primaryBlocked := usageAtOrAboveReserveThreshold(primaryUsed, primaryLowHeadroomReservePct)
+		secondaryBlocked := usageAtOrAboveReserveThreshold(secondaryUsed, secondaryLowHeadroomReservePct)
 		switch {
 		case primaryBlocked && secondaryBlocked:
 			state.Eligible = false
-			state.BlockReason = "codex_headroom_lt_10"
+			state.BlockReason = codexHeadroomBlockReason(primaryLowHeadroomReservePct, secondaryLowHeadroomReservePct)
 			state.RecoveryAt = earliestFutureTime(now, a.Usage.PrimaryResetAt, a.Usage.SecondaryResetAt)
 		case primaryBlocked:
 			state.Eligible = false
-			state.BlockReason = "primary_headroom_lt_10"
+			state.BlockReason = headroomBlockReason("primary_headroom", primaryLowHeadroomReservePct)
 			state.RecoveryAt = earliestFutureTime(now, a.Usage.PrimaryResetAt)
 		case secondaryBlocked:
 			state.Eligible = false
-			state.BlockReason = "secondary_headroom_lt_10"
+			state.BlockReason = headroomBlockReason("secondary_headroom", secondaryLowHeadroomReservePct)
 			state.RecoveryAt = earliestFutureTime(now, a.Usage.SecondaryResetAt)
 		}
 	}
@@ -1435,17 +1471,18 @@ func loadPool(dir string, registry *ProviderRegistry) ([]*Account, error) {
 
 // poolState wraps accounts with a mutex.
 type poolState struct {
-	mu                    sync.RWMutex
-	accounts              []*Account
-	convPin               map[string]string // conversation_id -> account ID
-	pendingClaims         map[string]int64
-	activeCodexID         string
-	activeAPIID           string
-	activeGeminiID        string
-	debug                 bool
-	rr                    uint64
-	tierThreshold         float64 // secondary usage % at which we stop preferring a tier
-	lowHeadroomReservePct float64 // minimum quota headroom required for new admissions (0 disables)
+	mu                             sync.RWMutex
+	accounts                       []*Account
+	convPin                        map[string]string // conversation_id -> account ID
+	pendingClaims                  map[string]int64
+	activeCodexID                  string
+	activeAPIID                    string
+	activeGeminiID                 string
+	debug                          bool
+	rr                             uint64
+	tierThreshold                  float64 // secondary usage % at which we stop preferring a tier
+	primaryLowHeadroomReservePct   float64 // minimum primary-window quota headroom required for new admissions (0 disables)
+	secondaryLowHeadroomReservePct float64 // minimum secondary-window quota headroom required for new admissions (0 disables)
 }
 
 type accountRuntimeState struct {
@@ -1459,12 +1496,13 @@ type accountRuntimeState struct {
 
 func newPoolState(accs []*Account, debug bool) *poolState {
 	return &poolState{
-		accounts:              accs,
-		convPin:               map[string]string{},
-		pendingClaims:         map[string]int64{},
-		debug:                 debug,
-		tierThreshold:         0.15,
-		lowHeadroomReservePct: defaultLowHeadroomReservePct,
+		accounts:                       accs,
+		convPin:                        map[string]string{},
+		pendingClaims:                  map[string]int64{},
+		debug:                          debug,
+		tierThreshold:                  0.15,
+		primaryLowHeadroomReservePct:   defaultPrimaryLowHeadroomReservePct,
+		secondaryLowHeadroomReservePct: defaultSecondaryLowHeadroomReservePct,
 	}
 }
 
@@ -1634,11 +1672,22 @@ func (p *poolState) effectiveInflightLocked(a *Account) int64 {
 }
 
 func (p *poolState) routingStateLocked(a *Account, now time.Time, accountType AccountType, requiredPlan string) routingState {
-	reserve := defaultLowHeadroomReservePct
+	primaryReserve := defaultPrimaryLowHeadroomReservePct
+	secondaryReserve := defaultSecondaryLowHeadroomReservePct
 	if p != nil {
-		reserve = p.lowHeadroomReservePct
+		primaryReserve = p.primaryLowHeadroomReservePct
+		secondaryReserve = p.secondaryLowHeadroomReservePct
 	}
-	return routingStateLockedWithReserve(a, now, accountType, requiredPlan, reserve)
+	return routingStateLockedWithReserve(a, now, accountType, requiredPlan, primaryReserve, secondaryReserve)
+}
+
+func (p *poolState) headroomReserves() (float64, float64) {
+	if p == nil {
+		return defaultPrimaryLowHeadroomReservePct, defaultSecondaryLowHeadroomReservePct
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.primaryLowHeadroomReservePct, p.secondaryLowHeadroomReservePct
 }
 
 func (p *poolState) pinnedEligibleCandidateLocked(now time.Time, conversationID string, exclude map[string]bool, accountType AccountType, requiredPlan string) *Account {

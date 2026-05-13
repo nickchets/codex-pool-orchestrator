@@ -143,8 +143,12 @@ func (h *proxyHandler) handleCodexSSEFailureEvent(reqID string, acc *Account, da
 
 	managedStreamFailureOnce.Do(func() {
 		*managedStreamFailed = true
-		now := time.Now().UTC()
+		if disposition.ProviderPolicyBlock {
+			log.Printf("[%s] codex seat %s stream provider policy block: action=no_seat_penalty reason=%s", reqID, acc.ID, disposition.Reason)
+			return
+		}
 
+		now := time.Now().UTC()
 		switch {
 		case isManagedCodexAPIKeyAccount(acc):
 			applyManagedOpenAIAPIDisposition(acc, disposition, nil, now)
